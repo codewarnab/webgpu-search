@@ -35,6 +35,22 @@
         </div>
       </header>
 
+      <!-- WebGPU Fallback / Diagnostic Banner -->
+      <div id="webgpu-warning-banner" class="warning-banner" style="display: none;">
+        <div class="warning-banner-header">
+          <span class="warning-banner-icon">⚠️</span>
+          <strong>WebGPU is currently disabled in your browser &mdash; Running in CPU Fallback Mode (uFuzzy & Native JS)</strong>
+        </div>
+        <div class="warning-banner-body">
+          <p>Chrome says WebGPU is supported, but it is often turned off on laptops due to hardware acceleration toggles or driver blocklists. To enable WebGPU:</p>
+          <ol>
+            <li>Open <code>chrome://settings/system</code> &rarr; Ensure <strong>"Use graphics acceleration when available"</strong> is <strong>ON</strong> &rarr; Click <strong>Relaunch</strong>.</li>
+            <li>If still not working, open <code>chrome://flags/#enable-unsafe-webgpu</code> &rarr; Set to <strong>Enabled</strong> &rarr; Click <strong>Relaunch</strong>.</li>
+            <li>Verify by opening <code>chrome://gpu</code> and checking that <strong>WebGPU</strong> reads <em>"Hardware accelerated"</em>.</li>
+          </ol>
+        </div>
+      </div>
+
       <div class="dashboard-grid">
         <!-- Interactive Search Playground -->
         <div class="card">

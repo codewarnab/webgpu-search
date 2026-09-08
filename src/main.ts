@@ -70,23 +70,28 @@ async function init() {
     (window as any).cpuEngine = cpuEngine;
 
     const isSupported = await gpuEngine.init();
+    const warningBanner = document.getElementById('webgpu-warning-banner');
+
     if (!isSupported) {
-        webgpuBadge.textContent = 'WebGPU Unsupported';
+        if (warningBanner) warningBanner.style.display = 'block';
+        webgpuBadge.textContent = 'WebGPU Disabled (CPU Mode)';
         webgpuBadge.style.background = 'rgba(239, 68, 68, 0.2)';
         webgpuBadge.style.color = '#ef4444';
-        hwAdapter.textContent = 'WebGPU not available in this browser';
-        hwVendor.textContent = 'Use Chrome/Edge/Firefox with WebGPU enabled';
-        return;
+        hwAdapter.textContent = 'Disabled or Blocked by Browser';
+        hwVendor.textContent = 'See troubleshooting steps above';
+        hwBuffer.textContent = 'N/A';
+        meterGpuVal.textContent = 'Disabled';
+        meterGpuSub.textContent = 'WebGPU unavailable';
+    } else {
+        // Populate Hardware Info
+        const info = gpuEngine.adapterInfo!;
+        webgpuBadge.textContent = 'WebGPU Ready';
+        webgpuBadge.style.background = 'rgba(16, 185, 129, 0.15)';
+        webgpuBadge.style.color = '#10b981';
+        hwAdapter.textContent = `${info.vendor} - ${info.device}`;
+        hwVendor.textContent = `${info.architecture} (Timestamp Query: ${info.hasTimestampQuery ? 'Yes' : 'No'})`;
+        hwBuffer.textContent = `${info.maxBufferSizeMB} MB`;
     }
-
-    // Populate Hardware Info
-    const info = gpuEngine.adapterInfo!;
-    webgpuBadge.textContent = 'WebGPU Ready';
-    webgpuBadge.style.background = 'rgba(16, 185, 129, 0.15)';
-    webgpuBadge.style.color = '#10b981';
-    hwAdapter.textContent = `${info.vendor} - ${info.device}`;
-    hwVendor.textContent = `${info.architecture} (Timestamp Query: ${info.hasTimestampQuery ? 'Yes' : 'No'})`;
-    hwBuffer.textContent = `${info.maxBufferSizeMB} MB`;
 
     // Load Initial Dataset
     await switchDataset(100_000);
@@ -224,12 +229,16 @@ async function switchDataset(size: number) {
     currentDataset = generateDataset(size);
     const genTime = performance.now() - t0;
 
-    activeDatasetSize.textContent = `Uploading ${size.toLocaleString()} items to GPU VRAM...`;
+    activeDatasetSize.textContent = gpuEngine.isReady
+        ? `Uploading ${size.toLocaleString()} items to GPU VRAM...`
+        : `Preparing ${size.toLocaleString()} items in RAM...`;
     await new Promise(r => setTimeout(r, 20));
 
     const { uploadTimeMs } = await gpuEngine.loadDataset(currentDataset);
 
-    activeDatasetSize.textContent = `${size.toLocaleString()} items (Gen: ${genTime.toFixed(0)}ms, VRAM upload: ${uploadTimeMs.toFixed(1)}ms)`;
+    activeDatasetSize.textContent = gpuEngine.isReady
+        ? `${size.toLocaleString()} items (Gen: ${genTime.toFixed(0)}ms, VRAM upload: ${uploadTimeMs.toFixed(1)}ms)`
+        : `${size.toLocaleString()} items (Gen: ${genTime.toFixed(0)}ms, CPU Ready)`;
     btnReloadData.disabled = false;
     datasetSizeSelect.disabled = false;
 
@@ -259,13 +268,14 @@ async function executeLiveSearch() {
         return;
     }
 
-    // 1. WebGPU Retained Search
-    let gpuResult: SearchResult;
-    try {
-        gpuResult = await gpuEngine.search(query, { mode, maxResults: 1000 });
-    } catch (err) {
-        console.error('GPU search error:', err);
-        return;
+    // 1. WebGPU Retained Search (if available)
+    let gpuResult: SearchResult | null = null;
+    if (gpuEngine.isReady) {
+        try {
+            gpuResult = await gpuEngine.search(query, { mode, maxResults: 1000 });
+        } catch (err) {
+            console.error('GPU search error:', err);
+        }
     }
 
     // 2. uFuzzy CPU Search
@@ -275,30 +285,43 @@ async function executeLiveSearch() {
     const nativeResult: CPUSearchResult = cpuEngine.searchNative(currentDataset.strings, query, 1000);
 
     // Update Meter Displays
-    const gpuTotal = gpuResult.timings.totalMs;
     const ufuzzyTotal = ufuzzyResult.durationMs;
     const nativeTotal = nativeResult.durationMs;
-
-    meterGpuVal.textContent = `${gpuTotal.toFixed(2)} ms`;
-    meterGpuSub.textContent = `Dispatch: ${gpuResult.timings.gpuDispatchMs.toFixed(2)}ms | Readback: ${gpuResult.timings.readbackMs.toFixed(2)}ms`;
 
     meterUfuzzyVal.textContent = `${ufuzzyTotal.toFixed(2)} ms`;
     meterNativeVal.textContent = `${nativeTotal.toFixed(2)} ms`;
 
-    // Highlight Winner
     resetMeterHighlights();
-    const minTime = Math.min(gpuTotal, ufuzzyTotal, nativeTotal);
-    if (minTime === gpuTotal) {
-        meterGpu.classList.add('winner');
-    } else if (minTime === ufuzzyTotal) {
-        meterUfuzzy.classList.add('winner');
-    } else {
-        meterNative.classList.add('winner');
-    }
 
-    // Render Results List
-    resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU) | ${ufuzzyResult.totalMatches.toLocaleString()} (uFuzzy)`;
-    renderResults(gpuResult.results, query);
+    if (gpuEngine.isReady && gpuResult) {
+        const gpuTotal = gpuResult.timings.totalMs;
+        meterGpuVal.textContent = `${gpuTotal.toFixed(2)} ms`;
+        meterGpuSub.textContent = `Dispatch: ${gpuResult.timings.gpuDispatchMs.toFixed(2)}ms | Readback: ${gpuResult.timings.readbackMs.toFixed(2)}ms`;
+
+        const minTime = Math.min(gpuTotal, ufuzzyTotal, nativeTotal);
+        if (minTime === gpuTotal) {
+            meterGpu.classList.add('winner');
+        } else if (minTime === ufuzzyTotal) {
+            meterUfuzzy.classList.add('winner');
+        } else {
+            meterNative.classList.add('winner');
+        }
+
+        resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU) | ${ufuzzyResult.totalMatches.toLocaleString()} (uFuzzy)`;
+        renderResults(gpuResult.results, query);
+    } else {
+        meterGpuVal.textContent = 'Disabled';
+        meterGpuSub.textContent = 'WebGPU unavailable';
+
+        if (ufuzzyTotal <= nativeTotal) {
+            meterUfuzzy.classList.add('winner');
+        } else {
+            meterNative.classList.add('winner');
+        }
+
+        resultsCountSummary.textContent = `Found ${ufuzzyResult.totalMatches.toLocaleString()} matches (uFuzzy) | ${nativeResult.totalMatches.toLocaleString()} (JS Native)`;
+        renderResults(ufuzzyResult.results, query);
+    }
 }
 
 function resetMeterHighlights() {
@@ -307,7 +330,7 @@ function resetMeterHighlights() {
     meterNative.classList.remove('winner');
 }
 
-function renderResults(results: Array<{ index: number; score: number; text?: string }>, query: string) {
+function renderResults(results: Array<{ index: number; score?: number; text?: string }>, query: string) {
     if (results.length === 0) {
         resultsList.innerHTML = '<div style="color: var(--text-muted); text-align: center; margin-top: 2rem;">No matching items found.</div>';
         return;
@@ -339,9 +362,10 @@ function renderResults(results: Array<{ index: number; score: number; text?: str
             highlightedHtml = escapeHtml(text);
         }
 
+        const scoreInfo = item.score !== undefined ? ` | score: ${item.score}` : '';
         div.innerHTML = `
             <div>${highlightedHtml}</div>
-            <div class="result-score">#${item.index} | score: ${item.score}</div>
+            <div class="result-score">#${item.index}${scoreInfo}</div>
         `;
         fragment.appendChild(div);
     }
@@ -456,19 +480,27 @@ async function runFullBenchmark() {
 function appendBenchmarkTableRow(tbody: HTMLElement, row: BenchmarkRowResult) {
     const tr = document.createElement('tr');
 
-    const crossoverBadge = row.crossover.gpuRetainedBeatsUfuzzy
-        ? `<span class="tag-crossover-win">⚡ GPU Win (${row.retainedVsUfuzzySpeedup}x)</span>`
-        : `<span class="tag-crossover-loss">CPU Wins (${(1 / row.retainedVsUfuzzySpeedup).toFixed(1)}x)</span>`;
+    const crossoverBadge = row.gpuRetained.totalMs === 0
+        ? `<span class="tag-crossover-loss">CPU Mode (GPU Off)</span>`
+        : row.crossover.gpuRetainedBeatsUfuzzy
+            ? `<span class="tag-crossover-win">⚡ GPU Win (${row.retainedVsUfuzzySpeedup}x)</span>`
+            : `<span class="tag-crossover-loss">CPU Wins (${(1 / row.retainedVsUfuzzySpeedup).toFixed(1)}x)</span>`;
+
+    const gpuRetainedTotal = row.gpuRetained.totalMs > 0 ? `${row.gpuRetained.totalMs} ms` : 'N/A';
+    const gpuDispatch = row.gpuRetained.gpuDispatchMs > 0 ? `${row.gpuRetained.gpuDispatchMs} ms` : '-';
+    const gpuReadback = row.gpuRetained.readbackMs > 0 ? `${row.gpuRetained.readbackMs} ms` : '-';
+    const gpuColdTotal = row.gpuCold.totalMs > 0 ? `${row.gpuCold.totalMs} ms` : 'N/A';
+    const speedupText = row.retainedVsUfuzzySpeedup > 0 ? `<strong>${row.retainedVsUfuzzySpeedup}x</strong>` : '-';
 
     tr.innerHTML = `
         <td><strong>${row.datasetSize.toLocaleString()}</strong></td>
-        <td>${row.gpuRetained.gpuDispatchMs} ms</td>
-        <td>${row.gpuRetained.readbackMs} ms</td>
-        <td style="color: var(--color-gpu); font-weight: 600;">${row.gpuRetained.totalMs} ms</td>
-        <td style="color: var(--text-muted);">${row.gpuCold.totalMs} ms</td>
+        <td>${gpuDispatch}</td>
+        <td>${gpuReadback}</td>
+        <td style="color: var(--color-gpu); font-weight: 600;">${gpuRetainedTotal}</td>
+        <td style="color: var(--text-muted);">${gpuColdTotal}</td>
         <td style="color: var(--color-ufuzzy); font-weight: 600;">${row.ufuzzyMs} ms</td>
         <td style="color: var(--color-native);">${row.jsNativeMs} ms</td>
-        <td><strong>${row.retainedVsUfuzzySpeedup}x</strong></td>
+        <td>${speedupText}</td>
         <td>${crossoverBadge}</td>
     `;
     tbody.appendChild(tr);
@@ -476,7 +508,7 @@ function appendBenchmarkTableRow(tbody: HTMLElement, row: BenchmarkRowResult) {
 
 function getChartMeta(query: string, results: BenchmarkRowResult[]): { subtitle: string; speedupBadge: string } {
     const hw = gpuEngine?.adapterInfo;
-    const gpuName = hw ? `${hw.vendor} - ${hw.device} (${hw.architecture})` : 'WebGPU High-Performance Device';
+    const gpuName = hw ? `${hw.vendor} - ${hw.device} (${hw.architecture})` : 'WebGPU Disabled (CPU Fallback)';
     const subtitle = `Hardware: ${gpuName} | Query: "${query}" | Dataset: 10k to 2M rows`;
 
     let maxSpeedup = 0;
@@ -490,7 +522,7 @@ function getChartMeta(query: string, results: BenchmarkRowResult[]): { subtitle:
 
     const speedupBadge = maxSpeedup > 1
         ? `⚡ Max GPU Speedup: ${maxSpeedup}x (${maxSpeedupSize.toLocaleString()} rows)`
-        : '';
+        : (!gpuEngine?.isReady ? 'WebGPU Disabled' : '');
 
     return { subtitle, speedupBadge };
 }
@@ -721,7 +753,9 @@ function drawBenchmarkChart(
 
     drawSeries('#a855f7', r => r.jsNativeMs, -8);
     drawSeries('#f59e0b', r => r.ufuzzyMs, -8);
-    drawSeries('#38bdf8', r => r.gpuRetained.totalMs, 14);
+    if (results.some(r => r.gpuRetained.totalMs > 0)) {
+        drawSeries('#38bdf8', r => r.gpuRetained.totalMs, 14);
+    }
 }
 
 // Start application

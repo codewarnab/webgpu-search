@@ -54,6 +54,10 @@ export class WebGPUEngine {
 
     public adapterInfo: AdapterInfo | null = null;
 
+    get isReady(): boolean {
+        return this.device !== null;
+    }
+
     /**
      * Check WebGPU support and initialize device and pipelines
      */
@@ -64,9 +68,15 @@ export class WebGPUEngine {
         }
 
         try {
+            // First try high-performance (discrete GPU)
             this.adapter = await navigator.gpu.requestAdapter({
                 powerPreference: 'high-performance'
             });
+
+            // Fallback to default/integrated GPU if high-performance is null
+            if (!this.adapter) {
+                this.adapter = await navigator.gpu.requestAdapter();
+            }
 
             if (!this.adapter) {
                 console.error('No suitable GPUAdapter found.');
@@ -102,14 +112,20 @@ export class WebGPUEngine {
                 hasTimestampQuery: hasTimestamp
             };
 
-            this.device = await this.adapter.requestDevice({
-                requiredFeatures,
-                requiredLimits: {
-                    maxBufferSize: limits.maxBufferSize,
-                    maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
-                    maxComputeWorkgroupsPerDimension: limits.maxComputeWorkgroupsPerDimension
-                }
-            });
+            // Request device with adapter limits, fallback to standard if driver rejects high limits
+            try {
+                this.device = await this.adapter.requestDevice({
+                    requiredFeatures,
+                    requiredLimits: {
+                        maxBufferSize: limits.maxBufferSize,
+                        maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
+                        maxComputeWorkgroupsPerDimension: limits.maxComputeWorkgroupsPerDimension
+                    }
+                });
+            } catch (limitErr) {
+                console.warn('requestDevice with custom limits failed, falling back to default limits:', limitErr);
+                this.device = await this.adapter.requestDevice({ requiredFeatures });
+            }
 
             // Create compute pipelines
             const substringModule = this.device.createShaderModule({
@@ -185,7 +201,11 @@ export class WebGPUEngine {
      * Upload dataset to GPU VRAM for retained search
      */
     async loadDataset(dataset: Dataset): Promise<{ uploadTimeMs: number }> {
-        if (!this.device) throw new Error('WebGPU not initialized');
+        if (!this.device) {
+            this.currentDatasetSize = dataset.size;
+            this.currentStrings = dataset.strings;
+            return { uploadTimeMs: 0 };
+        }
 
         if (this.recordsBuffer) {
             this.recordsBuffer.destroy();
@@ -223,7 +243,18 @@ export class WebGPUEngine {
 
     private async searchInternal(query: string, options: SearchOptions): Promise<SearchResult> {
         if (!this.device || !this.recordsBuffer || !this.uniformBuffer || !this.outputBuffer || !this.stagingBuffer) {
-            throw new Error('WebGPU engine or dataset not ready');
+            return {
+                query,
+                mode: options.mode,
+                totalMatches: 0,
+                results: [],
+                timings: {
+                    queryUploadMs: 0,
+                    gpuDispatchMs: 0,
+                    readbackMs: 0,
+                    totalMs: 0
+                }
+            };
         }
 
         const cleanQuery = query.trim();
@@ -344,6 +375,15 @@ export class WebGPUEngine {
      * Cold search: includes full dataset creation & upload in the timing measurement
      */
     async searchCold(dataset: Dataset, query: string, options: SearchOptions): Promise<ColdSearchResult> {
+        if (!this.device) {
+            const warmResult = await this.search(query, options);
+            return {
+                ...warmResult,
+                datasetUploadMs: 0,
+                coldTotalMs: 0
+            };
+        }
+
         const tUploadStart = performance.now();
         await this.loadDataset(dataset);
         const datasetUploadMs = performance.now() - tUploadStart;

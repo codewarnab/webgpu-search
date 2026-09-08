@@ -82,32 +82,37 @@ export class BenchmarkRunner {
                 });
             }
 
-            // 1. Benchmark GPU Cold (measure upload + query once)
-            const coldRes = await this.gpuEngine.searchCold(dataset, query, { mode, maxResults: 1000 });
-
-            // 2. Benchmark GPU Retained (data stays in VRAM, query multiple times)
-            // Warmup
-            await this.gpuEngine.search(query, { mode, maxResults: 1000 });
-
+            // 1. Benchmark GPU Cold & Retained (if GPU available)
+            let coldRes = { uploadMs: 0, coldTotalMs: 0 };
             let gpuRetainedTotal = 0;
             let gpuQueryUpload = 0;
             let gpuDispatch = 0;
             let gpuReadback = 0;
             let gpuMatches = 0;
 
-            for (let i = 0; i < iterations; i++) {
-                const res = await this.gpuEngine.search(query, { mode, maxResults: 1000 });
-                gpuRetainedTotal += res.timings.totalMs;
-                gpuQueryUpload += res.timings.queryUploadMs;
-                gpuDispatch += res.timings.gpuDispatchMs;
-                gpuReadback += res.timings.readbackMs;
-                gpuMatches = res.totalMatches;
-            }
+            if (this.gpuEngine.isReady) {
+                // 1. Benchmark GPU Cold (measure upload + query once)
+                const cold = await this.gpuEngine.searchCold(dataset, query, { mode, maxResults: 1000 });
+                coldRes = { uploadMs: cold.datasetUploadMs, coldTotalMs: cold.coldTotalMs };
 
-            gpuRetainedTotal /= iterations;
-            gpuQueryUpload /= iterations;
-            gpuDispatch /= iterations;
-            gpuReadback /= iterations;
+                // 2. Benchmark GPU Retained (data stays in VRAM, query multiple times)
+                // Warmup
+                await this.gpuEngine.search(query, { mode, maxResults: 1000 });
+
+                for (let i = 0; i < iterations; i++) {
+                    const res = await this.gpuEngine.search(query, { mode, maxResults: 1000 });
+                    gpuRetainedTotal += res.timings.totalMs;
+                    gpuQueryUpload += res.timings.queryUploadMs;
+                    gpuDispatch += res.timings.gpuDispatchMs;
+                    gpuReadback += res.timings.readbackMs;
+                    gpuMatches = res.totalMatches;
+                }
+
+                gpuRetainedTotal /= iterations;
+                gpuQueryUpload /= iterations;
+                gpuDispatch /= iterations;
+                gpuReadback /= iterations;
+            }
 
             // 3. Benchmark CPU uFuzzy
             // Warmup
@@ -135,9 +140,9 @@ export class BenchmarkRunner {
             }
             jsNativeTotal /= iterations;
 
-            const retainedVsUfuzzySpeedup = Number((ufuzzyTotal / gpuRetainedTotal).toFixed(2));
-            const retainedVsNativeSpeedup = Number((jsNativeTotal / gpuRetainedTotal).toFixed(2));
-            const coldVsUfuzzySpeedup = Number((ufuzzyTotal / coldRes.coldTotalMs).toFixed(2));
+            const retainedVsUfuzzySpeedup = gpuRetainedTotal > 0 ? Number((ufuzzyTotal / gpuRetainedTotal).toFixed(2)) : 0;
+            const retainedVsNativeSpeedup = gpuRetainedTotal > 0 ? Number((jsNativeTotal / gpuRetainedTotal).toFixed(2)) : 0;
+            const coldVsUfuzzySpeedup = coldRes.coldTotalMs > 0 ? Number((ufuzzyTotal / coldRes.coldTotalMs).toFixed(2)) : 0;
 
             const rowResult: BenchmarkRowResult = {
                 datasetSize: size,
@@ -150,7 +155,7 @@ export class BenchmarkRunner {
                     readbackMs: Number(gpuReadback.toFixed(2))
                 },
                 gpuCold: {
-                    uploadMs: Number(coldRes.datasetUploadMs.toFixed(2)),
+                    uploadMs: Number(coldRes.uploadMs.toFixed(2)),
                     totalMs: Number(coldRes.coldTotalMs.toFixed(2))
                 },
                 ufuzzyMs: Number(ufuzzyTotal.toFixed(2)),
@@ -159,9 +164,9 @@ export class BenchmarkRunner {
                 retainedVsNativeSpeedup,
                 coldVsUfuzzySpeedup,
                 crossover: {
-                    gpuRetainedBeatsUfuzzy: gpuRetainedTotal < ufuzzyTotal,
-                    gpuRetainedBeatsNative: gpuRetainedTotal < jsNativeTotal,
-                    gpuColdBeatsUfuzzy: coldRes.coldTotalMs < ufuzzyTotal
+                    gpuRetainedBeatsUfuzzy: gpuRetainedTotal > 0 && gpuRetainedTotal < ufuzzyTotal,
+                    gpuRetainedBeatsNative: gpuRetainedTotal > 0 && gpuRetainedTotal < jsNativeTotal,
+                    gpuColdBeatsUfuzzy: coldRes.coldTotalMs > 0 && coldRes.coldTotalMs < ufuzzyTotal
                 },
                 matchCount: {
                     gpu: gpuMatches,
