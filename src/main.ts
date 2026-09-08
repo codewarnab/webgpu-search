@@ -2,7 +2,7 @@ import { WebGPUEngine, type SearchResult } from './webgpu-engine.ts';
 import { CPUEngine, type CPUSearchResult } from './cpu-engine.ts';
 import { generateDataset, type Dataset } from './dataset.ts';
 import { BenchmarkRunner, type BenchmarkRowResult } from './benchmark.ts';
-import { svgToPngBlob, generateBenchmarkCsv, downloadBlob, downloadFullReportZip } from './export.ts';
+import { svgToPngBlob, generateBenchmarkCsv, downloadBlob } from './export.ts';
 
 // State
 let gpuEngine: WebGPUEngine;
@@ -56,7 +56,7 @@ const chartSubstring = document.getElementById('benchmark-chart-substring') as u
 const chartFuzzy = document.getElementById('benchmark-chart-fuzzy') as unknown as SVGSVGElement;
 
 // Download Buttons
-const btnDownloadZip = document.getElementById('btn-download-zip') as HTMLButtonElement;
+const btnDownloadAll = document.getElementById('btn-download-all') as HTMLButtonElement;
 const btnDownloadCsv = document.getElementById('btn-download-csv') as HTMLButtonElement;
 const btnDownloadPngSub = document.getElementById('btn-download-png-sub') as HTMLButtonElement;
 const btnDownloadPngFuz = document.getElementById('btn-download-png-fuz') as HTMLButtonElement;
@@ -139,24 +139,34 @@ async function init() {
         runFullBenchmark();
     });
 
-    // Export Handlers
-    btnDownloadZip.addEventListener('click', async () => {
-        btnDownloadZip.disabled = true;
-        btnDownloadZip.textContent = '⏳ Packaging ZIP...';
+    // Export Handlers (Direct downloads: NO ZIP)
+    btnDownloadAll.addEventListener('click', async () => {
+        btnDownloadAll.disabled = true;
+        btnDownloadAll.textContent = '⏳ Downloading 3 Files...';
         try {
-            await downloadFullReportZip(
-                gpuEngine.adapterInfo,
-                substringBenchmarkResults,
-                fuzzyBenchmarkResults,
-                chartSubstring,
-                chartFuzzy
-            );
+            // 1. Substring Chart PNG
+            const subBlob = await svgToPngBlob(chartSubstring);
+            downloadBlob(subBlob, 'chart_substring_benchmark.png');
+
+            // Brief pause so browser doesn't drop multiple downloads
+            await new Promise(r => setTimeout(r, 200));
+
+            // 2. Fuzzy Chart PNG
+            const fuzBlob = await svgToPngBlob(chartFuzzy);
+            downloadBlob(fuzBlob, 'chart_fuzzy_benchmark.png');
+
+            await new Promise(r => setTimeout(r, 200));
+
+            // 3. CSV Spreadsheet
+            const csv = generateBenchmarkCsv(gpuEngine.adapterInfo, substringBenchmarkResults, fuzzyBenchmarkResults);
+            const csvBlob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            downloadBlob(csvBlob, `webgpu_search_benchmark_${new Date().toISOString().slice(0, 10)}.csv`);
         } catch (err) {
-            console.error('ZIP generation failed:', err);
-            alert('Failed to generate ZIP package: ' + err);
+            console.error('Download error:', err);
+            alert('Failed to download benchmark assets: ' + err);
         } finally {
-            btnDownloadZip.disabled = false;
-            btnDownloadZip.textContent = '📦 Download Full Report (.ZIP: CSV + PNGs)';
+            btnDownloadAll.disabled = false;
+            btnDownloadAll.textContent = '📥 Download All (2 Images + 1 CSV File)';
         }
     });
 
@@ -347,7 +357,7 @@ function escapeHtml(str: string): string {
 // Full Matrix Benchmark Execution (Runs BOTH Substring and Fuzzy algorithms)
 async function runFullBenchmark() {
     btnRunBenchmark.disabled = true;
-    btnDownloadZip.disabled = true;
+    btnDownloadAll.disabled = true;
     btnDownloadCsv.disabled = true;
     btnDownloadPngSub.disabled = true;
     btnDownloadPngFuz.disabled = true;
@@ -420,7 +430,7 @@ async function runFullBenchmark() {
         };
 
         // Enable download buttons
-        btnDownloadZip.disabled = false;
+        btnDownloadAll.disabled = false;
         btnDownloadCsv.disabled = false;
         btnDownloadPngSub.disabled = false;
         btnDownloadPngFuz.disabled = false;

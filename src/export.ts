@@ -1,4 +1,3 @@
-import JSZip from 'jszip';
 import type { BenchmarkRowResult } from './benchmark.ts';
 import type { AdapterInfo } from './webgpu-engine.ts';
 
@@ -119,58 +118,4 @@ export function downloadBlob(blob: Blob, filename: string) {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-}
-
-/**
- * Packages all benchmark assets (CSV + PNGs + Specs JSON) into a single ZIP file
- */
-export async function downloadFullReportZip(
-    adapterInfo: AdapterInfo | null,
-    substringResults: BenchmarkRowResult[],
-    fuzzyResults: BenchmarkRowResult[],
-    substringSvg: SVGSVGElement | null,
-    fuzzySvg: SVGSVGElement | null
-) {
-    const zip = new JSZip();
-
-    // 1. Add CSV
-    const csvContent = generateBenchmarkCsv(adapterInfo, substringResults, fuzzyResults);
-    zip.file('benchmark_results.csv', csvContent);
-
-    // 2. Add System Specs JSON
-    const specs = {
-        timestamp: new Date().toISOString(),
-        hardware: adapterInfo,
-        browser: navigator.userAgent,
-        summary: {
-            substringRuns: substringResults.length,
-            fuzzyRuns: fuzzyResults.length,
-            testedSizes: substringResults.map(r => r.datasetSize)
-        }
-    };
-    zip.file('system_specs.json', JSON.stringify(specs, null, 2));
-
-    // 3. Add PNG charts
-    if (substringSvg) {
-        try {
-            const blob = await svgToPngBlob(substringSvg);
-            zip.file('chart_substring_benchmark.png', blob);
-        } catch (err) {
-            console.warn('Could not render substring PNG:', err);
-        }
-    }
-
-    if (fuzzySvg) {
-        try {
-            const blob = await svgToPngBlob(fuzzySvg);
-            zip.file('chart_fuzzy_benchmark.png', blob);
-        } catch (err) {
-            console.warn('Could not render fuzzy PNG:', err);
-        }
-    }
-
-    // Generate ZIP and trigger download
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
-    const dateStr = new Date().toISOString().slice(0, 10);
-    downloadBlob(zipBlob, `webgpu_search_benchmark_${dateStr}.zip`);
 }
