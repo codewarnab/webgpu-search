@@ -144,6 +144,18 @@ async function init() {
         runFullBenchmark();
     });
 
+    // Helper to generate a clean, hardware-branded CSV filename
+    const getBenchmarkCsvFilename = () => {
+        const info = gpuEngine?.adapterInfo;
+        const rawName = info ? `${info.vendor}_${info.device}` : (gpuEngine?.isReady ? 'gpu' : 'cpu_fallback');
+        const slug = rawName
+            .replace(/[^a-zA-Z0-9_-]/g, '_')
+            .replace(/_+/g, '_')
+            .replace(/^_|_$/g, '')
+            .substring(0, 32);
+        return `benchmark_${slug}_${new Date().toISOString().slice(0, 10)}.csv`;
+    };
+
     // Export Handlers (Direct downloads: NO ZIP)
     btnDownloadAll.addEventListener('click', async () => {
         btnDownloadAll.disabled = true;
@@ -165,7 +177,7 @@ async function init() {
             // 3. CSV Spreadsheet
             const csv = generateBenchmarkCsv(gpuEngine.adapterInfo, substringBenchmarkResults, fuzzyBenchmarkResults);
             const csvBlob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            downloadBlob(csvBlob, `webgpu_search_benchmark_${new Date().toISOString().slice(0, 10)}.csv`);
+            downloadBlob(csvBlob, getBenchmarkCsvFilename());
         } catch (err) {
             console.error('Download error:', err);
             alert('Failed to download benchmark assets: ' + err);
@@ -178,7 +190,7 @@ async function init() {
     btnDownloadCsv.addEventListener('click', () => {
         const csv = generateBenchmarkCsv(gpuEngine.adapterInfo, substringBenchmarkResults, fuzzyBenchmarkResults);
         const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        downloadBlob(blob, `webgpu_search_benchmark_${new Date().toISOString().slice(0, 10)}.csv`);
+        downloadBlob(blob, getBenchmarkCsvFilename());
     });
 
     btnDownloadPngSub.addEventListener('click', async () => {

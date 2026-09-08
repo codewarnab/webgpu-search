@@ -52,19 +52,45 @@ export function generateBenchmarkCsv(
     fuzzyResults: BenchmarkRowResult[]
 ): string {
     const lines: string[] = [];
-    lines.push('# WebGPU vs uFuzzy Search Benchmark Export');
-    lines.push(`# Generated At: ${new Date().toISOString()}`);
-    lines.push(`# GPU Vendor: ${adapterInfo?.vendor || 'Unknown'}`);
-    lines.push(`# GPU Device: ${adapterInfo?.device || 'Unknown'}`);
-    lines.push(`# GPU Architecture: ${adapterInfo?.architecture || 'Unknown'}`);
-    lines.push(`# Max VRAM Buffer (MB): ${adapterInfo?.maxBufferSizeMB || 0}`);
-    lines.push(`# User Agent: "${navigator.userAgent.replace(/"/g, '""')}"`);
+    const isGpuActive = !!adapterInfo;
+    const gpuDevice = adapterInfo?.device || (isGpuActive ? 'WebGPU Device' : 'WebGPU Disabled (CPU Fallback Mode)');
+    const gpuVendor = adapterInfo?.vendor || (isGpuActive ? 'Unknown Vendor' : 'N/A');
+    const gpuArch = adapterInfo?.architecture || (isGpuActive ? 'Default' : 'N/A');
+    const gpuRenderer = adapterInfo?.renderer || (isGpuActive ? gpuDevice : 'N/A');
+    const gpuBufferMB = adapterInfo?.maxBufferSizeMB || 0;
+    const gpuStorageMB = adapterInfo?.maxStorageBindingSizeMB || 0;
+    const maxWorkgroups = adapterInfo?.maxComputeWorkgroupsPerDimension || 0;
+    const maxInvocations = adapterInfo?.maxComputeInvocationsPerWorkgroup || 0;
+    const hasTimestamp = adapterInfo?.hasTimestampQuery ? 'Yes' : 'No';
+
+    // 1. Comprehensive System & GPU Metadata Header Block
+    lines.push('# ========================================================');
+    lines.push('# WebGPU vs CPU (uFuzzy) Search Benchmark Export');
+    lines.push(`# Export Timestamp: ${new Date().toISOString()}`);
+    lines.push(`# WebGPU Status: ${isGpuActive ? 'Active & Hardware Accelerated' : 'Disabled (Running in CPU Mode)'}`);
+    lines.push(`# GPU Device: "${gpuDevice.replace(/"/g, '""')}"`);
+    lines.push(`# GPU Vendor: "${gpuVendor.replace(/"/g, '""')}"`);
+    lines.push(`# GPU Architecture: "${gpuArch.replace(/"/g, '""')}"`);
+    lines.push(`# GPU Hardware Renderer: "${gpuRenderer.replace(/"/g, '""')}"`);
+    lines.push(`# Max VRAM Buffer Size: ${gpuBufferMB} MB`);
+    lines.push(`# Max Storage Binding Size: ${gpuStorageMB} MB`);
+    lines.push(`# Max Compute Workgroups Per Dim: ${maxWorkgroups}`);
+    lines.push(`# Max Compute Invocations Per Workgroup: ${maxInvocations}`);
+    lines.push(`# Hardware Timestamp Queries: ${hasTimestamp}`);
+    lines.push(`# Browser / OS User Agent: "${navigator.userAgent.replace(/"/g, '""')}"`);
+    lines.push('# ========================================================');
     lines.push('');
+
+    // 2. Data Table with GPU Details in Every Single Row
     lines.push([
         'Algorithm',
         'Dataset Size',
         'Query',
-        'GPU Retained (ms)',
+        'GPU Device',
+        'GPU Vendor',
+        'GPU Architecture',
+        'Max VRAM Buffer (MB)',
+        'GPU Retained Total (ms)',
         'GPU Dispatch (ms)',
         'GPU Readback (ms)',
         'GPU Cold Total (ms)',
@@ -73,27 +99,32 @@ export function generateBenchmarkCsv(
         'JS Native CPU (ms)',
         'Speedup vs uFuzzy',
         'Speedup vs Native',
-        'Retained Winner',
+        'Winner',
         'GPU Total Matches',
         'uFuzzy Total Matches'
     ].join(','));
 
     const addRows = (rows: BenchmarkRowResult[]) => {
         for (const r of rows) {
+            const hasGpuTiming = r.gpuRetained.totalMs > 0;
             lines.push([
                 r.mode.toUpperCase(),
                 r.datasetSize,
                 `"${r.query.replace(/"/g, '""')}"`,
-                r.gpuRetained.totalMs,
-                r.gpuRetained.gpuDispatchMs,
-                r.gpuRetained.readbackMs,
-                r.gpuCold.totalMs,
-                r.gpuCold.uploadMs,
+                `"${gpuDevice.replace(/"/g, '""')}"`,
+                `"${gpuVendor.replace(/"/g, '""')}"`,
+                `"${gpuArch.replace(/"/g, '""')}"`,
+                gpuBufferMB,
+                hasGpuTiming ? r.gpuRetained.totalMs : 'N/A',
+                hasGpuTiming ? r.gpuRetained.gpuDispatchMs : 'N/A',
+                hasGpuTiming ? r.gpuRetained.readbackMs : 'N/A',
+                hasGpuTiming ? r.gpuCold.totalMs : 'N/A',
+                hasGpuTiming ? r.gpuCold.uploadMs : 'N/A',
                 r.ufuzzyMs,
                 r.jsNativeMs,
-                r.retainedVsUfuzzySpeedup,
-                r.retainedVsNativeSpeedup,
-                r.crossover.gpuRetainedBeatsUfuzzy ? 'GPU' : 'CPU',
+                r.retainedVsUfuzzySpeedup > 0 ? `${r.retainedVsUfuzzySpeedup}x` : 'N/A',
+                r.retainedVsNativeSpeedup > 0 ? `${r.retainedVsNativeSpeedup}x` : 'N/A',
+                hasGpuTiming ? (r.crossover.gpuRetainedBeatsUfuzzy ? 'GPU' : 'uFuzzy CPU') : 'uFuzzy CPU (GPU Off)',
                 r.matchCount.gpu,
                 r.matchCount.ufuzzy
             ].join(','));

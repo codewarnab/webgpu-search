@@ -31,8 +31,11 @@ export interface AdapterInfo {
     architecture: string;
     device: string;
     description: string;
+    renderer: string;
     maxBufferSizeMB: number;
     maxStorageBindingSizeMB: number;
+    maxComputeWorkgroupsPerDimension: number;
+    maxComputeInvocationsPerWorkgroup: number;
     hasTimestampQuery: boolean;
 }
 
@@ -84,16 +87,46 @@ export class WebGPUEngine {
             }
 
             // Inspect adapter info
-            let info: any = {};
-            if ('requestAdapterInfo' in this.adapter) {
+            let info: any = (this.adapter as any).info || {};
+            if ((!info.vendor && !info.device) && 'requestAdapterInfo' in this.adapter) {
                 try {
                     info = await (this.adapter as any).requestAdapterInfo();
                 } catch {
                     info = {};
                 }
-            } else if ((this.adapter as any).info) {
-                info = (this.adapter as any).info;
             }
+
+            // Fallback to WebGL unmasked renderer if WebGPU info is sanitized by browser
+            let unmaskedRenderer = '';
+            try {
+                const canvas = document.createElement('canvas');
+                const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+                if (gl) {
+                    const ext = (gl as any).getExtension('WEBGL_debug_renderer_info');
+                    if (ext) {
+                        unmaskedRenderer = (gl as any).getParameter(ext.UNMASKED_RENDERER_WEBGL) || '';
+                    }
+                }
+            } catch {
+                // ignore
+            }
+
+            let vendor = info.vendor || '';
+            let device = info.device || '';
+            let architecture = info.architecture || '';
+
+            if (!device && unmaskedRenderer) {
+                device = unmaskedRenderer;
+            }
+            if (!vendor) {
+                if (/nvidia/i.test(unmaskedRenderer) || /nvidia/i.test(device)) vendor = 'NVIDIA';
+                else if (/intel/i.test(unmaskedRenderer) || /intel/i.test(device)) vendor = 'Intel';
+                else if (/amd|radeon/i.test(unmaskedRenderer) || /amd|radeon/i.test(device)) vendor = 'AMD';
+                else if (/apple/i.test(unmaskedRenderer) || /apple/i.test(device)) vendor = 'Apple';
+                else vendor = 'Unknown GPU Vendor';
+            }
+            if (!device) device = 'WebGPU Generic Device';
+            if (!architecture) architecture = 'Default';
 
             const limits = this.adapter.limits;
             const requiredFeatures: GPUFeatureName[] = [];
@@ -103,12 +136,15 @@ export class WebGPUEngine {
             }
 
             this.adapterInfo = {
-                vendor: info.vendor || 'Unknown GPU Vendor',
-                architecture: info.architecture || 'Unknown Arch',
-                device: info.device || 'WebGPU Device',
-                description: info.description || navigator.userAgent,
+                vendor,
+                architecture,
+                device,
+                description: info.description || unmaskedRenderer || navigator.userAgent,
+                renderer: unmaskedRenderer || device,
                 maxBufferSizeMB: Math.round(limits.maxBufferSize / (1024 * 1024)),
                 maxStorageBindingSizeMB: Math.round(limits.maxStorageBufferBindingSize / (1024 * 1024)),
+                maxComputeWorkgroupsPerDimension: limits.maxComputeWorkgroupsPerDimension,
+                maxComputeInvocationsPerWorkgroup: limits.maxComputeInvocationsPerWorkgroup,
                 hasTimestampQuery: hasTimestamp
             };
 
