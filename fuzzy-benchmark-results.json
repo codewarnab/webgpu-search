@@ -1,0 +1,152 @@
+[
+  {
+    "datasetSize": 10000,
+    "query": "AuthController",
+    "mode": "fuzzy",
+    "gpuRetained": {
+      "totalMs": 3.23,
+      "queryUploadMs": 0,
+      "gpuDispatchMs": 0.1,
+      "readbackMs": 3.13
+    },
+    "gpuCold": {
+      "uploadMs": 2.1,
+      "totalMs": 6
+    },
+    "ufuzzyMs": 0.77,
+    "jsNativeMs": 0.73,
+    "retainedVsUfuzzySpeedup": 0.24,
+    "retainedVsNativeSpeedup": 0.23,
+    "coldVsUfuzzySpeedup": 0.13,
+    "crossover": {
+      "gpuRetainedBeatsUfuzzy": false,
+      "gpuRetainedBeatsNative": false,
+      "gpuColdBeatsUfuzzy": false
+    },
+    "matchCount": {
+      "gpu": 37,
+      "ufuzzy": 0,
+      "native": 0
+    }
+  },
+  {
+    "datasetSize": 100000,
+    "query": "AuthController",
+    "mode": "fuzzy",
+    "gpuRetained": {
+      "totalMs": 3.3,
+      "queryUploadMs": 0.03,
+      "gpuDispatchMs": 0.07,
+      "readbackMs": 3.2
+    },
+    "gpuCold": {
+      "uploadMs": 5,
+      "totalMs": 9.3
+    },
+    "ufuzzyMs": 17.9,
+    "jsNativeMs": 8.27,
+    "retainedVsUfuzzySpeedup": 5.42,
+    "retainedVsNativeSpeedup": 2.51,
+    "coldVsUfuzzySpeedup": 1.92,
+    "crossover": {
+      "gpuRetainedBeatsUfuzzy": true,
+      "gpuRetainedBeatsNative": true,
+      "gpuColdBeatsUfuzzy": true
+    },
+    "matchCount": {
+      "gpu": 356,
+      "ufuzzy": 0,
+      "native": 0
+    }
+  },
+  {
+    "datasetSize": 500000,
+    "query": "AuthController",
+    "mode": "fuzzy",
+    "gpuRetained": {
+      "totalMs": 6.6,
+      "queryUploadMs": 0,
+      "gpuDispatchMs": 0.1,
+      "readbackMs": 6.5
+    },
+    "gpuCold": {
+      "uploadMs": 67.2,
+      "totalMs": 85.2
+    },
+    "ufuzzyMs": 38.97,
+    "jsNativeMs": 42.87,
+    "retainedVsUfuzzySpeedup": 5.9,
+    "retainedVsNativeSpeedup": 6.49,
+    "coldVsUfuzzySpeedup": 0.46,
+    "crossover": {
+      "gpuRetainedBeatsUfuzzy": true,
+      "gpuRetainedBeatsNative": true,
+      "gpuColdBeatsUfuzzy": false
+    },
+    "matchCount": {
+      "gpu": 1775,
+      "ufuzzy": 0,
+      "native": 0
+    }
+  },
+  {
+    "datasetSize": 1000000,
+    "query": "AuthController",
+    "mode": "fuzzy",
+    "gpuRetained": {
+      "totalMs": 21.57,
+      "queryUploadMs": 0,
+      "gpuDispatchMs": 0.1,
+      "readbackMs": 21.47
+    },
+    "gpuCold": {
+      "uploadMs": 120.2,
+      "totalMs": 162.3
+    },
+    "ufuzzyMs": 79.1,
+    "jsNativeMs": 79.93,
+    "retainedVsUfuzzySpeedup": 3.67,
+    "retainedVsNativeSpeedup": 3.71,
+    "coldVsUfuzzySpeedup": 0.49,
+    "crossover": {
+      "gpuRetainedBeatsUfuzzy": true,
+      "gpuRetainedBeatsNative": true,
+      "gpuColdBeatsUfuzzy": false
+    },
+    "matchCount": {
+      "gpu": 3549,
+      "ufuzzy": 0,
+      "native": 0
+    }
+  },
+  {
+    "datasetSize": 2000000,
+    "query": "AuthController",
+    "mode": "fuzzy",
+    "gpuRetained": {
+      "totalMs": 17.6,
+      "queryUploadMs": 0,
+      "gpuDispatchMs": 0.07,
+      "readbackMs": 17.53
+    },
+    "gpuCold": {
+      "uploadMs": 259.9,
+      "totalMs": 340.2
+    },
+    "ufuzzyMs": 162.3,
+    "jsNativeMs": 174.07,
+    "retainedVsUfuzzySpeedup": 9.22,
+    "retainedVsNativeSpeedup": 9.89,
+    "coldVsUfuzzySpeedup": 0.48,
+    "crossover": {
+      "gpuRetainedBeatsUfuzzy": true,
+      "gpuRetainedBeatsNative": true,
+      "gpuColdBeatsUfuzzy": false
+    },
+    "matchCount": {
+      "gpu": 7098,
+      "ufuzzy": 0,
+      "native": 0
+    }
+  }
+]

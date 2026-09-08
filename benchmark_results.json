@@ -1,0 +1,306 @@
+{
+  "substring": [
+    {
+      "datasetSize": 10000,
+      "query": "AuthController",
+      "mode": "substring",
+      "gpuRetained": {
+        "totalMs": 3.57,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.07,
+        "readbackMs": 3.5
+      },
+      "gpuCold": {
+        "uploadMs": 1.1,
+        "totalMs": 4
+      },
+      "ufuzzyMs": 0.77,
+      "jsNativeMs": 0.6,
+      "retainedVsUfuzzySpeedup": 0.21,
+      "retainedVsNativeSpeedup": 0.17,
+      "coldVsUfuzzySpeedup": 0.19,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": false,
+        "gpuRetainedBeatsNative": false,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 0,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 100000,
+      "query": "AuthController",
+      "mode": "substring",
+      "gpuRetained": {
+        "totalMs": 3.43,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.03,
+        "readbackMs": 3.4
+      },
+      "gpuCold": {
+        "uploadMs": 3.2,
+        "totalMs": 8.5
+      },
+      "ufuzzyMs": 6.57,
+      "jsNativeMs": 7.93,
+      "retainedVsUfuzzySpeedup": 1.91,
+      "retainedVsNativeSpeedup": 2.31,
+      "coldVsUfuzzySpeedup": 0.77,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 0,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 500000,
+      "query": "AuthController",
+      "mode": "substring",
+      "gpuRetained": {
+        "totalMs": 5.83,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.1,
+        "readbackMs": 5.73
+      },
+      "gpuCold": {
+        "uploadMs": 59.9,
+        "totalMs": 76.1
+      },
+      "ufuzzyMs": 45.77,
+      "jsNativeMs": 48.87,
+      "retainedVsUfuzzySpeedup": 7.85,
+      "retainedVsNativeSpeedup": 8.38,
+      "coldVsUfuzzySpeedup": 0.6,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 0,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 1000000,
+      "query": "AuthController",
+      "mode": "substring",
+      "gpuRetained": {
+        "totalMs": 7.23,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.03,
+        "readbackMs": 7.2
+      },
+      "gpuCold": {
+        "uploadMs": 141.6,
+        "totalMs": 164
+      },
+      "ufuzzyMs": 75.5,
+      "jsNativeMs": 77.43,
+      "retainedVsUfuzzySpeedup": 10.44,
+      "retainedVsNativeSpeedup": 10.71,
+      "coldVsUfuzzySpeedup": 0.46,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 0,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 2000000,
+      "query": "AuthController",
+      "mode": "substring",
+      "gpuRetained": {
+        "totalMs": 14.23,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.07,
+        "readbackMs": 14.17
+      },
+      "gpuCold": {
+        "uploadMs": 249.5,
+        "totalMs": 312.4
+      },
+      "ufuzzyMs": 164.83,
+      "jsNativeMs": 173.03,
+      "retainedVsUfuzzySpeedup": 11.58,
+      "retainedVsNativeSpeedup": 12.16,
+      "coldVsUfuzzySpeedup": 0.53,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 0,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    }
+  ],
+  "fuzzy": [
+    {
+      "datasetSize": 10000,
+      "query": "AuthController",
+      "mode": "fuzzy",
+      "gpuRetained": {
+        "totalMs": 2.9,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.03,
+        "readbackMs": 2.87
+      },
+      "gpuCold": {
+        "uploadMs": 0.8,
+        "totalMs": 3.9
+      },
+      "ufuzzyMs": 0.67,
+      "jsNativeMs": 0.6,
+      "retainedVsUfuzzySpeedup": 0.23,
+      "retainedVsNativeSpeedup": 0.21,
+      "coldVsUfuzzySpeedup": 0.17,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": false,
+        "gpuRetainedBeatsNative": false,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 37,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 100000,
+      "query": "AuthController",
+      "mode": "fuzzy",
+      "gpuRetained": {
+        "totalMs": 5.47,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0,
+        "readbackMs": 5.47
+      },
+      "gpuCold": {
+        "uploadMs": 4.7,
+        "totalMs": 11.2
+      },
+      "ufuzzyMs": 8.3,
+      "jsNativeMs": 8.67,
+      "retainedVsUfuzzySpeedup": 1.52,
+      "retainedVsNativeSpeedup": 1.59,
+      "coldVsUfuzzySpeedup": 0.74,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 356,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 500000,
+      "query": "AuthController",
+      "mode": "fuzzy",
+      "gpuRetained": {
+        "totalMs": 12.23,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.1,
+        "readbackMs": 12.13
+      },
+      "gpuCold": {
+        "uploadMs": 19.6,
+        "totalMs": 41.4
+      },
+      "ufuzzyMs": 43.2,
+      "jsNativeMs": 43.2,
+      "retainedVsUfuzzySpeedup": 3.53,
+      "retainedVsNativeSpeedup": 3.53,
+      "coldVsUfuzzySpeedup": 1.04,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": true
+      },
+      "matchCount": {
+        "gpu": 1775,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 1000000,
+      "query": "AuthController",
+      "mode": "fuzzy",
+      "gpuRetained": {
+        "totalMs": 11.03,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.1,
+        "readbackMs": 10.93
+      },
+      "gpuCold": {
+        "uploadMs": 33.6,
+        "totalMs": 61
+      },
+      "ufuzzyMs": 76.03,
+      "jsNativeMs": 73.63,
+      "retainedVsUfuzzySpeedup": 6.89,
+      "retainedVsNativeSpeedup": 6.67,
+      "coldVsUfuzzySpeedup": 1.25,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": true
+      },
+      "matchCount": {
+        "gpu": 3549,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    },
+    {
+      "datasetSize": 2000000,
+      "query": "AuthController",
+      "mode": "fuzzy",
+      "gpuRetained": {
+        "totalMs": 19.23,
+        "queryUploadMs": 0.03,
+        "gpuDispatchMs": 0.07,
+        "readbackMs": 19.13
+      },
+      "gpuCold": {
+        "uploadMs": 90.4,
+        "totalMs": 163
+      },
+      "ufuzzyMs": 142.9,
+      "jsNativeMs": 170.6,
+      "retainedVsUfuzzySpeedup": 7.43,
+      "retainedVsNativeSpeedup": 8.87,
+      "coldVsUfuzzySpeedup": 0.88,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": true,
+        "gpuRetainedBeatsNative": true,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 7098,
+        "ufuzzy": 0,
+        "native": 0
+      }
+    }
+  ]
+}
