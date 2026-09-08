@@ -63,12 +63,29 @@ async function main() {
         Winner: r.crossover.gpuRetainedBeatsUfuzzy ? 'GPU' : 'CPU'
     })));
 
-    // Take screenshot
+    // Take screenshot of entire dashboard
     const screenshotPath = path.resolve('full-benchmark-ui.png');
     await page.screenshot({ path: screenshotPath, fullPage: true });
-    console.log(`\nScreenshot saved to: ${screenshotPath}`);
+    console.log(`\nFull dashboard screenshot saved to: ${screenshotPath}`);
 
-    // Trigger CSV export and verify download or write directly
+    // Export individual chart PNGs
+    await page.click('#tab-btn-substring');
+    await new Promise(r => setTimeout(r, 100));
+    const subChartEl = await page.$('#benchmark-chart-substring');
+    if (subChartEl) {
+        await subChartEl.screenshot({ path: path.resolve('chart_substring_benchmark.png') });
+        console.log('Exported: chart_substring_benchmark.png');
+    }
+
+    await page.click('#tab-btn-fuzzy');
+    await new Promise(r => setTimeout(r, 100));
+    const fuzChartEl = await page.$('#benchmark-chart-fuzzy');
+    if (fuzChartEl) {
+        await fuzChartEl.screenshot({ path: path.resolve('chart_fuzzy_benchmark.png') });
+        console.log('Exported: chart_fuzzy_benchmark.png');
+    }
+
+    // Trigger CSV export and save
     fs.writeFileSync('benchmark_results.json', JSON.stringify(benchmarkData, null, 2));
     console.log('Raw JSON saved to: benchmark_results.json');
 

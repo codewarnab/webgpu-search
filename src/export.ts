@@ -4,7 +4,7 @@ import type { AdapterInfo } from './webgpu-engine.ts';
 /**
  * Converts an inline SVGSVGElement into a high-resolution PNG Blob
  */
-export async function svgToPngBlob(svgElement: SVGSVGElement, width = 1000, height = 260): Promise<Blob> {
+export async function svgToPngBlob(svgElement: SVGSVGElement, width = 1000, height = 340): Promise<Blob> {
     const xml = new XMLSerializer().serializeToString(svgElement);
     const svgBlob = new Blob([xml], { type: 'image/svg+xml;charset=utf-8' });
     const url = URL.createObjectURL(svgBlob);

@@ -391,7 +391,12 @@ async function runFullBenchmark() {
                 if (progress.currentRow) {
                     substringBenchmarkResults.push(progress.currentRow);
                     appendBenchmarkTableRow(tableBodySubstring, progress.currentRow);
-                    drawBenchmarkChart(chartSubstring, substringBenchmarkResults);
+                    drawBenchmarkChart(
+                        chartSubstring,
+                        substringBenchmarkResults,
+                        'WebGPU vs uFuzzy: Exact Substring Search',
+                        getChartMeta(query, substringBenchmarkResults)
+                    );
                 }
             }
         );
@@ -415,7 +420,12 @@ async function runFullBenchmark() {
                 if (progress.currentRow) {
                     fuzzyBenchmarkResults.push(progress.currentRow);
                     appendBenchmarkTableRow(tableBodyFuzzy, progress.currentRow);
-                    drawBenchmarkChart(chartFuzzy, fuzzyBenchmarkResults);
+                    drawBenchmarkChart(
+                        chartFuzzy,
+                        fuzzyBenchmarkResults,
+                        'WebGPU vs uFuzzy: Fuzzy Subsequence Search',
+                        getChartMeta(query, fuzzyBenchmarkResults)
+                    );
                 }
             }
         );
@@ -464,12 +474,38 @@ function appendBenchmarkTableRow(tbody: HTMLElement, row: BenchmarkRowResult) {
     tbody.appendChild(tr);
 }
 
-function drawBenchmarkChart(svgElement: SVGSVGElement, results: BenchmarkRowResult[]) {
+function getChartMeta(query: string, results: BenchmarkRowResult[]): { subtitle: string; speedupBadge: string } {
+    const hw = gpuEngine?.adapterInfo;
+    const gpuName = hw ? `${hw.vendor} - ${hw.device} (${hw.architecture})` : 'WebGPU High-Performance Device';
+    const subtitle = `Hardware: ${gpuName} | Query: "${query}" | Dataset: 10k to 2M rows`;
+
+    let maxSpeedup = 0;
+    let maxSpeedupSize = 0;
+    for (const r of results) {
+        if (r.retainedVsUfuzzySpeedup > maxSpeedup) {
+            maxSpeedup = r.retainedVsUfuzzySpeedup;
+            maxSpeedupSize = r.datasetSize;
+        }
+    }
+
+    const speedupBadge = maxSpeedup > 1
+        ? `⚡ Max GPU Speedup: ${maxSpeedup}x (${maxSpeedupSize.toLocaleString()} rows)`
+        : '';
+
+    return { subtitle, speedupBadge };
+}
+
+function drawBenchmarkChart(
+    svgElement: SVGSVGElement,
+    results: BenchmarkRowResult[],
+    title: string,
+    meta: { subtitle: string; speedupBadge: string }
+) {
     if (!svgElement || results.length === 0) return;
 
     const width = 1000;
-    const height = 260;
-    const padding = { top: 30, right: 40, bottom: 40, left: 60 };
+    const height = 340;
+    const padding = { top: 85, right: 70, bottom: 45, left: 65 };
 
     const graphWidth = width - padding.left - padding.right;
     const graphHeight = height - padding.top - padding.bottom;
@@ -484,7 +520,110 @@ function drawBenchmarkChart(svgElement: SVGSVGElement, results: BenchmarkRowResu
     // Clear SVG
     svgElement.innerHTML = '';
 
-    // Draw horizontal grid lines
+    // 1. Background Card & Border
+    const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    bg.setAttribute('width', `${width}`);
+    bg.setAttribute('height', `${height}`);
+    bg.setAttribute('fill', '#0c1220');
+    bg.setAttribute('rx', '10');
+    svgElement.appendChild(bg);
+
+    const border = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    border.setAttribute('width', `${width}`);
+    border.setAttribute('height', `${height}`);
+    border.setAttribute('fill', 'none');
+    border.setAttribute('stroke', '#24344d');
+    border.setAttribute('stroke-width', '1.5');
+    border.setAttribute('rx', '10');
+    svgElement.appendChild(border);
+
+    // 2. Title & Subtitle
+    const titleEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    titleEl.setAttribute('x', '30');
+    titleEl.setAttribute('y', '32');
+    titleEl.setAttribute('fill', '#f8fafc');
+    titleEl.setAttribute('font-size', '16');
+    titleEl.setAttribute('font-weight', '700');
+    titleEl.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif');
+    titleEl.textContent = title;
+    svgElement.appendChild(titleEl);
+
+    const subtitleEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    subtitleEl.setAttribute('x', '30');
+    subtitleEl.setAttribute('y', '54');
+    subtitleEl.setAttribute('fill', '#94a3b8');
+    subtitleEl.setAttribute('font-size', '12');
+    subtitleEl.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif');
+    subtitleEl.textContent = meta.subtitle;
+    svgElement.appendChild(subtitleEl);
+
+    // 3. Embedded Legend (top right)
+    const legendItems = [
+        { color: '#38bdf8', label: 'WebGPU (Retained)' },
+        { color: '#f59e0b', label: 'uFuzzy (CPU)' },
+        { color: '#a855f7', label: 'JS Native (CPU)' }
+    ];
+
+    let legendX = 540;
+    legendItems.forEach(item => {
+        const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        dot.setAttribute('cx', `${legendX}`);
+        dot.setAttribute('cy', '27');
+        dot.setAttribute('r', '5');
+        dot.setAttribute('fill', item.color);
+        svgElement.appendChild(dot);
+
+        const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        lbl.setAttribute('x', `${legendX + 9}`);
+        lbl.setAttribute('y', '31');
+        lbl.setAttribute('fill', '#f8fafc');
+        lbl.setAttribute('font-size', '11');
+        lbl.setAttribute('font-weight', '600');
+        lbl.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif');
+        lbl.textContent = item.label;
+        svgElement.appendChild(lbl);
+
+        legendX += 140;
+    });
+
+    // 4. Speedup Highlight Badge (top right below legend)
+    if (meta.speedupBadge) {
+        const badgeEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        badgeEl.setAttribute('x', `${width - 30}`);
+        badgeEl.setAttribute('y', '54');
+        badgeEl.setAttribute('fill', '#10b981');
+        badgeEl.setAttribute('font-size', '12');
+        badgeEl.setAttribute('font-weight', '700');
+        badgeEl.setAttribute('text-anchor', 'end');
+        badgeEl.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif');
+        badgeEl.textContent = meta.speedupBadge;
+        svgElement.appendChild(badgeEl);
+    }
+
+    // 5. Y-Axis Title
+    const yAxisLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    yAxisLabel.setAttribute('x', `${padding.left}`);
+    yAxisLabel.setAttribute('y', '74');
+    yAxisLabel.setAttribute('fill', '#64748b');
+    yAxisLabel.setAttribute('font-size', '10');
+    yAxisLabel.setAttribute('font-weight', '600');
+    yAxisLabel.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif');
+    yAxisLabel.textContent = '▲ Latency (ms) [lower is better]';
+    svgElement.appendChild(yAxisLabel);
+
+    // 6. X-Axis Title
+    const xAxisLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    xAxisLabel.setAttribute('x', `${padding.left + graphWidth / 2}`);
+    xAxisLabel.setAttribute('y', `${height - 10}`);
+    xAxisLabel.setAttribute('fill', '#64748b');
+    xAxisLabel.setAttribute('font-size', '11');
+    xAxisLabel.setAttribute('font-weight', '600');
+    xAxisLabel.setAttribute('text-anchor', 'middle');
+    xAxisLabel.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif');
+    xAxisLabel.textContent = 'Dataset Size (Number of Items)';
+    svgElement.appendChild(xAxisLabel);
+
+    // 7. Horizontal Grid lines & Y values
     const gridCount = 5;
     for (let i = 0; i <= gridCount; i++) {
         const yVal = (maxTime / gridCount) * i;
@@ -500,16 +639,16 @@ function drawBenchmarkChart(svgElement: SVGSVGElement, results: BenchmarkRowResu
         svgElement.appendChild(line);
 
         const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        text.setAttribute('x', `${padding.left - 10}`);
+        text.setAttribute('x', `${padding.left - 8}`);
         text.setAttribute('y', `${y + 4}`);
         text.setAttribute('fill', '#64748b');
         text.setAttribute('font-size', '11');
         text.setAttribute('text-anchor', 'end');
+        text.setAttribute('font-family', 'monospace');
         text.textContent = `${Math.round(yVal)}ms`;
         svgElement.appendChild(text);
     }
 
-    // X coordinates mapped per item
     const getX = (idx: number) => {
         if (results.length === 1) return padding.left + graphWidth / 2;
         return padding.left + (idx / (results.length - 1)) * graphWidth;
@@ -519,15 +658,17 @@ function drawBenchmarkChart(svgElement: SVGSVGElement, results: BenchmarkRowResu
         return padding.top + graphHeight - (val / maxTime) * graphHeight;
     };
 
-    // Draw X labels
+    // 8. X-Ticks and Labels
     for (let i = 0; i < results.length; i++) {
         const x = getX(i);
         const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         text.setAttribute('x', `${x}`);
-        text.setAttribute('y', `${height - 12}`);
+        text.setAttribute('y', `${padding.top + graphHeight + 18}`);
         text.setAttribute('fill', '#94a3b8');
         text.setAttribute('font-size', '11');
+        text.setAttribute('font-weight', '600');
         text.setAttribute('text-anchor', 'middle');
+        text.setAttribute('font-family', '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif');
         const sizeLabel = results[i].datasetSize >= 1_000_000
             ? `${results[i].datasetSize / 1_000_000}M`
             : `${results[i].datasetSize / 1_000}k`;
@@ -535,8 +676,8 @@ function drawBenchmarkChart(svgElement: SVGSVGElement, results: BenchmarkRowResu
         svgElement.appendChild(text);
     }
 
-    // Helper to draw series polyline and points
-    const drawSeries = (color: string, getter: (r: BenchmarkRowResult) => number) => {
+    // 9. Draw series lines, points, and value labels
+    const drawSeries = (color: string, getter: (r: BenchmarkRowResult) => number, labelOffsetY: number) => {
         if (results.length > 1) {
             const points = results.map((r, idx) => `${getX(idx)},${getY(getter(r))}`).join(' ');
             const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
@@ -547,25 +688,40 @@ function drawBenchmarkChart(svgElement: SVGSVGElement, results: BenchmarkRowResu
             svgElement.appendChild(polyline);
         }
 
-        // Points
         results.forEach((r, idx) => {
             const cx = getX(idx);
-            const cy = getY(getter(r));
+            const val = getter(r);
+            const cy = getY(val);
+
+            // Point dot
             const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
             circle.setAttribute('cx', `${cx}`);
             circle.setAttribute('cy', `${cy}`);
-            circle.setAttribute('r', '5');
+            circle.setAttribute('r', '4.5');
             circle.setAttribute('fill', color);
-            circle.setAttribute('stroke', '#090d16');
+            circle.setAttribute('stroke', '#0c1220');
             circle.setAttribute('stroke-width', '2');
             svgElement.appendChild(circle);
+
+            // Value text callout on points
+            if (idx >= results.length - 2 || val > 10 || results.length <= 3) {
+                const valText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                valText.setAttribute('x', `${cx}`);
+                valText.setAttribute('y', `${cy + labelOffsetY}`);
+                valText.setAttribute('fill', color);
+                valText.setAttribute('font-size', '10');
+                valText.setAttribute('font-weight', '700');
+                valText.setAttribute('text-anchor', 'middle');
+                valText.setAttribute('font-family', 'monospace');
+                valText.textContent = `${val.toFixed(1)}ms`;
+                svgElement.appendChild(valText);
+            }
         });
     };
 
-    // Draw lines: Native JS, uFuzzy, WebGPU Retained
-    drawSeries('#a855f7', r => r.jsNativeMs);
-    drawSeries('#f59e0b', r => r.ufuzzyMs);
-    drawSeries('#38bdf8', r => r.gpuRetained.totalMs);
+    drawSeries('#a855f7', r => r.jsNativeMs, -8);
+    drawSeries('#f59e0b', r => r.ufuzzyMs, -8);
+    drawSeries('#38bdf8', r => r.gpuRetained.totalMs, 14);
 }
 
 // Start application

@@ -5,20 +5,20 @@
       "query": "AuthController",
       "mode": "substring",
       "gpuRetained": {
-        "totalMs": 3.57,
+        "totalMs": 3.53,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0.07,
-        "readbackMs": 3.5
+        "gpuDispatchMs": 0,
+        "readbackMs": 3.53
       },
       "gpuCold": {
-        "uploadMs": 1.1,
-        "totalMs": 4
+        "uploadMs": 1.3,
+        "totalMs": 5.6
       },
-      "ufuzzyMs": 0.77,
+      "ufuzzyMs": 0.67,
       "jsNativeMs": 0.6,
-      "retainedVsUfuzzySpeedup": 0.21,
+      "retainedVsUfuzzySpeedup": 0.19,
       "retainedVsNativeSpeedup": 0.17,
-      "coldVsUfuzzySpeedup": 0.19,
+      "coldVsUfuzzySpeedup": 0.12,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": false,
         "gpuRetainedBeatsNative": false,
@@ -35,24 +35,24 @@
       "query": "AuthController",
       "mode": "substring",
       "gpuRetained": {
-        "totalMs": 3.43,
+        "totalMs": 3.57,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0.03,
-        "readbackMs": 3.4
+        "gpuDispatchMs": 0.1,
+        "readbackMs": 3.47
       },
       "gpuCold": {
-        "uploadMs": 3.2,
-        "totalMs": 8.5
+        "uploadMs": 4.3,
+        "totalMs": 8.3
       },
-      "ufuzzyMs": 6.57,
-      "jsNativeMs": 7.93,
-      "retainedVsUfuzzySpeedup": 1.91,
-      "retainedVsNativeSpeedup": 2.31,
-      "coldVsUfuzzySpeedup": 0.77,
+      "ufuzzyMs": 14,
+      "jsNativeMs": 7.3,
+      "retainedVsUfuzzySpeedup": 3.93,
+      "retainedVsNativeSpeedup": 2.05,
+      "coldVsUfuzzySpeedup": 1.69,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
-        "gpuColdBeatsUfuzzy": false
+        "gpuColdBeatsUfuzzy": true
       },
       "matchCount": {
         "gpu": 0,
@@ -65,20 +65,20 @@
       "query": "AuthController",
       "mode": "substring",
       "gpuRetained": {
-        "totalMs": 5.83,
+        "totalMs": 5.77,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0.1,
+        "gpuDispatchMs": 0.03,
         "readbackMs": 5.73
       },
       "gpuCold": {
-        "uploadMs": 59.9,
-        "totalMs": 76.1
+        "uploadMs": 38,
+        "totalMs": 52.7
       },
-      "ufuzzyMs": 45.77,
-      "jsNativeMs": 48.87,
-      "retainedVsUfuzzySpeedup": 7.85,
-      "retainedVsNativeSpeedup": 8.38,
-      "coldVsUfuzzySpeedup": 0.6,
+      "ufuzzyMs": 38.1,
+      "jsNativeMs": 43.83,
+      "retainedVsUfuzzySpeedup": 6.61,
+      "retainedVsNativeSpeedup": 7.6,
+      "coldVsUfuzzySpeedup": 0.72,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
@@ -95,20 +95,20 @@
       "query": "AuthController",
       "mode": "substring",
       "gpuRetained": {
-        "totalMs": 7.23,
+        "totalMs": 6.57,
         "queryUploadMs": 0,
         "gpuDispatchMs": 0.03,
-        "readbackMs": 7.2
+        "readbackMs": 6.5
       },
       "gpuCold": {
-        "uploadMs": 141.6,
-        "totalMs": 164
+        "uploadMs": 76.6,
+        "totalMs": 98.3
       },
-      "ufuzzyMs": 75.5,
-      "jsNativeMs": 77.43,
-      "retainedVsUfuzzySpeedup": 10.44,
-      "retainedVsNativeSpeedup": 10.71,
-      "coldVsUfuzzySpeedup": 0.46,
+      "ufuzzyMs": 71.1,
+      "jsNativeMs": 78.47,
+      "retainedVsUfuzzySpeedup": 10.83,
+      "retainedVsNativeSpeedup": 11.95,
+      "coldVsUfuzzySpeedup": 0.72,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
@@ -125,20 +125,20 @@
       "query": "AuthController",
       "mode": "substring",
       "gpuRetained": {
-        "totalMs": 14.23,
+        "totalMs": 42.97,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0.07,
-        "readbackMs": 14.17
+        "gpuDispatchMs": 0.03,
+        "readbackMs": 42.93
       },
       "gpuCold": {
-        "uploadMs": 249.5,
-        "totalMs": 312.4
+        "uploadMs": 150.8,
+        "totalMs": 209.6
       },
-      "ufuzzyMs": 164.83,
-      "jsNativeMs": 173.03,
-      "retainedVsUfuzzySpeedup": 11.58,
-      "retainedVsNativeSpeedup": 12.16,
-      "coldVsUfuzzySpeedup": 0.53,
+      "ufuzzyMs": 148.03,
+      "jsNativeMs": 158.03,
+      "retainedVsUfuzzySpeedup": 3.45,
+      "retainedVsNativeSpeedup": 3.68,
+      "coldVsUfuzzySpeedup": 0.71,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
@@ -157,20 +157,20 @@
       "query": "AuthController",
       "mode": "fuzzy",
       "gpuRetained": {
-        "totalMs": 2.9,
+        "totalMs": 3.13,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0.03,
-        "readbackMs": 2.87
+        "gpuDispatchMs": 0.07,
+        "readbackMs": 3.07
       },
       "gpuCold": {
-        "uploadMs": 0.8,
-        "totalMs": 3.9
+        "uploadMs": 1,
+        "totalMs": 5.2
       },
       "ufuzzyMs": 0.67,
-      "jsNativeMs": 0.6,
-      "retainedVsUfuzzySpeedup": 0.23,
-      "retainedVsNativeSpeedup": 0.21,
-      "coldVsUfuzzySpeedup": 0.17,
+      "jsNativeMs": 0.63,
+      "retainedVsUfuzzySpeedup": 0.21,
+      "retainedVsNativeSpeedup": 0.2,
+      "coldVsUfuzzySpeedup": 0.13,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": false,
         "gpuRetainedBeatsNative": false,
@@ -187,20 +187,20 @@
       "query": "AuthController",
       "mode": "fuzzy",
       "gpuRetained": {
-        "totalMs": 5.47,
+        "totalMs": 5.23,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0,
-        "readbackMs": 5.47
+        "gpuDispatchMs": 0.03,
+        "readbackMs": 5.2
       },
       "gpuCold": {
-        "uploadMs": 4.7,
-        "totalMs": 11.2
+        "uploadMs": 5.2,
+        "totalMs": 11
       },
-      "ufuzzyMs": 8.3,
-      "jsNativeMs": 8.67,
-      "retainedVsUfuzzySpeedup": 1.52,
-      "retainedVsNativeSpeedup": 1.59,
-      "coldVsUfuzzySpeedup": 0.74,
+      "ufuzzyMs": 9.87,
+      "jsNativeMs": 7.93,
+      "retainedVsUfuzzySpeedup": 1.89,
+      "retainedVsNativeSpeedup": 1.52,
+      "coldVsUfuzzySpeedup": 0.9,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
@@ -217,24 +217,24 @@
       "query": "AuthController",
       "mode": "fuzzy",
       "gpuRetained": {
-        "totalMs": 12.23,
+        "totalMs": 12.1,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0.1,
-        "readbackMs": 12.13
+        "gpuDispatchMs": 0.07,
+        "readbackMs": 12
       },
       "gpuCold": {
-        "uploadMs": 19.6,
-        "totalMs": 41.4
+        "uploadMs": 19.5,
+        "totalMs": 38.9
       },
-      "ufuzzyMs": 43.2,
-      "jsNativeMs": 43.2,
-      "retainedVsUfuzzySpeedup": 3.53,
-      "retainedVsNativeSpeedup": 3.53,
-      "coldVsUfuzzySpeedup": 1.04,
+      "ufuzzyMs": 37.93,
+      "jsNativeMs": 40.87,
+      "retainedVsUfuzzySpeedup": 3.13,
+      "retainedVsNativeSpeedup": 3.38,
+      "coldVsUfuzzySpeedup": 0.98,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
-        "gpuColdBeatsUfuzzy": true
+        "gpuColdBeatsUfuzzy": false
       },
       "matchCount": {
         "gpu": 1775,
@@ -247,24 +247,24 @@
       "query": "AuthController",
       "mode": "fuzzy",
       "gpuRetained": {
-        "totalMs": 11.03,
+        "totalMs": 9.43,
         "queryUploadMs": 0,
-        "gpuDispatchMs": 0.1,
-        "readbackMs": 10.93
+        "gpuDispatchMs": 0.07,
+        "readbackMs": 9.37
       },
       "gpuCold": {
-        "uploadMs": 33.6,
-        "totalMs": 61
+        "uploadMs": 46.1,
+        "totalMs": 82.4
       },
-      "ufuzzyMs": 76.03,
-      "jsNativeMs": 73.63,
-      "retainedVsUfuzzySpeedup": 6.89,
-      "retainedVsNativeSpeedup": 6.67,
-      "coldVsUfuzzySpeedup": 1.25,
+      "ufuzzyMs": 68.97,
+      "jsNativeMs": 83.9,
+      "retainedVsUfuzzySpeedup": 7.31,
+      "retainedVsNativeSpeedup": 8.89,
+      "coldVsUfuzzySpeedup": 0.84,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
-        "gpuColdBeatsUfuzzy": true
+        "gpuColdBeatsUfuzzy": false
       },
       "matchCount": {
         "gpu": 3549,
@@ -277,24 +277,24 @@
       "query": "AuthController",
       "mode": "fuzzy",
       "gpuRetained": {
-        "totalMs": 19.23,
-        "queryUploadMs": 0.03,
-        "gpuDispatchMs": 0.07,
-        "readbackMs": 19.13
+        "totalMs": 17.4,
+        "queryUploadMs": 0,
+        "gpuDispatchMs": 0.1,
+        "readbackMs": 17.3
       },
       "gpuCold": {
-        "uploadMs": 90.4,
-        "totalMs": 163
+        "uploadMs": 70.9,
+        "totalMs": 107.5
       },
-      "ufuzzyMs": 142.9,
-      "jsNativeMs": 170.6,
-      "retainedVsUfuzzySpeedup": 7.43,
-      "retainedVsNativeSpeedup": 8.87,
-      "coldVsUfuzzySpeedup": 0.88,
+      "ufuzzyMs": 140.9,
+      "jsNativeMs": 163.93,
+      "retainedVsUfuzzySpeedup": 8.1,
+      "retainedVsNativeSpeedup": 9.42,
+      "coldVsUfuzzySpeedup": 1.31,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": true,
         "gpuRetainedBeatsNative": true,
-        "gpuColdBeatsUfuzzy": false
+        "gpuColdBeatsUfuzzy": true
       },
       "matchCount": {
         "gpu": 7098,
