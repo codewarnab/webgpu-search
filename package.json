@@ -17,9 +17,13 @@
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "clean": "turbo clean",
-    "prepublish:check": "turbo check:shaders && turbo typecheck && turbo build && bun scripts/test-vgpu-mock.ts"
+    "prepublish:check": "turbo check:shaders && turbo typecheck && turbo build && bun scripts/test-vgpu-mock.ts",
+    "changeset": "changeset",
+    "version-packages": "changeset version",
+    "release": "turbo build && changeset publish"
   },
   "devDependencies": {
+    "@changesets/cli": "^3.0.3",
     "@webgpu/types": "^0.1.72",
     "puppeteer-core": "^25.10.0",
     "turbo": "^2.4.4",
