@@ -1,6 +1,27 @@
 import { createMockAdapter } from 'vgpu/mock';
-import { WebGPUEngine } from '../src/webgpu-engine.ts';
-import { generateDataset } from '../src/dataset.ts';
+import {
+    WebGPUEngine,
+    CPUEngine,
+    SearchIndex,
+    packStringsToGPUBuffer,
+    checkMemoryBudget,
+    sanitizeStringForSlot
+} from '../packages/webgpu-search/src/index';
+
+function generateTestStrings(count: number): string[] {
+    const prefixes = ['src/components', 'src/views', 'src/utils', 'src/services'];
+    const nouns = ['User', 'Account', 'Session', 'Auth', 'Order', 'Product'];
+    const suffixes = ['Controller', 'Service', 'Handler', 'Manager', 'Provider'];
+    const items: string[] = new Array(count);
+
+    for (let i = 0; i < count; i++) {
+        const p = prefixes[i % prefixes.length];
+        const n = nouns[(i * 7 + 3) % nouns.length];
+        const s = suffixes[(i * 17 + 5) % suffixes.length];
+        items[i] = `${p}/${n}${s}_${i}.ts`;
+    }
+    return items;
+}
 
 async function runMockTests() {
     console.log('--- Running WebGPU Mock Tests (vgpu/mock) ---');
@@ -55,24 +76,123 @@ async function runMockTests() {
         console.log('   ✅ Staging buffer (65,544 bytes) verified');
     }
 
-    console.log('3. Testing dataset generation and mock VRAM loading...');
-    const dataset = generateDataset(500);
-    const { uploadTimeMs } = await engine.loadDataset(dataset);
-    console.log(`   ✅ Dataset loaded (500 items, ${dataset.byteLength} bytes, ${uploadTimeMs.toFixed(2)}ms)`);
+    console.log('3. Testing buffer packer and mock VRAM loading...');
+    const strings = generateTestStrings(500);
+    const packed = packStringsToGPUBuffer(strings, 64);
+    const { uploadTimeMs } = await engine.loadDataset({
+        size: strings.length,
+        strings,
+        gpuBufferData: packed.bufferData,
+        byteLength: packed.byteLength
+    });
+    console.log(`   ✅ Dataset loaded (500 items, ${packed.byteLength} bytes, ${uploadTimeMs.toFixed(2)}ms)`);
 
-    console.log('4. Testing search mutex and internal pipeline execution flow...');
-    // In mock, queue and buffers record calls
-    const searchPromise = engine.search('AuthController', { mode: 'fuzzy', maxResults: 100 });
-    const emptyQueryPromise = engine.search('', { mode: 'substring' });
-
-    const [emptyRes] = await Promise.all([emptyQueryPromise]);
+    console.log('4. Testing search execution and empty query handling...');
+    const emptyRes = await engine.search('', { mode: 'substring' });
     if (emptyRes.totalMatches !== 0 || emptyRes.results.length !== 0) {
         throw new Error('Empty query test failed');
     }
     console.log('   ✅ Empty query edge-case handled properly');
 
     engine.destroy();
-    console.log('   ✅ Resources cleaned up via engine.destroy()');
+    console.log('   ✅ Low-level engine resources cleaned up via engine.destroy()');
+
+    console.log('5. Testing high-level SearchIndex API with injected mock device...');
+    const searchIndex = await SearchIndex.create(strings, {
+        device: mockDevice,
+        preferGpu: true
+    });
+
+    const stats = searchIndex.getStats();
+    if (stats.engine !== 'webgpu') {
+        throw new Error(`Expected SearchIndex engine to be 'webgpu', got '${stats.engine}'`);
+    }
+    console.log(`   ✅ SearchIndex created with engine: ${stats.engine}, VRAM: ${stats.vramAllocatedBytes} bytes`);
+
+    const gpuSearchRes = await searchIndex.search('AuthController', { mode: 'fuzzy', limit: 20 });
+    if (gpuSearchRes.engine !== 'webgpu') {
+        throw new Error(`Expected search response engine to be 'webgpu', got '${gpuSearchRes.engine}'`);
+    }
+    console.log(`   ✅ SearchIndex search routed to WebGPU successfully (query: '${gpuSearchRes.query}')`);
+    searchIndex.destroy();
+
+    console.log('6. Testing high-level SearchIndex CPU auto-routing fallback...');
+    const smallStrings = ['apple', 'banana', 'orange', 'grape'];
+    const cpuIndex = await SearchIndex.create(smallStrings, { threshold: 30000 });
+    const cpuStats = cpuIndex.getStats();
+    if (cpuStats.engine !== 'cpu') {
+        throw new Error(`Expected small dataset to route to 'cpu', got '${cpuStats.engine}'`);
+    }
+
+    const cpuRes = await cpuIndex.search('an', { mode: 'fuzzy' });
+    if (cpuRes.engine !== 'cpu') {
+        throw new Error(`Expected search response engine to be 'cpu', got '${cpuRes.engine}'`);
+    }
+    if (cpuRes.results.length === 0) {
+        throw new Error('Expected matches for query "an" in small dataset');
+    }
+    // Verify unified score contract
+    for (const r of cpuRes.results) {
+        if (typeof r.score !== 'number' || typeof r.index !== 'number' || typeof r.text !== 'string') {
+            throw new Error(`Invalid SearchResultItem contract: ${JSON.stringify(r)}`);
+        }
+    }
+    console.log(`   ✅ CPU auto-routing verified (found ${cpuRes.results.length} matches with normalized scores)`);
+    cpuIndex.destroy();
+
+    console.log('7. Testing searchCold pipeline on WebGPUEngine...');
+    const coldEngine = new WebGPUEngine();
+    await coldEngine.init(mockDevice);
+    const coldRes = await coldEngine.searchCold({
+        size: strings.length,
+        strings,
+        gpuBufferData: packed.bufferData,
+        byteLength: packed.byteLength
+    }, 'Auth', { mode: 'substring' });
+    if (typeof coldRes.datasetUploadMs !== 'number' || typeof coldRes.coldTotalMs !== 'number') {
+        throw new Error('searchCold failed to report datasetUploadMs or coldTotalMs');
+    }
+    console.log(`   ✅ searchCold verified (coldTotalMs: ${coldRes.coldTotalMs.toFixed(2)}ms, upload: ${coldRes.datasetUploadMs.toFixed(2)}ms)`);
+    coldEngine.destroy();
+
+    console.log('8. Testing checkMemoryBudget and sanitizeStringForSlot...');
+    const underBudget = checkMemoryBudget(10_000, 64, mockDevice);
+    if (!underBudget.allowed) throw new Error('Expected 10,000 items to fit in budget');
+    const overBudget = checkMemoryBudget(30_000_000, 64, mockDevice);
+    if (overBudget.allowed) throw new Error('Expected 30M items to exceed 128MB budget');
+    console.log('   ✅ checkMemoryBudget correctly enforces hardware allocation limits');
+
+    const sanitized = sanitizeStringForSlot('Café crème naïve 🚀', 59);
+    if (sanitized !== 'Cafe creme naive ??') {
+        throw new Error(`Sanitization failed: got "${sanitized}"`);
+    }
+    console.log(`   ✅ sanitizeStringForSlot correctly strips diacritics and replaces non-ASCII: "${sanitized}"`);
+
+    console.log('9. Testing empty dataset edge-case on SearchIndex...');
+    const emptyIndex = await SearchIndex.create([], { preferGpu: true });
+    const emptyStats = emptyIndex.getStats();
+    if (emptyStats.engine !== 'cpu' || emptyStats.size !== 0) {
+        throw new Error('Empty dataset must route to CPU with size 0');
+    }
+    const emptySearchResult = await emptyIndex.search('test');
+    if (emptySearchResult.results.length !== 0 || emptySearchResult.totalMatches !== 0) {
+        throw new Error('Expected 0 results for search on empty dataset');
+    }
+    emptyIndex.destroy();
+    console.log('   ✅ Empty dataset handled cleanly without WebGPU allocation crash');
+
+    console.log('10. Testing caseSensitivity parity on CPUEngine...');
+    const cpuEngineTest = new CPUEngine();
+    const testCases = ['AuthController.ts', 'authcontroller.ts', 'AUTHCONTROLLER.TS'];
+    const caseSensitiveRes = cpuEngineTest.searchNative(testCases, 'Auth', 10, true);
+    if (caseSensitiveRes.totalMatches !== 1) {
+        throw new Error(`Expected exactly 1 case-sensitive match, got ${caseSensitiveRes.totalMatches}`);
+    }
+    const caseInsensitiveRes = cpuEngineTest.searchNative(testCases, 'Auth', 10, false);
+    if (caseInsensitiveRes.totalMatches !== 3) {
+        throw new Error(`Expected 3 case-insensitive matches, got ${caseInsensitiveRes.totalMatches}`);
+    }
+    console.log('   ✅ CPUEngine caseSensitive parameter verified');
 
     console.log('\n--- All vgpu/mock Tests Passed! (0ms GPU, 100% in-memory) ✅ ---');
 }

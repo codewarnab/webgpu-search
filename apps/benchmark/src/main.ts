@@ -1,8 +1,8 @@
-import { WebGPUEngine, type SearchResult } from './webgpu-engine.ts';
-import { CPUEngine, type CPUSearchResult } from './cpu-engine.ts';
-import { generateDataset, type Dataset } from './dataset.ts';
-import { BenchmarkRunner, type BenchmarkRowResult } from './benchmark.ts';
-import { svgToPngBlob, generateBenchmarkCsv, downloadBlob } from './export.ts';
+import { WebGPUEngine, CPUEngine, type SearchResult, type CPUSearchResult } from 'webgpu-search';
+import { generateDataset, type Dataset } from './dataset';
+import { BenchmarkRunner, type BenchmarkRowResult } from './benchmark';
+import { svgToPngBlob, generateBenchmarkCsv, downloadBlob } from './export';
+
 
 // State
 let gpuEngine: WebGPUEngine;

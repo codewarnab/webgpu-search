@@ -1,5 +1,5 @@
-import type { BenchmarkRowResult } from './benchmark.ts';
-import type { AdapterInfo } from './webgpu-engine.ts';
+import type { BenchmarkRowResult } from './benchmark';
+import type { AdapterInfo } from 'webgpu-search';
 
 /**
  * Converts an inline SVGSVGElement into a high-resolution PNG Blob

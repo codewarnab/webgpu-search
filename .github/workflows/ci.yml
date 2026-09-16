@@ -20,13 +20,16 @@ jobs:
           bun-version: latest
 
       - name: Install Dependencies
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Validate WGSL Shaders (vgpu check)
         run: bun run check:shaders
 
-      - name: Run WebGPU Mock Tests (vgpu/mock)
-        run: bun run test:mock
+      - name: Typecheck Workspaces
+        run: bun run typecheck
 
-      - name: Typecheck and Production Build
+      - name: Production Build (Turborepo)
         run: bun run build
+
+      - name: Run Headless WebGPU Mock Tests (vgpu/mock)
+        run: bun run test:mock

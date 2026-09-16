@@ -1,21 +1,73 @@
 import puppeteer from 'puppeteer-core';
 import path from 'path';
+import fs from 'fs';
+
+function getChromeExecutablePath(): string {
+    if (process.env.CHROME_BIN && fs.existsSync(process.env.CHROME_BIN)) {
+        return process.env.CHROME_BIN;
+    }
+    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+
+    const platform = process.platform;
+    if (platform === 'win32') {
+        const progFiles = process.env.PROGRAMFILES || 'C:\\Program Files';
+        const progFilesX86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+        const localAppData = process.env.LOCALAPPDATA || '';
+        const candidates = [
+            path.join(progFiles, 'Google\\Chrome\\Application\\chrome.exe'),
+            path.join(progFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
+            path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe'),
+            path.join(progFiles, 'Microsoft\\Edge\\Application\\msedge.exe')
+        ];
+        for (const p of candidates) {
+            if (fs.existsSync(p)) return p;
+        }
+    } else if (platform === 'darwin') {
+        const candidates = [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium'
+        ];
+        for (const p of candidates) {
+            if (fs.existsSync(p)) return p;
+        }
+    } else {
+        const candidates = [
+            '/usr/bin/google-chrome-stable',
+            '/usr/bin/google-chrome',
+            '/usr/bin/chromium-browser',
+            '/usr/bin/chromium',
+            '/snap/bin/chromium'
+        ];
+        for (const p of candidates) {
+            if (fs.existsSync(p)) return p;
+        }
+    }
+
+    throw new Error('Could not automatically find Chrome executable. Please set CHROME_BIN environment variable.');
+}
 
 async function main() {
     console.log('--- Running WebGPU Top-K & Timing Regression Tests ---');
-    const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    const chromePath = getChromeExecutablePath();
+    console.log(`Using Chrome binary: ${chromePath}`);
+
+    const args = [
+        '--enable-unsafe-webgpu',
+        '--enable-features=Vulkan,DefaultANGLEVulkan,WebGPU',
+        '--enable-gpu-rasterization',
+        '--no-sandbox',
+        '--disable-setuid-sandbox'
+    ];
+    if (process.platform === 'win32') {
+        args.push('--use-angle=d3d11');
+    }
 
     const browser = await puppeteer.launch({
         executablePath: chromePath,
         headless: 'new',
-        args: [
-            '--enable-unsafe-webgpu',
-            '--use-angle=d3d11',
-            '--enable-features=Vulkan,DefaultANGLEVulkan,WebGPU',
-            '--enable-gpu-rasterization',
-            '--no-sandbox',
-            '--disable-setuid-sandbox'
-        ]
+        args
     });
 
     try {

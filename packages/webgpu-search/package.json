@@ -1,0 +1,71 @@
+{
+  "name": "webgpu-search",
+  "version": "0.1.0",
+  "description": "Ultra-fast hybrid fuzzy and substring search library powered by WebGPU compute shaders with uFuzzy CPU fallback",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/codewarnab/webgpu-fuzzy-search.git",
+    "directory": "packages/webgpu-search"
+  },
+  "homepage": "https://github.com/codewarnab/webgpu-fuzzy-search#readme",
+  "bugs": {
+    "url": "https://github.com/codewarnab/webgpu-fuzzy-search/issues"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "check:shaders": "vgpu check src/shaders/fuzzy.wgsl && vgpu check src/shaders/substring.wgsl",
+    "typecheck": "tsc --noEmit",
+    "test": "bun run ../../scripts/test-vgpu-mock.ts"
+  },
+  "dependencies": {
+    "@leeoniya/ufuzzy": "^1.0.19"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.72",
+    "tsup": "^8.4.0",
+    "typescript": "~6.0.2",
+    "vgpu": "^0.5.0"
+  },
+  "peerDependencies": {
+    "@webgpu/types": "^0.1.72"
+  },
+  "peerDependenciesMeta": {
+    "@webgpu/types": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "webgpu",
+    "fuzzy-search",
+    "substring-search",
+    "search",
+    "autocomplete",
+    "wgsl",
+    "compute-shader",
+    "ufuzzy"
+  ],
+  "license": "MIT"
+}

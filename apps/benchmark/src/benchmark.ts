@@ -1,6 +1,5 @@
-import { WebGPUEngine } from './webgpu-engine.ts';
-import { CPUEngine } from './cpu-engine.ts';
-import { generateDataset, type Dataset } from './dataset.ts';
+import { WebGPUEngine, CPUEngine } from 'webgpu-search';
+import { generateDataset, type Dataset } from './dataset';
 
 export interface BenchmarkRowResult {
     datasetSize: number;

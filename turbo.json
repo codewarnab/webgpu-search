@@ -1,0 +1,31 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "tasks": {
+    "check:shaders": {
+      "inputs": ["src/shaders/**/*.wgsl"],
+      "outputs": []
+    },
+    "typecheck": {
+      "dependsOn": ["^build"],
+      "inputs": ["src/**/*.ts", "tsconfig.json", "$TURBO_ROOT$/tsconfig.base.json"],
+      "outputs": []
+    },
+    "build": {
+      "dependsOn": ["^build", "check:shaders"],
+      "inputs": ["src/**", "index.html", "package.json", "tsconfig.json", "tsup.config.ts", "vite.config.ts", "$TURBO_ROOT$/tsconfig.base.json"],
+      "outputs": ["dist/**"]
+    },
+    "test": {
+      "dependsOn": ["build"],
+      "inputs": ["src/**", "$TURBO_ROOT$/scripts/**"],
+      "outputs": []
+    },
+    "dev": {
+      "persistent": true,
+      "cache": false
+    },
+    "lint": {
+      "inputs": ["src/**"]
+    }
+  }
+}
