@@ -3,10 +3,10 @@ export type EngineType = 'webgpu' | 'cpu';
 
 export interface SearchOptions {
   mode?: SearchMode;              // Default: 'fuzzy'
-  limit?: number;                 // Max results (Default: 50, clamp: 8192)
+  limit?: number;                 // Max results; default 50, clamped to 1..8192
   caseSensitive?: boolean;        // Default: false
   signal?: AbortSignal;           // Cancel stale queries during rapid typing
-  maxResults?: number;            // Backwards-compatible alias for limit
+  maxResults?: number;            // Backwards-compatible alias; limit takes precedence
 }
 
 export interface SearchResultItem {
@@ -63,3 +63,4 @@ export interface AdapterInfo {
   maxComputeInvocationsPerWorkgroup: number;
   hasTimestampQuery: boolean;
 }
+
