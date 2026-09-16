@@ -32,6 +32,10 @@
             <span>VRAM Buffer Limit:</span>
             <strong id="hw-buffer">--</strong>
           </div>
+          <div class="hardware-row">
+            <span>UI Frame Rate:</span>
+            <strong id="hw-fps" style="color: #10b981; font-family: monospace;">120 FPS</strong>
+          </div>
         </div>
       </header>
 
@@ -77,6 +81,14 @@
                 <select id="search-mode-select">
                   <option value="substring" selected>Exact / Substring Match</option>
                   <option value="fuzzy">Fuzzy Subsequence + Score</option>
+                </select>
+              </div>
+
+              <div class="control-group">
+                <label for="execution-thread-select">Execution Thread:</label>
+                <select id="execution-thread-select">
+                  <option value="worker" selected>⚡ Dedicated Web Worker (120 FPS Offload)</option>
+                  <option value="main">🖥️ Main Thread (Direct UI Thread)</option>
                 </select>
               </div>
 

@@ -10,6 +10,10 @@ let cpuEngine: CPUEngine;
 let currentDataset: Dataset | null = null;
 let benchmarkRunner: BenchmarkRunner;
 
+let searchWorker: Worker | null = null;
+let workerReady = false;
+let activeQuerySeq = 0;
+
 let substringBenchmarkResults: BenchmarkRowResult[] = [];
 let fuzzyBenchmarkResults: BenchmarkRowResult[] = [];
 
@@ -18,9 +22,11 @@ const webgpuBadge = document.getElementById('webgpu-status-badge')!;
 const hwAdapter = document.getElementById('hw-adapter')!;
 const hwVendor = document.getElementById('hw-vendor')!;
 const hwBuffer = document.getElementById('hw-buffer')!;
+const hwFps = document.getElementById('hw-fps');
 
 const datasetSizeSelect = document.getElementById('dataset-size-select') as HTMLSelectElement;
 const searchModeSelect = document.getElementById('search-mode-select') as HTMLSelectElement;
+const executionThreadSelect = document.getElementById('execution-thread-select') as HTMLSelectElement;
 const btnReloadData = document.getElementById('btn-reload-data') as HTMLButtonElement;
 const activeDatasetSize = document.getElementById('active-dataset-size')!;
 
@@ -93,6 +99,49 @@ async function init() {
         hwBuffer.textContent = `${info.maxBufferSizeMB} MB`;
     }
 
+    // Initialize Web Worker for background search offloading
+    try {
+        searchWorker = new Worker(new URL('./search.worker.ts', import.meta.url), { type: 'module' });
+        searchWorker.postMessage({ type: 'INIT' });
+        searchWorker.onmessage = (e: MessageEvent) => {
+            const { type, payload } = e.data;
+            if (type === 'INIT_DONE') {
+                workerReady = true;
+            } else if (type === 'SEARCH_RESULTS') {
+                if (payload.queryId !== activeQuerySeq) return;
+                handleSearchResults(payload.gpuResult, payload.ufuzzyResult, payload.nativeResult, payload.query);
+            }
+        };
+    } catch (workerErr) {
+        console.warn('Dedicated Web Worker setup failed, falling back to main thread:', workerErr);
+    }
+
+    // UI Frame Rate (FPS) Telemetry
+    let frameCount = 0;
+    let lastFpsTime = performance.now();
+    function trackFps() {
+        frameCount++;
+        const now = performance.now();
+        const elapsed = now - lastFpsTime;
+        if (elapsed >= 500) {
+            const fps = Math.round((frameCount * 1000) / elapsed);
+            if (hwFps) {
+                hwFps.textContent = `${fps} FPS`;
+                if (fps >= 100) {
+                    hwFps.style.color = '#10b981';
+                } else if (fps >= 50) {
+                    hwFps.style.color = '#f59e0b';
+                } else {
+                    hwFps.style.color = '#ef4444';
+                }
+            }
+            frameCount = 0;
+            lastFpsTime = now;
+        }
+        requestAnimationFrame(trackFps);
+    }
+    requestAnimationFrame(trackFps);
+
     // Load Initial Dataset
     await switchDataset(100_000);
 
@@ -101,6 +150,12 @@ async function init() {
         const size = parseInt(datasetSizeSelect.value, 10);
         switchDataset(size);
     });
+
+    if (executionThreadSelect) {
+        executionThreadSelect.addEventListener('change', () => {
+            triggerSearch();
+        });
+    }
 
     btnReloadData.addEventListener('click', () => {
         const size = parseInt(datasetSizeSelect.value, 10);
@@ -250,6 +305,18 @@ async function switchDataset(size: number) {
 
     const { uploadTimeMs } = await gpuEngine.loadDataset(currentDataset);
 
+    // Sync dataset with background Web Worker (zero-copy memory transfer)
+    if (searchWorker && currentDataset) {
+        searchWorker.postMessage({
+            type: 'LOAD_DATASET',
+            payload: {
+                strings: currentDataset.strings,
+                recordsBufferData: currentDataset.recordsBufferData.slice(0),
+                offsetsBufferData: currentDataset.offsetsBufferData.slice(0)
+            }
+        });
+    }
+
     activeDatasetSize.textContent = gpuEngine.isReady
         ? `${size.toLocaleString()} items (Gen: ${genTime.toFixed(0)}ms, VRAM upload: ${uploadTimeMs.toFixed(1)}ms)`
         : `${size.toLocaleString()} items (Gen: ${genTime.toFixed(0)}ms, CPU Ready)`;
@@ -266,10 +333,64 @@ function triggerSearch() {
     searchDebounceTimer = setTimeout(executeLiveSearch, 20);
 }
 
+function handleSearchResults(
+    gpuResult: SearchResult | null,
+    ufuzzyResult: CPUSearchResult | null,
+    nativeResult: CPUSearchResult | null,
+    query: string
+) {
+    const ufuzzyTotal = ufuzzyResult?.durationMs ?? 0;
+    const nativeTotal = nativeResult?.durationMs ?? 0;
+
+    meterUfuzzyVal.textContent = ufuzzyResult ? `${ufuzzyTotal.toFixed(2)} ms` : '-- ms';
+    meterNativeVal.textContent = nativeResult ? `${nativeTotal.toFixed(2)} ms` : '-- ms';
+
+    resetMeterHighlights();
+
+    if (gpuResult) {
+        const gpuTotal = gpuResult.timings.totalMs;
+        meterGpuVal.textContent = `${gpuTotal.toFixed(2)} ms`;
+        const execLabel = gpuResult.timings.gpuExecutionMs !== null
+            ? `Exec: ${gpuResult.timings.gpuExecutionMs.toFixed(2)}ms | `
+            : '';
+        meterGpuSub.textContent = `${execLabel}Submit: ${gpuResult.timings.encodeSubmitMs.toFixed(2)}ms | Readback: ${gpuResult.timings.readbackMs.toFixed(2)}ms`;
+
+        const minTime = Math.min(gpuTotal, ufuzzyTotal > 0 ? ufuzzyTotal : Infinity, nativeTotal > 0 ? nativeTotal : Infinity);
+        if (minTime === gpuTotal) {
+            meterGpu.classList.add('winner');
+        } else if (minTime === ufuzzyTotal) {
+            meterUfuzzy.classList.add('winner');
+        } else {
+            meterNative.classList.add('winner');
+        }
+
+        const overflowBadge = gpuResult.hasOverflow
+            ? ` (⚠️ pool overflow: top ${gpuResult.results.length} of ${gpuResult.totalMatches.toLocaleString()})`
+            : '';
+        resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU)${overflowBadge} | ${ufuzzyResult ? ufuzzyResult.totalMatches.toLocaleString() : 0} (uFuzzy)`;
+        renderResults(gpuResult.results, query);
+    } else {
+        meterGpuVal.textContent = 'Disabled';
+        meterGpuSub.textContent = 'WebGPU unavailable';
+
+        if (ufuzzyTotal <= nativeTotal) {
+            meterUfuzzy.classList.add('winner');
+        } else {
+            meterNative.classList.add('winner');
+        }
+
+        resultsCountSummary.textContent = `Found ${ufuzzyResult ? ufuzzyResult.totalMatches.toLocaleString() : 0} matches (uFuzzy) | ${nativeResult ? nativeResult.totalMatches.toLocaleString() : 0} (JS Native)`;
+        if (ufuzzyResult) {
+            renderResults(ufuzzyResult.results, query);
+        }
+    }
+}
+
 async function executeLiveSearch() {
     if (!currentDataset) return;
     const query = searchQueryInput.value.trim();
     const mode = searchModeSelect.value as 'substring' | 'fuzzy';
+    const threadMode = executionThreadSelect?.value || 'worker';
 
     if (!query) {
         meterGpuVal.textContent = '-- ms';
@@ -282,7 +403,24 @@ async function executeLiveSearch() {
         return;
     }
 
-    // 1. WebGPU Retained Search (if available)
+    const queryId = ++activeQuerySeq;
+
+    // 1. Offload to Web Worker if worker mode selected and worker is ready
+    if (threadMode === 'worker' && searchWorker && workerReady) {
+        searchWorker.postMessage({
+            type: 'SEARCH',
+            payload: {
+                queryId,
+                query,
+                mode,
+                limit: 1000,
+                runCpuComparison: true
+            }
+        });
+        return;
+    }
+
+    // 2. Direct Main Thread Execution (UI thread)
     let gpuResult: SearchResult | null = null;
     if (gpuEngine.isReady) {
         try {
@@ -292,55 +430,11 @@ async function executeLiveSearch() {
         }
     }
 
-    // 2. uFuzzy CPU Search
     const ufuzzyResult: CPUSearchResult = cpuEngine.searchUFuzzy(currentDataset.strings, query, 1000);
-
-    // 3. Native JS CPU Search
     const nativeResult: CPUSearchResult = cpuEngine.searchNative(currentDataset.strings, query, 1000);
 
-    // Update Meter Displays
-    const ufuzzyTotal = ufuzzyResult.durationMs;
-    const nativeTotal = nativeResult.durationMs;
-
-    meterUfuzzyVal.textContent = `${ufuzzyTotal.toFixed(2)} ms`;
-    meterNativeVal.textContent = `${nativeTotal.toFixed(2)} ms`;
-
-    resetMeterHighlights();
-
-    if (gpuEngine.isReady && gpuResult) {
-        const gpuTotal = gpuResult.timings.totalMs;
-        meterGpuVal.textContent = `${gpuTotal.toFixed(2)} ms`;
-        const execLabel = gpuResult.timings.gpuExecutionMs !== null
-            ? `Exec: ${gpuResult.timings.gpuExecutionMs.toFixed(2)}ms | `
-            : '';
-        meterGpuSub.textContent = `${execLabel}Submit: ${gpuResult.timings.encodeSubmitMs.toFixed(2)}ms | Readback: ${gpuResult.timings.readbackMs.toFixed(2)}ms`;
-
-        const minTime = Math.min(gpuTotal, ufuzzyTotal, nativeTotal);
-        if (minTime === gpuTotal) {
-            meterGpu.classList.add('winner');
-        } else if (minTime === ufuzzyTotal) {
-            meterUfuzzy.classList.add('winner');
-        } else {
-            meterNative.classList.add('winner');
-        }
-
-        const overflowBadge = gpuResult.hasOverflow
-            ? ` (⚠️ pool overflow: top ${gpuResult.results.length} of ${gpuResult.totalMatches.toLocaleString()})`
-            : '';
-        resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU)${overflowBadge} | ${ufuzzyResult.totalMatches.toLocaleString()} (uFuzzy)`;
-        renderResults(gpuResult.results, query);
-    } else {
-        meterGpuVal.textContent = 'Disabled';
-        meterGpuSub.textContent = 'WebGPU unavailable';
-
-        if (ufuzzyTotal <= nativeTotal) {
-            meterUfuzzy.classList.add('winner');
-        } else {
-            meterNative.classList.add('winner');
-        }
-
-        resultsCountSummary.textContent = `Found ${ufuzzyResult.totalMatches.toLocaleString()} matches (uFuzzy) | ${nativeResult.totalMatches.toLocaleString()} (JS Native)`;
-        renderResults(ufuzzyResult.results, query);
+    if (queryId === activeQuerySeq) {
+        handleSearchResults(gpuResult, ufuzzyResult, nativeResult, query);
     }
 }
 
