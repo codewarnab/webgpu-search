@@ -9,7 +9,7 @@ Ultra-fast hybrid fuzzy and substring search library for the web. Powered by par
 
 ## ⚡ Features
 
-- **Sub-2ms Searches**: Parallel WGSL compute shaders process millions of rows directly in GPU VRAM.
+- **Measured GPU Acceleration**: On the documented Intel Iris Xe / Windows 11 / D3D11 ANGLE run, retained end-to-end WebGPU searches measured 3.13-17.27 ms for 100,000-2,000,000 rows, excluding one documented 59.10 ms outlier. Results vary by device, browser, query, dataset, timestamp-query support, and candidate overflow.
 - **Smart Dynamic Routing**: Executes in WebGPU when dataset scale benefits from parallel GPU hardware (default: $\ge$ 30,000 items), and routes to uFuzzy on CPU when small or when WebGPU is unavailable.
 - **Zero-Stutter Concurrency**: Drops stale readbacks during rapid keystrokes with `AbortSignal` and monotonic sequence tagging.
 - **Context Multiplexing**: Single shared `GPUDevice` pooled across all search indexes to prevent browser context exhaustion.
@@ -56,7 +56,7 @@ index.destroy();
 
 Search performance depends on dataset size:
 - **Small Datasets (< 30k rows)**: CPU overhead is negligible (< 1ms). WebGPU kernel dispatch and buffer mapping would add unnecessary latency.
-- **Large Datasets ($\ge$ 30k to 2M+ rows)**: Parallel GPU compute pipelines scan entire datasets in parallel in **1.5ms – 3ms**, whereas CPU single-threaded matching scales linearly into dozens or hundreds of milliseconds.
+- **Large Datasets ($\ge$ 30k to 2M+ rows)**: Parallel GPU compute can outperform CPU matching, but the crossover and latency depend on the device, browser, query, dataset, timestamp-query support, and candidate overflow. See the root README for the current measured run and methodology.
 
 | Dataset Size | CPU (uFuzzy) | WebGPU (Retained VRAM) | Speedup | Servicing Engine |
 | :--- | :--- | :--- | :--- | :--- |
@@ -150,3 +150,4 @@ Releases GPU buffers and releases reference from the shared context manager.
 ## 📄 License
 
 MIT © 2026
+
