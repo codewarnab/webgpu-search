@@ -4,37 +4,39 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>WebGPU vs CPU (uFuzzy) Search Benchmark & Prototype</title>
+    <title>webgpu-search &mdash; GPU Compute vs CPU Search Benchmark</title>
     <link rel="stylesheet" href="./src/style.css" />
   </head>
   <body>
-    <div class="container">
-      <header>
-        <div class="title-area">
-          <h1>
-            WebGPU vs uFuzzy Benchmark
-            <span class="badge badge-webgpu" id="webgpu-status-badge">WebGPU Initializing...</span>
-          </h1>
-          <p class="subtitle">
-            Evaluating WebGPU compute shaders vs uFuzzy and CPU search across 10k to 2M+ rows.
-          </p>
+    <div class="app-container">
+      <!-- Minimalist Top Navigation / Header -->
+      <header class="top-nav">
+        <div class="brand-group">
+          <div class="brand-logo">⚡</div>
+          <div class="brand-text">
+            <span class="brand-name">webgpu-search</span>
+            <span class="brand-version">v0.1.0</span>
+          </div>
+          <div class="badge badge-webgpu" id="webgpu-status-badge">WebGPU Initializing...</div>
         </div>
-        <div class="hardware-card" id="hardware-info">
-          <div class="hardware-row">
-            <span>Adapter:</span>
-            <strong id="hw-adapter">Detecting...</strong>
+
+        <div class="telemetry-strip" id="hardware-info">
+          <div class="telemetry-item" title="Active Graphics Hardware">
+            <span class="telemetry-label">DEVICE</span>
+            <strong class="telemetry-val" id="hw-adapter">Detecting...</strong>
           </div>
-          <div class="hardware-row">
-            <span>Arch / Vendor:</span>
-            <strong id="hw-vendor">Detecting...</strong>
+          <div class="telemetry-item" title="Hardware Vendor & Architecture">
+            <span class="telemetry-label">ARCH</span>
+            <strong class="telemetry-val" id="hw-vendor">--</strong>
           </div>
-          <div class="hardware-row">
-            <span>VRAM Buffer Limit:</span>
-            <strong id="hw-buffer">--</strong>
+          <div class="telemetry-item" title="VRAM Staging Buffer Limit">
+            <span class="telemetry-label">VRAM LIMIT</span>
+            <strong class="telemetry-val mono" id="hw-buffer">--</strong>
           </div>
-          <div class="hardware-row">
-            <span>UI Frame Rate:</span>
-            <strong id="hw-fps" style="color: #10b981; font-family: monospace;">120 FPS</strong>
+          <div class="telemetry-item telemetry-fps-item" title="Current UI Thread Frame Rate">
+            <span class="pulse-dot"></span>
+            <span class="telemetry-label">UI THREAD</span>
+            <strong class="telemetry-val mono text-emerald" id="hw-fps">120 FPS</strong>
           </div>
         </div>
       </header>
@@ -43,30 +45,31 @@
       <div id="webgpu-warning-banner" class="warning-banner" style="display: none;">
         <div class="warning-banner-header">
           <span class="warning-banner-icon">⚠️</span>
-          <strong>WebGPU is currently disabled in your browser &mdash; Running in CPU Fallback Mode (uFuzzy & Native JS)</strong>
-        </div>
-        <div class="warning-banner-body">
-          <p>Chrome says WebGPU is supported, but it is often turned off on laptops due to hardware acceleration toggles or driver blocklists. To enable WebGPU:</p>
-          <ol>
-            <li>Open <code>chrome://settings/system</code> &rarr; Ensure <strong>"Use graphics acceleration when available"</strong> is <strong>ON</strong> &rarr; Click <strong>Relaunch</strong>.</li>
-            <li>If still not working, open <code>chrome://flags/#enable-unsafe-webgpu</code> &rarr; Set to <strong>Enabled</strong> &rarr; Click <strong>Relaunch</strong>.</li>
-            <li>Verify by opening <code>chrome://gpu</code> and checking that <strong>WebGPU</strong> reads <em>"Hardware accelerated"</em>.</li>
-          </ol>
+          <div>
+            <strong>WebGPU is currently disabled in your browser &mdash; Running in CPU Fallback Mode (uFuzzy & Native JS)</strong>
+            <p class="warning-banner-sub">Enable graphics acceleration in <code>chrome://settings/system</code> or turn on <code>chrome://flags/#enable-unsafe-webgpu</code> to unlock 120 FPS GPU compute.</p>
+          </div>
         </div>
       </div>
 
-      <div class="dashboard-grid">
-        <!-- Interactive Search Playground -->
-        <div class="card">
-          <div class="card-title">
-            <span>⚡ Interactive Search Playground</span>
-            <span id="active-dataset-size" style="font-size: 0.85rem; color: var(--text-muted);">100,000 items</span>
+      <main class="main-content">
+        <!-- Section 1: Interactive Search Console -->
+        <section class="card console-card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="card-eyebrow">PLAYGROUND</span>
+              <h2 class="card-title">Interactive Search Console</h2>
+            </div>
+            <div class="header-status">
+              <span class="dataset-badge" id="active-dataset-size">100,000 items</span>
+            </div>
           </div>
 
-          <div class="search-controls">
-            <div class="row-controls">
-              <div class="control-group">
-                <label for="dataset-size-select">Dataset Size:</label>
+          <!-- Controls Bar -->
+          <div class="controls-toolbar">
+            <div class="control-group">
+              <label for="dataset-size-select">DATASET SIZE</label>
+              <div class="select-wrapper">
                 <select id="dataset-size-select">
                   <option value="10000">10,000 items</option>
                   <option value="100000" selected>100,000 items</option>
@@ -75,170 +78,163 @@
                   <option value="2000000">2,000,000 items</option>
                 </select>
               </div>
+            </div>
 
-              <div class="control-group">
-                <label for="search-mode-select">Algorithm:</label>
+            <div class="control-group">
+              <label for="search-mode-select">ALGORITHM</label>
+              <div class="select-wrapper">
                 <select id="search-mode-select">
                   <option value="substring" selected>Exact / Substring Match</option>
                   <option value="fuzzy">Fuzzy Subsequence + Score</option>
                 </select>
               </div>
+            </div>
 
-              <div class="control-group">
-                <label for="execution-thread-select">Execution Thread:</label>
+            <div class="control-group">
+              <label for="execution-thread-select">EXECUTION THREAD</label>
+              <div class="select-wrapper">
                 <select id="execution-thread-select">
-                  <option value="worker" selected>⚡ Dedicated Web Worker (120 FPS Offload)</option>
-                  <option value="main">🖥️ Main Thread (Direct UI Thread)</option>
+                  <option value="worker" selected>⚡ Web Worker (120 FPS Offloaded)</option>
+                  <option value="main">🖥️ Main Thread (Direct UI)</option>
                 </select>
               </div>
-
-              <button class="btn-secondary" id="btn-reload-data">Regenerate Dataset</button>
             </div>
 
-            <div class="search-input-wrapper">
-              <input
-                type="text"
-                class="search-input"
-                id="search-query-input"
-                placeholder="Type query in real-time (e.g. AuthController, Billing, Modal)..."
-                value="AuthController"
-              />
-            </div>
+            <button class="btn-ghost" id="btn-reload-data" title="Re-seed synthetic dataset in memory">
+              ↻ Regenerate Data
+            </button>
+          </div>
 
-            <!-- Edge case presets -->
-            <div class="edge-case-chips">
-              <span style="font-size: 0.75rem; color: var(--text-muted); align-self: center;">Edge Presets:</span>
-              <button class="btn-chip" data-query="AuthController">Normal ("AuthController")</button>
+          <!-- Search Input Bar -->
+          <div class="search-box">
+            <div class="search-input-prefix">🔍</div>
+            <input
+              type="text"
+              class="search-input"
+              id="search-query-input"
+              placeholder="Type in real-time to query millions of records (e.g. AuthController, Billing, Modal)..."
+              value="AuthController"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+
+          <!-- Edge Case Presets -->
+          <div class="presets-bar">
+            <span class="presets-label">QUICK QUERIES:</span>
+            <div class="preset-chips">
+              <button class="btn-chip" data-query="AuthController">AuthController</button>
               <button class="btn-chip" data-query="rsctl">Acronym ("rsctl")</button>
               <button class="btn-chip" data-query="src">High-Match ("src")</button>
               <button class="btn-chip" data-query="a">Single-Char ("a")</button>
-              <button class="btn-chip" data-query="@tanstack/react">Symbols ("@tanstack/react")</button>
-              <button class="btn-chip" data-query="xyz999_nomatch">Zero-Match ("xyz999_nomatch")</button>
+              <button class="btn-chip" data-query="@tanstack/react">Symbols ("@tanstack")</button>
+              <button class="btn-chip" data-query="xyz999_nomatch">Zero-Match</button>
             </div>
           </div>
 
-          <!-- Latency Meters -->
-          <div class="meters-grid">
-            <div class="meter-card gpu" id="meter-gpu">
-              <div class="meter-label">WebGPU (Retained VRAM)</div>
-              <div class="meter-value" id="meter-gpu-val">-- ms</div>
-              <div class="meter-sub" id="meter-gpu-sub">Dispatch: -- | Readback: --</div>
+          <!-- Minimalist 4-Metric Performance Strip -->
+          <div class="metrics-strip">
+            <div class="metric-block metric-gpu" id="meter-gpu">
+              <div class="metric-eyebrow">WEBGPU (RETAINED)</div>
+              <div class="metric-value mono" id="meter-gpu-val">-- ms</div>
+              <div class="metric-footnote" id="meter-gpu-sub">Dispatch: -- | Readback: --</div>
             </div>
-            <div class="meter-card ufuzzy" id="meter-ufuzzy">
-              <div class="meter-label">uFuzzy (CPU)</div>
-              <div class="meter-value" id="meter-ufuzzy-val">-- ms</div>
-              <div class="meter-sub" id="meter-ufuzzy-sub">Multi-term filter + sort</div>
+
+            <div class="metric-block metric-ufuzzy" id="meter-ufuzzy">
+              <div class="metric-eyebrow">UFUZZY (CPU)</div>
+              <div class="metric-value mono" id="meter-ufuzzy-val">-- ms</div>
+              <div class="metric-footnote">Multi-term filter + sort</div>
             </div>
-            <div class="meter-card native" id="meter-native">
-              <div class="meter-label">JS Native (CPU)</div>
-              <div class="meter-value" id="meter-native-val">-- ms</div>
-              <div class="meter-sub" id="meter-native-sub">String.prototype.includes</div>
+
+            <div class="metric-block metric-native" id="meter-native">
+              <div class="metric-eyebrow">JS NATIVE (CPU)</div>
+              <div class="metric-value mono" id="meter-native-val">-- ms</div>
+              <div class="metric-footnote">String.prototype.includes</div>
             </div>
-            <div class="meter-card fps" id="meter-fps">
-              <div class="meter-label">UI Thread Frame Rate</div>
-              <div class="meter-value" id="meter-fps-val" style="color: #10b981;">120 FPS</div>
-              <div class="meter-sub" id="meter-fps-sub">Live UI Thread Responsiveness</div>
+
+            <div class="metric-block metric-fps" id="meter-fps">
+              <div class="metric-eyebrow">UI FRAME RATE</div>
+              <div class="metric-value mono text-emerald" id="meter-fps-val">120 FPS</div>
+              <div class="metric-footnote" id="meter-fps-sub">Live UI Thread Responsiveness</div>
             </div>
           </div>
 
-          <!-- Live Results -->
-          <div style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.4rem; display: flex; justify-content: space-between;">
-            <span id="results-count-summary">Matched 0 items</span>
-            <span>Top 50 displayed</span>
-          </div>
-          <div class="results-box" id="results-list">
-            <div style="color: var(--text-muted); text-align: center; margin-top: 2rem;">
-              Type in the box above to trigger real-time search.
+          <!-- Live Results Output -->
+          <div class="results-container">
+            <div class="results-header">
+              <span id="results-count-summary" class="mono text-muted">Matched 0 items</span>
+              <span class="text-dim">Top 50 displayed</span>
+            </div>
+            <div class="results-list" id="results-list">
+              <div class="results-empty">Type in the box above to trigger instant search.</div>
             </div>
           </div>
-        </div>
+        </section>
 
-        <!-- Quick Summary & Findings Preview -->
-        <div class="card">
-          <div class="card-title">
-            <span>🔬 Key Architectural Takeaways</span>
-            <span class="badge" style="background: rgba(245, 158, 11, 0.15); color: var(--color-ufuzzy); border: 1px solid rgba(245, 158, 11, 0.3);">Crossover Reality</span>
-          </div>
-
-          <div style="display: flex; flex-direction: column; gap: 0.85rem; font-size: 0.9rem; color: var(--text-secondary);">
-            <div style="background: var(--bg-card); padding: 0.85rem; border-radius: var(--radius-md); border-left: 3px solid var(--color-gpu);">
-              <strong style="color: var(--text-primary); display: block; margin-bottom: 0.2rem;">1. Retained VRAM vs Cold Upload</strong>
-              Uploading 1M rows over PCIe takes ~8–20ms. If data is re-uploaded every keystroke, CPU <em>always</em> wins. But when data is retained in GPU VRAM (loaded once), keystroke search only sends a 272-byte uniform, unlocking pure GPU compute speed.
+        <!-- Section 2: End-to-End Matrix Benchmark -->
+        <section class="card benchmark-card">
+          <div class="benchmark-header">
+            <div>
+              <span class="card-eyebrow">EVALUATION</span>
+              <h2 class="card-title">Full Matrix Benchmark Suite</h2>
+              <p class="card-subtitle">Stress-testing isolated WebGPU vs uFuzzy vs JS Native across 10k to 2M records</p>
             </div>
 
-            <div style="background: var(--bg-card); padding: 0.85rem; border-radius: var(--radius-md); border-left: 3px solid var(--color-ufuzzy);">
-              <strong style="color: var(--text-primary); display: block; margin-bottom: 0.2rem;">2. The mapAsync() Fixed Latency Floor</strong>
-              WebGPU buffer mapping has a fixed ~1ms to 3ms round-trip overhead. Below 50k items, uFuzzy executes in &lt;1ms on CPU, making CPU 4× faster at small scale. Above 100k–2M items, CPU slows down to 17–160ms+, while GPU compute stays near flat.
-            </div>
-
-            <div style="background: var(--bg-card); padding: 0.85rem; border-radius: var(--radius-md); border-left: 3px solid var(--color-success);">
-              <strong style="color: var(--text-primary); display: block; margin-bottom: 0.2rem;">3. Candidate Pool Compaction & CPU Ranking</strong>
-              Instead of transferring all 2,000,000 rows, the compute shader writes up to 8,192 scored candidates into a compact 64 KB buffer. The CPU then sorts candidates by score to return the top 1,000, eliminating PCIe readback bottleneck while avoiding premature match dropping.
-            </div>
-          </div>
-        </div>
-
-        <!-- Full Matrix Benchmark Card -->
-        <div class="card benchmark-card">
-          <div class="card-title">
-            <span>📊 End-to-End Matrix Benchmark (10k ➔ 2M Items)</span>
-            <div style="display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;">
-              <span id="benchmark-status" style="font-size: 0.85rem; color: var(--text-muted);">Ready to run</span>
+            <div class="benchmark-actions">
+              <span class="benchmark-status mono" id="benchmark-status">Ready</span>
               <button class="btn-primary" id="btn-run-benchmark">
-                ▶ Run Benchmark (All Algos: Substring + Fuzzy)
+                ▶ Run Matrix Benchmark
               </button>
             </div>
           </div>
 
-          <!-- Download Action Bar -->
-          <div class="download-bar" id="download-bar" style="display: flex; gap: 0.6rem; align-items: center; margin-bottom: 1.25rem; flex-wrap: wrap; background: var(--bg-card); padding: 0.75rem 1rem; border-radius: var(--radius-md); border: 1px solid var(--border-color);">
-            <strong style="font-size: 0.85rem; color: var(--text-primary);">📥 Export Results:</strong>
-            <button class="btn-download btn-download-primary" id="btn-download-all" disabled>
-              📥 Download All (2 Images + 1 CSV File)
-            </button>
-            <button class="btn-download" id="btn-download-csv" disabled>
-              📊 Export CSV (Excel)
-            </button>
-            <button class="btn-download" id="btn-download-png-sub" disabled>
-              🖼️ Substring Chart (PNG)
-            </button>
-            <button class="btn-download" id="btn-download-png-fuz" disabled>
-              🖼️ Fuzzy Chart (PNG)
-            </button>
-            <button class="btn-download" id="btn-copy-summary" disabled>
-              📋 Copy Markdown Summary
-            </button>
-          </div>
-
-          <!-- Progress bar -->
-          <div class="progress-container" id="benchmark-progress-box">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
-              <div class="progress-status" id="benchmark-progress-text" style="margin-bottom: 0;">Initializing benchmark matrix...</div>
-              <div style="font-size: 0.8rem; font-weight: 600; color: #10b981; font-family: monospace; background: rgba(16, 185, 129, 0.1); padding: 0.2rem 0.6rem; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.2); white-space: nowrap;">
-                UI Thread: <span id="benchmark-fps-val">120 FPS</span>
-              </div>
-            </div>
-            <div class="progress-bar-bg">
-              <div class="progress-bar-fill" id="benchmark-progress-bar"></div>
+          <!-- Export Toolbar -->
+          <div class="export-toolbar" id="download-bar">
+            <span class="export-label">EXPORT ASSETS:</span>
+            <div class="export-buttons">
+              <button class="btn-export" id="btn-copy-summary" disabled>
+                📋 Copy Markdown Summary
+              </button>
+              <button class="btn-export" id="btn-download-csv" disabled>
+                📊 CSV Spreadsheet
+              </button>
+              <button class="btn-export" id="btn-download-png-sub" disabled>
+                🖼️ Substring Chart
+              </button>
+              <button class="btn-export" id="btn-download-png-fuz" disabled>
+                🖼️ Fuzzy Chart
+              </button>
+              <button class="btn-export btn-export-all" id="btn-download-all" disabled>
+                📥 Download All (2 Images + 1 CSV)
+              </button>
             </div>
           </div>
 
-          <!-- Benchmark Tabs (Substring vs Fuzzy) -->
-          <div class="tab-header">
-            <button class="tab-btn active" id="tab-btn-substring">⚡ Substring Search Matrix</button>
-            <button class="tab-btn" id="tab-btn-fuzzy">🔍 Fuzzy Subsequence Matrix</button>
+          <!-- Sleek Progress Box -->
+          <div class="progress-box" id="benchmark-progress-box">
+            <div class="progress-meta">
+              <span class="progress-status mono" id="benchmark-progress-text">Initializing benchmark suite...</span>
+              <span class="progress-fps mono text-emerald">UI Thread: <strong id="benchmark-fps-val">120 FPS</strong></span>
+            </div>
+            <div class="progress-track">
+              <div class="progress-indicator" id="benchmark-progress-bar"></div>
+            </div>
+          </div>
+
+          <!-- Algorithm Tabs -->
+          <div class="tab-strip">
+            <button class="tab-pill active" id="tab-btn-substring">⚡ Substring Matrix</button>
+            <button class="tab-pill" id="tab-btn-fuzzy">🔍 Fuzzy Subsequence Matrix</button>
           </div>
 
           <!-- SUBSTRING PANEL -->
           <div class="tab-panel active" id="panel-substring">
-            <div class="chart-container">
-              <div style="width: 100%; height: 340px;">
-                <svg id="benchmark-chart-substring" width="100%" height="340" viewBox="0 0 1000 340"></svg>
-              </div>
+            <div class="chart-wrapper">
+              <svg id="benchmark-chart-substring" width="100%" height="340" viewBox="0 0 1000 340"></svg>
             </div>
 
-            <div class="table-wrapper">
-              <table>
+            <div class="table-container">
+              <table class="benchmark-table">
                 <thead>
                   <tr>
                     <th>Dataset Size (N)</th>
@@ -256,8 +252,8 @@
                 </thead>
                 <tbody id="table-body-substring">
                   <tr>
-                    <td colspan="11" style="text-align: center; color: var(--text-muted); padding: 2rem;">
-                      Click "Run Benchmark (All Algos)" above to execute.
+                    <td colspan="11" class="table-empty">
+                      Click "Run Matrix Benchmark" to execute the 10k to 2M dataset test suite.
                     </td>
                   </tr>
                 </tbody>
@@ -267,14 +263,12 @@
 
           <!-- FUZZY PANEL -->
           <div class="tab-panel" id="panel-fuzzy">
-            <div class="chart-container">
-              <div style="width: 100%; height: 340px;">
-                <svg id="benchmark-chart-fuzzy" width="100%" height="340" viewBox="0 0 1000 340"></svg>
-              </div>
+            <div class="chart-wrapper">
+              <svg id="benchmark-chart-fuzzy" width="100%" height="340" viewBox="0 0 1000 340"></svg>
             </div>
 
-            <div class="table-wrapper">
-              <table>
+            <div class="table-container">
+              <table class="benchmark-table">
                 <thead>
                   <tr>
                     <th>Dataset Size (N)</th>
@@ -292,46 +286,88 @@
                 </thead>
                 <tbody id="table-body-fuzzy">
                   <tr>
-                    <td colspan="11" style="text-align: center; color: var(--text-muted); padding: 2rem;">
-                      Click "Run Benchmark (All Algos)" above to execute.
+                    <td colspan="11" class="table-empty">
+                      Click "Run Matrix Benchmark" to execute the 10k to 2M dataset test suite.
                     </td>
                   </tr>
                 </tbody>
               </table>
             </div>
           </div>
+        </section>
 
-          <!-- Detailed Technical Breakdown -->
-          <div class="analysis-grid">
-            <div class="analysis-item">
-              <h4>Warp Divergence in WGSL</h4>
-              <p>
-                Variable-length string matching creates warp divergence across SIMD lanes. However, bounding strings to fixed slots (64 bytes) caps thread branch depth to 60 iterations, enabling massive parallel throughput despite divergence.
-              </p>
+        <!-- Section 3: Clean Collapsible Architecture Insights -->
+        <details class="insights-drawer">
+          <summary class="insights-summary">
+            <div class="summary-left">
+              <span class="summary-icon">🔬</span>
+              <strong class="summary-title">Architectural Deep-Dive & Crossover Mechanics</strong>
+              <span class="summary-badge">3 Core Takeaways</span>
             </div>
-            <div class="analysis-item">
-              <h4>Where the Crossover Sits</h4>
-              <p>
-                At N &lt; 50,000, CPU uFuzzy is faster (&lt;1ms) than WebGPU's async mapAsync round-trip (~3ms). Between 50,000 and 100,000 rows, WebGPU crosses over and takes the lead. At 2M rows, GPU is ~9× to 20× faster.
-              </p>
+            <span class="summary-toggle-indicator">Expand Details</span>
+          </summary>
+
+          <div class="insights-content">
+            <div class="insight-card border-gpu">
+              <div class="insight-number mono">01</div>
+              <div>
+                <h4 class="insight-title">Retained VRAM vs Cold Upload</h4>
+                <p class="insight-text">
+                  Uploading 1M rows over PCIe takes ~8–20ms. If data is re-uploaded every keystroke, CPU <em>always</em> wins. But when data is retained in GPU VRAM (loaded once into storage buffers), keystroke search only dispatches a 272-byte uniform, unlocking pure GPU compute speed.
+                </p>
+              </div>
             </div>
-            <div class="analysis-item">
-              <h4>Ideal Target Workloads</h4>
-              <p>
-                In-browser log analysis, IDE-scale workspace symbol search (Monaco/VSCode web), large client-side SQLite/DuckDB tables, genomic sequence filtering, and network packet inspectors.
-              </p>
+
+            <div class="insight-card border-ufuzzy">
+              <div class="insight-number mono">02</div>
+              <div>
+                <h4 class="insight-title">The mapAsync() Fixed Latency Floor</h4>
+                <p class="insight-text">
+                  WebGPU buffer mapping has an inherent ~1ms to 3ms round-trip overhead. Below 50k items, uFuzzy executes in &lt;1ms on CPU, making CPU 4× faster at small scale. Above 100k–2M items, CPU slows down to 17–160ms+, while GPU compute stays near flat.
+                </p>
+              </div>
+            </div>
+
+            <div class="insight-card border-emerald">
+              <div class="insight-number mono">03</div>
+              <div>
+                <h4 class="insight-title">Candidate Pool Compaction & CPU Ranking</h4>
+                <p class="insight-text">
+                  Instead of transferring 2,000,000 rows across PCIe, the compute shader writes up to 8,192 scored candidates into a compact 64 KB buffer using atomic counters. The CPU then sorts candidates by score to return the top 1,000, avoiding PCIe bottlenecks while keeping the UI at 120 FPS.
+                </p>
+              </div>
+            </div>
+
+            <div class="insight-card border-muted">
+              <div class="insight-number mono">04</div>
+              <div>
+                <h4 class="insight-title">SIMD Warp Divergence Bounding</h4>
+                <p class="insight-text">
+                  Variable-length string matching creates warp divergence across SIMD lanes. However, bounding strings to fixed slots (64 bytes) caps thread branch depth to 60 iterations, enabling massive parallel throughput despite divergence.
+                </p>
+              </div>
             </div>
           </div>
+        </details>
+      </main>
+
+      <!-- Minimalist Footer -->
+      <footer class="app-footer">
+        <span><code>webgpu-search</code> &mdash; Zero-dependency WebGPU search engine for browser, workers, Node.js & SSR.</span>
+        <div class="footer-links">
+          <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noopener">GitHub Repository</a>
+          <span>&middot;</span>
+          <a href="https://www.npmjs.com/package/webgpu-search" target="_blank" rel="noopener">npm package</a>
         </div>
-      </div>
+      </footer>
     </div>
 
-    <!-- Floating Sticky Live FPS Telemetry HUD -->
+    <!-- Floating Sticky Live FPS Telemetry HUD (Minimalist Glassmorphic Pill) -->
     <div class="floating-fps-hud" id="floating-fps-hud">
       <span class="hud-pulse" id="hud-pulse-dot"></span>
-      <span class="hud-fps" id="hud-fps-val">120 FPS</span>
+      <span class="hud-fps mono text-emerald" id="hud-fps-val">120 FPS</span>
       <span class="hud-divider">|</span>
-      <span class="hud-label" id="hud-mode-val">⚡ Worker Offloaded</span>
+      <span class="hud-label" id="hud-mode-val">⚡ Worker</span>
     </div>
 
     <script type="module" src="./src/main.ts"></script>

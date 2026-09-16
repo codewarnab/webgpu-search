@@ -90,7 +90,15 @@ export class BenchmarkRunner {
                 });
             }
 
-            // 1. Benchmark GPU Cold & Retained (if GPU available)
+            // PHASE 1: WebGPU Compute Engine (120 FPS Locked)
+            if (onProgress) {
+                onProgress({
+                    currentStep: sIdx + 1,
+                    totalSteps,
+                    stepName: `[${size.toLocaleString()} items] Phase 1/3: WebGPU Compute (120 FPS Locked)...`
+                });
+            }
+
             let coldRes = { uploadMs: 0, coldTotalMs: 0 };
             let gpuRetainedTotal = 0;
             let gpuQueryUpload = 0;
@@ -130,7 +138,18 @@ export class BenchmarkRunner {
                 gpuReadback /= iterations;
             }
 
-            // 3. Benchmark CPU uFuzzy
+            // V8 GC Settle & Cooldown before CPU pass
+            await new Promise(r => setTimeout(r, 60));
+
+            // PHASE 2: CPU uFuzzy Evaluation (Measuring CPU stress)
+            if (onProgress) {
+                onProgress({
+                    currentStep: sIdx + 1,
+                    totalSteps,
+                    stepName: `[${size.toLocaleString()} items] Phase 2/3: uFuzzy CPU Evaluation...`
+                });
+            }
+
             // Warmup
             await new Promise(r => setTimeout(r, 20));
             this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
@@ -138,14 +157,25 @@ export class BenchmarkRunner {
             let ufuzzyTotal = 0;
             let ufuzzyMatches = 0;
             for (let i = 0; i < iterations; i++) {
-                await new Promise(r => setTimeout(r, 10));
+                await new Promise(r => setTimeout(r, 15));
                 const res = this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
                 ufuzzyTotal += res.durationMs;
                 ufuzzyMatches = res.totalMatches;
             }
             ufuzzyTotal /= iterations;
 
-            // 4. Benchmark CPU Native JS
+            // V8 GC Settle & Cooldown before Native pass
+            await new Promise(r => setTimeout(r, 60));
+
+            // PHASE 3: CPU Native JS Baseline
+            if (onProgress) {
+                onProgress({
+                    currentStep: sIdx + 1,
+                    totalSteps,
+                    stepName: `[${size.toLocaleString()} items] Phase 3/3: JS Native Baseline...`
+                });
+            }
+
             // Warmup
             await new Promise(r => setTimeout(r, 20));
             this.cpuEngine.searchNative(dataset.strings, query, 1000);
@@ -153,7 +183,7 @@ export class BenchmarkRunner {
             let jsNativeTotal = 0;
             let jsNativeMatches = 0;
             for (let i = 0; i < iterations; i++) {
-                await new Promise(r => setTimeout(r, 10));
+                await new Promise(r => setTimeout(r, 15));
                 const res = this.cpuEngine.searchNative(dataset.strings, query, 1000);
                 jsNativeTotal += res.durationMs;
                 jsNativeMatches = res.totalMatches;

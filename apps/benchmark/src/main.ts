@@ -730,17 +730,17 @@ function drawBenchmarkChart(
     const bg = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     bg.setAttribute('width', `${width}`);
     bg.setAttribute('height', `${height}`);
-    bg.setAttribute('fill', '#0c1220');
-    bg.setAttribute('rx', '10');
+    bg.setAttribute('fill', '#080c14');
+    bg.setAttribute('rx', '8');
     svgElement.appendChild(bg);
 
     const border = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     border.setAttribute('width', `${width}`);
     border.setAttribute('height', `${height}`);
     border.setAttribute('fill', 'none');
-    border.setAttribute('stroke', '#24344d');
-    border.setAttribute('stroke-width', '1.5');
-    border.setAttribute('rx', '10');
+    border.setAttribute('stroke', 'rgba(255, 255, 255, 0.08)');
+    border.setAttribute('stroke-width', '1');
+    border.setAttribute('rx', '8');
     svgElement.appendChild(border);
 
     // 2. Title & Subtitle
