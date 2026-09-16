@@ -9,6 +9,7 @@ on:
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout Code
@@ -17,7 +18,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.13
 
       - name: Install Dependencies
         run: bun install --frozen-lockfile
@@ -33,3 +34,25 @@ jobs:
 
       - name: Run Headless WebGPU Mock Tests (vgpu/mock)
         run: bun run test:mock
+
+      - name: Run Browser WebGPU Regression Tests
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -o pipefail
+          bun --cwd apps/benchmark run dev --host 127.0.0.1 > browser-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium)" \
+            timeout 4m bun run test:browser 2>&1 | tee browser-test.log
+
+      - name: Upload Browser Test Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-test-logs
+          path: |
+            browser-server.log
+            browser-test.log
+          if-no-files-found: warn
+          retention-days: 7
