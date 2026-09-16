@@ -17,7 +17,7 @@
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
     "clean": "turbo clean",
-    "prepublish:check": "turbo check:shaders && turbo typecheck && turbo build && bun scripts/test-vgpu-mock.ts",
+    "prepublish:check": "turbo check:shaders && turbo typecheck && turbo build && bun scripts/test-vgpu-mock.ts && bun run test:browser",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "turbo build && changeset publish"
