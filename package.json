@@ -16,7 +16,8 @@
     "check:shaders": "turbo check:shaders",
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",
-    "clean": "turbo clean"
+    "clean": "turbo clean",
+    "prepublish:check": "turbo check:shaders && turbo typecheck && turbo build && bun scripts/test-vgpu-mock.ts"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.72",
