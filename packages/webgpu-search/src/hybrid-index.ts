@@ -39,19 +39,10 @@ export class SearchIndex {
 
     const threshold = options.threshold ?? 30_000;
     const preferGpu = options.preferGpu ?? false;
-    const slotBytes = options.slotBytes ?? 64;
     const shouldAttemptGpu = preferGpu || items.length >= threshold;
 
     if (shouldAttemptGpu) {
-      if (slotBytes !== 64) {
-        console.warn(
-          '[webgpu-search] slotBytes=128 is not currently supported in standard WGSL compute pipeline; falling back to CPU engine.'
-        );
-        index.engineType = 'cpu';
-        return index;
-      }
-
-      const budget = checkMemoryBudget(items.length, slotBytes, options.device);
+      const budget = checkMemoryBudget(items.length, 64, options.device);
       if (!budget.allowed) {
         console.warn(
           `[webgpu-search] ${budget.reason} Gracefully falling back to CPU engine.`
@@ -65,10 +56,14 @@ export class SearchIndex {
         const initialized = await gpu.init(options.device);
 
         if (initialized && gpu.isReady) {
-          const packed = packStringsToGPUBuffer(items, slotBytes);
+          const packed = packStringsToGPUBuffer(items);
           await gpu.loadDataset({
             size: items.length,
             strings: items,
+            recordsBufferData: packed.recordsBufferData,
+            recordsByteLength: packed.recordsByteLength,
+            offsetsBufferData: packed.offsetsBufferData,
+            offsetsByteLength: packed.offsetsByteLength,
             gpuBufferData: packed.bufferData,
             byteLength: packed.byteLength
           });

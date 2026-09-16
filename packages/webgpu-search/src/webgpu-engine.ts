@@ -1,7 +1,7 @@
 import SUBSTRING_WGSL from './shaders/substring.wgsl';
 import FUZZY_WGSL from './shaders/fuzzy.wgsl';
 import { WebGPUContextManager } from './context-manager';
-import { sanitizeStringForSlot } from './buffer';
+import { sanitizeStringForSlot, packStringsToGPUBuffer } from './buffer';
 import type { AdapterInfo, SearchOptions, SearchResultItem, SearchTimings, SearchMode } from './types';
 
 const BufferUsage = (typeof globalThis !== 'undefined' && 'GPUBufferUsage' in globalThis ? (globalThis as any).GPUBufferUsage : {
@@ -25,8 +25,12 @@ const MapMode = (typeof globalThis !== 'undefined' && 'GPUMapMode' in globalThis
 export interface DatasetLike {
   size: number;
   strings: string[];
-  gpuBufferData: ArrayBuffer;
-  byteLength: number;
+  recordsBufferData?: ArrayBuffer;
+  recordsByteLength?: number;
+  offsetsBufferData?: ArrayBuffer;
+  offsetsByteLength?: number;
+  gpuBufferData?: ArrayBuffer;
+  byteLength?: number;
 }
 
 export interface WebGPUSearchResult {
@@ -52,6 +56,7 @@ export class WebGPUEngine {
   private substringPipeline: GPUComputePipeline | null = null;
   private fuzzyPipeline: GPUComputePipeline | null = null;
 
+  private offsetsBuffer: GPUBuffer | null = null;
   private recordsBuffer: GPUBuffer | null = null;
   private uniformBuffer: GPUBuffer | null = null;
   private outputBuffer: GPUBuffer | null = null;
@@ -215,39 +220,82 @@ export class WebGPUEngine {
    * Upload dataset to GPU VRAM for retained search.
    * Serialized through searchMutex to prevent buffer destruction races.
    */
-  async loadDataset(dataset: DatasetLike): Promise<{ uploadTimeMs: number }> {
+  async loadDataset(dataset: DatasetLike | string[]): Promise<{ uploadTimeMs: number }> {
     const execute = () => this.loadDatasetInternal(dataset);
     const p = this.searchMutex.then(execute, execute);
     this.searchMutex = p.catch(() => {});
     return p;
   }
 
-  private async loadDatasetInternal(dataset: DatasetLike): Promise<{ uploadTimeMs: number }> {
+  private async loadDatasetInternal(dataset: DatasetLike | string[]): Promise<{ uploadTimeMs: number }> {
+    let strings: string[];
+    let recordsData: ArrayBuffer;
+    let recordsLen: number;
+    let offsetsData: ArrayBuffer;
+    let offsetsLen: number;
+    let count: number;
+
+    if (Array.isArray(dataset)) {
+      strings = dataset;
+      count = dataset.length;
+      const packed = packStringsToGPUBuffer(strings);
+      recordsData = packed.recordsBufferData;
+      recordsLen = packed.recordsByteLength;
+      offsetsData = packed.offsetsBufferData;
+      offsetsLen = packed.offsetsByteLength;
+    } else {
+      strings = dataset.strings;
+      count = dataset.size;
+      if (dataset.recordsBufferData && dataset.offsetsBufferData) {
+        recordsData = dataset.recordsBufferData;
+        recordsLen = dataset.recordsByteLength ?? dataset.recordsBufferData.byteLength;
+        offsetsData = dataset.offsetsBufferData;
+        offsetsLen = dataset.offsetsByteLength ?? dataset.offsetsBufferData.byteLength;
+      } else {
+        const packed = packStringsToGPUBuffer(strings);
+        recordsData = packed.recordsBufferData;
+        recordsLen = packed.recordsByteLength;
+        offsetsData = packed.offsetsBufferData;
+        offsetsLen = packed.offsetsByteLength;
+      }
+    }
+
     if (!this.device) {
-      this.currentDatasetSize = dataset.size;
-      this.currentStrings = dataset.strings;
+      this.currentDatasetSize = count;
+      this.currentStrings = strings;
       return { uploadTimeMs: 0 };
     }
 
+    if (this.offsetsBuffer) {
+      try { this.offsetsBuffer.destroy(); } catch {}
+      this.offsetsBuffer = null;
+    }
     if (this.recordsBuffer) {
-      this.recordsBuffer.destroy();
+      try { this.recordsBuffer.destroy(); } catch {}
       this.recordsBuffer = null;
     }
 
     const t0 = performance.now();
 
-    this.recordsBuffer = this.device.createBuffer({
-      label: `Records Buffer (${dataset.size} items)`,
-      size: Math.max(dataset.byteLength, 64),
+    this.offsetsBuffer = this.device.createBuffer({
+      label: `Offsets Buffer (${count} items)`,
+      size: Math.max(offsetsLen, 16),
       usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
     });
 
-    this.device.queue.writeBuffer(this.recordsBuffer, 0, dataset.gpuBufferData);
+    this.recordsBuffer = this.device.createBuffer({
+      label: `Records Buffer (${count} items, ${recordsLen} bytes)`,
+      size: Math.max(recordsLen, 16),
+      usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
+    });
+
+    this.device.queue.writeBuffer(this.offsetsBuffer, 0, offsetsData);
+    this.device.queue.writeBuffer(this.recordsBuffer, 0, recordsData);
     await this.device.queue.onSubmittedWorkDone();
 
     const uploadTimeMs = performance.now() - t0;
-    this.currentDatasetSize = dataset.size;
-    this.currentStrings = dataset.strings;
+    this.currentDatasetSize = count;
+    this.currentStrings = strings;
 
     return { uploadTimeMs };
   }
@@ -275,7 +323,7 @@ export class WebGPUEngine {
       gpuDispatchMs: 0
     };
 
-    if (!this.device || !this.recordsBuffer || !this.uniformBuffer || !this.outputBuffer || !this.stagingBuffer) {
+    if (!this.device || !this.recordsBuffer || !this.offsetsBuffer || !this.uniformBuffer || !this.outputBuffer || !this.stagingBuffer) {
       return {
         query,
         mode,
@@ -350,8 +398,9 @@ export class WebGPUEngine {
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: { buffer: this.recordsBuffer } },
-        { binding: 2, resource: { buffer: this.outputBuffer } }
+        { binding: 1, resource: { buffer: this.offsetsBuffer } },
+        { binding: 2, resource: { buffer: this.recordsBuffer } },
+        { binding: 3, resource: { buffer: this.outputBuffer } }
       ]
     });
 
@@ -469,7 +518,7 @@ export class WebGPUEngine {
   /**
    * Cold search: includes full dataset creation & upload in the timing measurement
    */
-  async searchCold(dataset: DatasetLike, query: string, options: SearchOptions): Promise<ColdSearchResult> {
+  async searchCold(dataset: DatasetLike | string[], query: string, options: SearchOptions): Promise<ColdSearchResult> {
     if (!this.device) {
       const warmResult = await this.search(query, options);
       return {
@@ -493,6 +542,10 @@ export class WebGPUEngine {
   }
 
   destroy() {
+    if (this.offsetsBuffer) {
+      try { this.offsetsBuffer.destroy(); } catch {}
+      this.offsetsBuffer = null;
+    }
     if (this.recordsBuffer) {
       try { this.recordsBuffer.destroy(); } catch {}
       this.recordsBuffer = null;

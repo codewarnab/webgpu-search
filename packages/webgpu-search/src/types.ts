@@ -40,7 +40,7 @@ export interface IndexOptions {
   preferGpu?: boolean;            // Force WebGPU if available regardless of size
   device?: GPUDevice;             // Custom injected GPUDevice (for testing/context sharing)
   powerPreference?: GPUPowerPreference; // 'high-performance' | 'low-power'
-  slotBytes?: 64 | 128;           // Row slot width: 64 (59 chars) or 128 (123 chars)
+  slotBytes?: number;             // Legacy slot width (deprecated: dynamic variable-length string indexing now used)
 }
 
 export interface IndexStats {

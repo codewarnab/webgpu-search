@@ -18,8 +18,9 @@ struct OutputBuffer {
 };
 
 @group(0) @binding(0) var<uniform> uniforms: QueryUniforms;
-@group(0) @binding(1) var<storage, read> records: array<u32>;
-@group(0) @binding(2) var<storage, read_write> output: OutputBuffer;
+@group(0) @binding(1) var<storage, read> offsets: array<u32>;
+@group(0) @binding(2) var<storage, read> records: array<u32>;
+@group(0) @binding(3) var<storage, read_write> output: OutputBuffer;
 
 fn to_lower(c: u32) -> u32 {
     if (c >= 65u && c <= 90u) {
@@ -28,10 +29,10 @@ fn to_lower(c: u32) -> u32 {
     return c;
 }
 
-fn get_char(row_id: u32, pos: u32) -> u32 {
-    let word_idx = 1u + (pos >> 2u);
-    let shift = (pos & 3u) * 8u;
-    return (records[row_id * 16u + word_idx] >> shift) & 0xFFu;
+fn get_char(byte_idx: u32) -> u32 {
+    let word_idx = byte_idx >> 2u;
+    let shift = (byte_idx & 3u) * 8u;
+    return (records[word_idx] >> shift) & 0xFFu;
 }
 
 fn get_query_char(pos: u32) -> u32 {
@@ -61,7 +62,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    let str_len = records[row_id * 16u];
+    let start_byte = offsets[row_id];
+    let end_byte = offsets[row_id + 1u];
+    let str_len = end_byte - start_byte;
     if (str_len < query_len) {
         return;
     }
@@ -74,7 +77,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     var last_match_pos = 0i;
 
     for (var i = 0u; i < str_len; i++) {
-        var sc = get_char(row_id, i);
+        var sc = get_char(start_byte + i);
         var qc = get_query_char(q_idx);
         
         if (!is_case_sens) {
@@ -92,7 +95,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             last_match_pos = i32(i);
 
             if (i > 0u) {
-                let prev = get_char(row_id, i - 1u);
+                let prev = get_char(start_byte + i - 1u);
                 if (is_word_boundary(prev)) {
                     score += 30;
                 }

@@ -194,6 +194,43 @@ async function runMockTests() {
     }
     console.log('   ✅ CPUEngine caseSensitive parameter verified');
 
+    console.log('11. Testing variable-length string support (>100 characters without truncation)...');
+    const veryLongString = 'packages/core/extremely/long/nested/folder/path/to/some/deeply/embedded/internal/structure/that/exceeds/the/old/fiftynine/limit/DeepSpecialController.ts';
+    if (veryLongString.length <= 100) {
+        throw new Error('Test string must be > 100 chars');
+    }
+    const sanitizedLong = sanitizeStringForSlot(veryLongString);
+    if (sanitizedLong.length !== veryLongString.length) {
+        throw new Error(`Expected sanitizeStringForSlot without maxChars to preserve full length (${veryLongString.length}), got ${sanitizedLong.length}`);
+    }
+
+    const dynamicPacked = packStringsToGPUBuffer([veryLongString]);
+    if (dynamicPacked.totalChars !== veryLongString.length) {
+        throw new Error(`Expected packed totalChars to be ${veryLongString.length}, got ${dynamicPacked.totalChars}`);
+    }
+    if (dynamicPacked.recordsByteLength < veryLongString.length) {
+        throw new Error('Records buffer byte length is smaller than string length');
+    }
+
+    const longIndex = await SearchIndex.create([veryLongString], { preferGpu: false });
+    const longSearch = await longIndex.search('DeepSpecialController');
+    if (longSearch.results.length === 0 || longSearch.results[0].text !== veryLongString) {
+        throw new Error('Failed to match search token located past character position 100');
+    }
+    longIndex.destroy();
+    console.log(`   ✅ Variable-length strings verified (${veryLongString.length} chars preserved and matched past char 100)`);
+
+    console.log('12. Testing direct string[] callers on WebGPUEngine.loadDataset and searchCold...');
+    const directEngine = new WebGPUEngine();
+    await directEngine.init(mockDevice);
+    await directEngine.loadDataset(['apple', 'banana', 'orange']);
+    const directColdRes = await directEngine.searchCold(['alpha', 'beta', 'gamma'], 'beta', { mode: 'substring' });
+    if (typeof directColdRes.coldTotalMs !== 'number') {
+        throw new Error('searchCold with string[] failed');
+    }
+    directEngine.destroy();
+    console.log('   ✅ Direct string[] callers on WebGPUEngine verified');
+
     console.log('\n--- All vgpu/mock Tests Passed! (0ms GPU, 100% in-memory) ✅ ---');
 }
 
