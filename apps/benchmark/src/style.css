@@ -223,9 +223,21 @@ select:focus, input[type="text"]:focus {
 /* Latency Comparison Meters */
 .meters-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 0.75rem;
   margin-bottom: 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .meters-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 500px) {
+  .meters-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .meter-card {
@@ -255,6 +267,7 @@ select:focus, input[type="text"]:focus {
 .meter-card.gpu::before { background: var(--color-gpu); }
 .meter-card.ufuzzy::before { background: var(--color-ufuzzy); }
 .meter-card.native::before { background: var(--color-native); }
+.meter-card.fps::before { background: #10b981; }
 
 .meter-label {
   font-size: 0.75rem;
@@ -273,11 +286,65 @@ select:focus, input[type="text"]:focus {
 .meter-card.gpu .meter-value { color: var(--color-gpu); }
 .meter-card.ufuzzy .meter-value { color: var(--color-ufuzzy); }
 .meter-card.native .meter-value { color: var(--color-native); }
+.meter-card.fps .meter-value { color: #10b981; }
 
 .meter-sub {
   font-size: 0.75rem;
   color: var(--text-muted);
   margin-top: 0.2rem;
+}
+
+/* Floating Sticky Live FPS Telemetry HUD */
+.floating-fps-hud {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 9999;
+  background: rgba(15, 23, 42, 0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 9999px;
+  padding: 0.45rem 1rem;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-family: monospace;
+  font-size: 0.85rem;
+  pointer-events: none;
+  user-select: none;
+  transition: all 0.2s ease;
+}
+
+.floating-fps-hud .hud-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 10px #10b981;
+  display: inline-block;
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
+}
+
+.floating-fps-hud .hud-fps {
+  font-weight: 700;
+  color: #10b981;
+  letter-spacing: 0.5px;
+}
+
+.floating-fps-hud .hud-divider {
+  color: rgba(255, 255, 255, 0.2);
+}
+
+.floating-fps-hud .hud-label {
+  font-size: 0.78rem;
+  color: var(--text-secondary);
 }
 
 /* Results Display */

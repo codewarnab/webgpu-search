@@ -134,6 +134,11 @@
               <div class="meter-value" id="meter-native-val">-- ms</div>
               <div class="meter-sub" id="meter-native-sub">String.prototype.includes</div>
             </div>
+            <div class="meter-card fps" id="meter-fps">
+              <div class="meter-label">UI Thread Frame Rate</div>
+              <div class="meter-value" id="meter-fps-val" style="color: #10b981;">120 FPS</div>
+              <div class="meter-sub" id="meter-fps-sub">Live UI Thread Responsiveness</div>
+            </div>
           </div>
 
           <!-- Live Results -->
@@ -204,10 +209,15 @@
 
           <!-- Progress bar -->
           <div class="progress-container" id="benchmark-progress-box">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem;">
+              <div class="progress-status" id="benchmark-progress-text" style="margin-bottom: 0;">Initializing benchmark matrix...</div>
+              <div style="font-size: 0.8rem; font-weight: 600; color: #10b981; font-family: monospace; background: rgba(16, 185, 129, 0.1); padding: 0.2rem 0.6rem; border-radius: 4px; border: 1px solid rgba(16, 185, 129, 0.2); white-space: nowrap;">
+                UI Thread: <span id="benchmark-fps-val">120 FPS</span>
+              </div>
+            </div>
             <div class="progress-bar-bg">
               <div class="progress-bar-fill" id="benchmark-progress-bar"></div>
             </div>
-            <div class="progress-status" id="benchmark-progress-text">Initializing benchmark matrix...</div>
           </div>
 
           <!-- Benchmark Tabs (Substring vs Fuzzy) -->
@@ -309,6 +319,14 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Floating Sticky Live FPS Telemetry HUD -->
+    <div class="floating-fps-hud" id="floating-fps-hud">
+      <span class="hud-pulse" id="hud-pulse-dot"></span>
+      <span class="hud-fps" id="hud-fps-val">120 FPS</span>
+      <span class="hud-divider">|</span>
+      <span class="hud-label" id="hud-mode-val">⚡ Worker Offloaded</span>
     </div>
 
     <script type="module" src="./src/main.ts"></script>

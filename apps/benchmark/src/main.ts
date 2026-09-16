@@ -23,6 +23,12 @@ const hwAdapter = document.getElementById('hw-adapter')!;
 const hwVendor = document.getElementById('hw-vendor')!;
 const hwBuffer = document.getElementById('hw-buffer')!;
 const hwFps = document.getElementById('hw-fps');
+const meterFpsVal = document.getElementById('meter-fps-val');
+const meterFpsSub = document.getElementById('meter-fps-sub');
+const benchmarkFpsVal = document.getElementById('benchmark-fps-val');
+const hudFpsVal = document.getElementById('hud-fps-val');
+const hudModeVal = document.getElementById('hud-mode-val');
+const hudPulseDot = document.getElementById('hud-pulse-dot');
 
 const datasetSizeSelect = document.getElementById('dataset-size-select') as HTMLSelectElement;
 const searchModeSelect = document.getElementById('search-mode-select') as HTMLSelectElement;
@@ -125,16 +131,38 @@ async function init() {
         const elapsed = now - lastFpsTime;
         if (elapsed >= 500) {
             const fps = Math.round((frameCount * 1000) / elapsed);
+            const isWorker = (executionThreadSelect?.value || 'worker') === 'worker';
+            const color = fps >= 100 ? '#10b981' : (fps >= 50 ? '#f59e0b' : '#ef4444');
+            const subText = fps >= 100 ? '0ms Frame Drop' : (fps >= 50 ? 'Micro-stutters' : 'Severe UI Jank');
+            const modeText = isWorker ? '⚡ Worker Offloaded' : '🖥️ Main Thread';
+
             if (hwFps) {
                 hwFps.textContent = `${fps} FPS`;
-                if (fps >= 100) {
-                    hwFps.style.color = '#10b981';
-                } else if (fps >= 50) {
-                    hwFps.style.color = '#f59e0b';
-                } else {
-                    hwFps.style.color = '#ef4444';
-                }
+                hwFps.style.color = color;
             }
+            if (meterFpsVal) {
+                meterFpsVal.textContent = `${fps} FPS`;
+                meterFpsVal.style.color = color;
+            }
+            if (meterFpsSub) {
+                meterFpsSub.textContent = subText;
+            }
+            if (benchmarkFpsVal) {
+                benchmarkFpsVal.textContent = `${fps} FPS`;
+                benchmarkFpsVal.style.color = color;
+            }
+            if (hudFpsVal) {
+                hudFpsVal.textContent = `${fps} FPS`;
+                hudFpsVal.style.color = color;
+            }
+            if (hudModeVal) {
+                hudModeVal.textContent = modeText;
+            }
+            if (hudPulseDot) {
+                hudPulseDot.style.background = color;
+                hudPulseDot.style.boxShadow = `0 0 10px ${color}`;
+            }
+
             frameCount = 0;
             lastFpsTime = now;
         }
