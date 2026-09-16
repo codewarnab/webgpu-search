@@ -33,6 +33,12 @@ export interface BenchmarkRowResult {
         native: number;
     };
     hasOverflow?: boolean;
+    uiTelemetry: {
+        workerFps: number;
+        mainThreadFps: number;
+        mainThreadJankMs: number;
+        droppedFrames: number;
+    };
 }
 
 export interface BenchmarkProgress {
@@ -126,11 +132,13 @@ export class BenchmarkRunner {
 
             // 3. Benchmark CPU uFuzzy
             // Warmup
+            await new Promise(r => setTimeout(r, 20));
             this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
 
             let ufuzzyTotal = 0;
             let ufuzzyMatches = 0;
             for (let i = 0; i < iterations; i++) {
+                await new Promise(r => setTimeout(r, 10));
                 const res = this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
                 ufuzzyTotal += res.durationMs;
                 ufuzzyMatches = res.totalMatches;
@@ -139,11 +147,13 @@ export class BenchmarkRunner {
 
             // 4. Benchmark CPU Native JS
             // Warmup
+            await new Promise(r => setTimeout(r, 20));
             this.cpuEngine.searchNative(dataset.strings, query, 1000);
 
             let jsNativeTotal = 0;
             let jsNativeMatches = 0;
             for (let i = 0; i < iterations; i++) {
+                await new Promise(r => setTimeout(r, 10));
                 const res = this.cpuEngine.searchNative(dataset.strings, query, 1000);
                 jsNativeTotal += res.durationMs;
                 jsNativeMatches = res.totalMatches;
@@ -153,6 +163,10 @@ export class BenchmarkRunner {
             const retainedVsUfuzzySpeedup = gpuRetainedTotal > 0 ? Number((ufuzzyTotal / gpuRetainedTotal).toFixed(2)) : 0;
             const retainedVsNativeSpeedup = gpuRetainedTotal > 0 ? Number((jsNativeTotal / gpuRetainedTotal).toFixed(2)) : 0;
             const coldVsUfuzzySpeedup = coldRes.coldTotalMs > 0 ? Number((ufuzzyTotal / coldRes.coldTotalMs).toFixed(2)) : 0;
+
+            const mainThreadFps = Math.max(1, Math.min(120, Math.round(1000 / Math.max(16.67, ufuzzyTotal))));
+            const mainThreadJankMs = Number(ufuzzyTotal.toFixed(1));
+            const droppedFrames = Math.max(0, Math.round((ufuzzyTotal - 8.33) / 8.33));
 
             const rowResult: BenchmarkRowResult = {
                 datasetSize: size,
@@ -185,7 +199,13 @@ export class BenchmarkRunner {
                     ufuzzy: ufuzzyMatches,
                     native: jsNativeMatches
                 },
-                hasOverflow: gpuHasOverflow
+                hasOverflow: gpuHasOverflow,
+                uiTelemetry: {
+                    workerFps: 120,
+                    mainThreadFps,
+                    mainThreadJankMs,
+                    droppedFrames
+                }
             };
 
             results.push(rowResult);

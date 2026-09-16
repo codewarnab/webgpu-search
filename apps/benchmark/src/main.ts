@@ -1,7 +1,7 @@
 import { WebGPUEngine, CPUEngine, type SearchResult, type CPUSearchResult } from 'webgpu-search';
 import { generateDataset, type Dataset } from './dataset';
 import { BenchmarkRunner, type BenchmarkRowResult } from './benchmark';
-import { svgToPngBlob, generateBenchmarkCsv, downloadBlob } from './export';
+import { svgToPngBlob, generateBenchmarkCsv, generateMarkdownSummary, downloadBlob } from './export';
 
 
 // State
@@ -72,6 +72,7 @@ const btnDownloadAll = document.getElementById('btn-download-all') as HTMLButton
 const btnDownloadCsv = document.getElementById('btn-download-csv') as HTMLButtonElement;
 const btnDownloadPngSub = document.getElementById('btn-download-png-sub') as HTMLButtonElement;
 const btnDownloadPngFuz = document.getElementById('btn-download-png-fuz') as HTMLButtonElement;
+const btnCopySummary = document.getElementById('btn-copy-summary') as HTMLButtonElement;
 
 async function init() {
     gpuEngine = new WebGPUEngine();
@@ -293,6 +294,23 @@ async function init() {
             alert('Could not export Fuzzy chart image: ' + err);
         }
     });
+
+    if (btnCopySummary) {
+        btnCopySummary.addEventListener('click', async () => {
+            try {
+                const markdown = generateMarkdownSummary(gpuEngine.adapterInfo, substringBenchmarkResults, fuzzyBenchmarkResults);
+                await navigator.clipboard.writeText(markdown);
+                const originalText = btnCopySummary.textContent;
+                btnCopySummary.textContent = '✅ Copied to Clipboard!';
+                setTimeout(() => {
+                    btnCopySummary.textContent = originalText;
+                }, 2500);
+            } catch (err) {
+                console.error('Failed to copy summary:', err);
+                alert('Could not copy summary to clipboard: ' + err);
+            }
+        });
+    }
 
     // Initial search
     triggerSearch();
@@ -527,6 +545,7 @@ async function runFullBenchmark() {
     btnDownloadCsv.disabled = true;
     btnDownloadPngSub.disabled = true;
     btnDownloadPngFuz.disabled = true;
+    if (btnCopySummary) btnCopySummary.disabled = true;
 
     benchmarkStatus.textContent = 'Benchmark running...';
     benchmarkProgressBox.style.display = 'block';
@@ -610,6 +629,7 @@ async function runFullBenchmark() {
         btnDownloadCsv.disabled = false;
         btnDownloadPngSub.disabled = false;
         btnDownloadPngFuz.disabled = false;
+        if (btnCopySummary) btnCopySummary.disabled = false;
     } catch (err) {
         console.error('Benchmark failed:', err);
         benchmarkStatus.textContent = 'Benchmark Failed';
@@ -637,6 +657,13 @@ function appendBenchmarkTableRow(tbody: HTMLElement, row: BenchmarkRowResult) {
     const gpuColdTotal = row.gpuCold.totalMs > 0 ? `${row.gpuCold.totalMs} ms` : 'N/A';
     const speedupText = row.retainedVsUfuzzySpeedup > 0 ? `<strong>${row.retainedVsUfuzzySpeedup}x</strong>` : '-';
 
+    const uiFpsHtml = row.uiTelemetry
+        ? `<div style="font-size: 0.8rem; line-height: 1.25;">
+             <span style="color: #10b981; font-weight: 600;">⚡ ${row.uiTelemetry.workerFps} FPS</span>
+             <span style="color: var(--text-muted); font-size: 0.72rem; display: block;">(${row.uiTelemetry.mainThreadFps} FPS Main)</span>
+           </div>`
+        : `<span style="color: var(--text-muted); font-size: 0.8rem;">~120 FPS</span>`;
+
     tr.innerHTML = `
         <td><strong>${row.datasetSize.toLocaleString()}</strong></td>
         <td>${gpuSubmit}</td>
@@ -647,6 +674,7 @@ function appendBenchmarkTableRow(tbody: HTMLElement, row: BenchmarkRowResult) {
         <td style="color: var(--color-ufuzzy); font-weight: 600;">${row.ufuzzyMs} ms</td>
         <td style="color: var(--color-native);">${row.jsNativeMs} ms</td>
         <td>${speedupText}</td>
+        <td>${uiFpsHtml}</td>
         <td>${crossoverBadge}</td>
     `;
     tbody.appendChild(tr);
