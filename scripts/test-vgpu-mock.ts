@@ -194,7 +194,29 @@ async function runMockTests() {
     }
     console.log('   ✅ CPUEngine caseSensitive parameter verified');
 
-    console.log('11. Testing variable-length string support (>100 characters without truncation)...');
+    console.log('11. Testing SearchIndex limit contract on CPU...');
+    const limitItems = Array.from({ length: 9_000 }, (_, i) => `match-${i}`);
+    const limitIndex = await SearchIndex.create(limitItems, { preferGpu: false });
+    const defaultLimit = await limitIndex.search('match-', { mode: 'substring' });
+    const minimumLimit = await limitIndex.search('match-', { mode: 'substring', limit: 0 });
+    const maximumLimit = await limitIndex.search('match-', { mode: 'substring', limit: 9_000 });
+    const legacyAliasLimit = await limitIndex.search('match-', { mode: 'substring', maxResults: 3 });
+    if (defaultLimit.results.length !== 50) {
+        throw new Error(`Expected default limit of 50, got ${defaultLimit.results.length}`);
+    }
+    if (minimumLimit.results.length !== 1) {
+        throw new Error(`Expected limit=0 to clamp to 1, got ${minimumLimit.results.length}`);
+    }
+    if (maximumLimit.results.length !== 8_192) {
+        throw new Error(`Expected limit=9000 to clamp to 8192, got ${maximumLimit.results.length}`);
+    }
+    if (legacyAliasLimit.results.length !== 3) {
+        throw new Error(`Expected maxResults=3 alias to return 3 results, got ${legacyAliasLimit.results.length}`);
+    }
+    limitIndex.destroy();
+    console.log('   ✅ SearchIndex limit defaults, bounds, and maxResults alias verified on CPU');
+
+    console.log('12. Testing variable-length string support (>100 characters without truncation)...');
     const veryLongString = 'packages/core/extremely/long/nested/folder/path/to/some/deeply/embedded/internal/structure/that/exceeds/the/old/fiftynine/limit/DeepSpecialController.ts';
     if (veryLongString.length <= 100) {
         throw new Error('Test string must be > 100 chars');
@@ -220,7 +242,7 @@ async function runMockTests() {
     longIndex.destroy();
     console.log(`   ✅ Variable-length strings verified (${veryLongString.length} chars preserved and matched past char 100)`);
 
-    console.log('12. Testing direct string[] callers on WebGPUEngine.loadDataset and searchCold...');
+    console.log('13. Testing direct string[] callers on WebGPUEngine.loadDataset and searchCold...');
     const directEngine = new WebGPUEngine();
     await directEngine.init(mockDevice);
     await directEngine.loadDataset(['apple', 'banana', 'orange']);
@@ -238,3 +260,4 @@ runMockTests().catch(err => {
     console.error('Test failed:', err);
     process.exit(1);
 });
+
