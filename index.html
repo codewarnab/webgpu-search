@@ -155,8 +155,8 @@
             </div>
 
             <div style="background: var(--bg-card); padding: 0.85rem; border-radius: var(--radius-md); border-left: 3px solid var(--color-success);">
-              <strong style="color: var(--text-primary); display: block; margin-bottom: 0.2rem;">3. Atomic Top-K Readback Optimization</strong>
-              Instead of reading back 2,000,000 items (8 MB), our shader uses an atomic counter and returns only the top 1,000 matches (8 KB). This shrinks readback transfer by 1,000×, bypassing the PCIe readback bottleneck.
+              <strong style="color: var(--text-primary); display: block; margin-bottom: 0.2rem;">3. Candidate Pool Compaction & CPU Ranking</strong>
+              Instead of transferring all 2,000,000 rows, the compute shader writes up to 8,192 scored candidates into a compact 64 KB buffer. The CPU then sorts candidates by score to return the top 1,000, eliminating PCIe readback bottleneck while avoiding premature match dropping.
             </div>
           </div>
         </div>
@@ -217,7 +217,8 @@
                 <thead>
                   <tr>
                     <th>Dataset Size (N)</th>
-                    <th>GPU Dispatch (ms)</th>
+                    <th>GPU Submit (ms)</th>
+                    <th>GPU Exec (ms)</th>
                     <th>GPU Readback (ms)</th>
                     <th>GPU Retained Total</th>
                     <th>GPU Cold Total</th>
@@ -229,7 +230,7 @@
                 </thead>
                 <tbody id="table-body-substring">
                   <tr>
-                    <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+                    <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 2rem;">
                       Click "Run Benchmark (All Algos)" above to execute.
                     </td>
                   </tr>
@@ -251,7 +252,8 @@
                 <thead>
                   <tr>
                     <th>Dataset Size (N)</th>
-                    <th>GPU Dispatch (ms)</th>
+                    <th>GPU Submit (ms)</th>
+                    <th>GPU Exec (ms)</th>
                     <th>GPU Readback (ms)</th>
                     <th>GPU Retained Total</th>
                     <th>GPU Cold Total</th>
@@ -263,7 +265,7 @@
                 </thead>
                 <tbody id="table-body-fuzzy">
                   <tr>
-                    <td colspan="9" style="text-align: center; color: var(--text-muted); padding: 2rem;">
+                    <td colspan="10" style="text-align: center; color: var(--text-muted); padding: 2rem;">
                       Click "Run Benchmark (All Algos)" above to execute.
                     </td>
                   </tr>

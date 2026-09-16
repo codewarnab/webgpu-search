@@ -8,17 +8,24 @@ export interface SearchOptions {
     maxResults?: number;
 }
 
+export interface SearchTimings {
+    queryUploadMs: number;
+    encodeSubmitMs: number;
+    gpuExecutionMs: number | null;
+    readbackMs: number;
+    totalMs: number;
+    /** Backwards-compatible alias for encodeSubmitMs */
+    gpuDispatchMs: number;
+}
+
 export interface SearchResult {
     query: string;
     mode: 'substring' | 'fuzzy';
     totalMatches: number;
+    candidateCount: number;
+    hasOverflow: boolean;
     results: Array<{ index: number; score: number; text?: string }>;
-    timings: {
-        queryUploadMs: number;
-        gpuDispatchMs: number;
-        readbackMs: number;
-        totalMs: number;
-    };
+    timings: SearchTimings;
 }
 
 export interface ColdSearchResult extends SearchResult {
@@ -50,9 +57,13 @@ export class WebGPUEngine {
     private outputBuffer: GPUBuffer | null = null;
     private stagingBuffer: GPUBuffer | null = null;
 
+    private querySet: GPUQuerySet | null = null;
+    private queryResolveBuffer: GPUBuffer | null = null;
+    private queryStagingBuffer: GPUBuffer | null = null;
+
     private currentDatasetSize: number = 0;
     private currentStrings: string[] | null = null;
-    private maxResults: number = 1000;
+    private candidateCapacity: number = 8192;
     private outputByteLength: number = 0;
 
     public adapterInfo: AdapterInfo | null = null;
@@ -160,7 +171,12 @@ export class WebGPUEngine {
                 });
             } catch (limitErr) {
                 console.warn('requestDevice with custom limits failed, falling back to default limits:', limitErr);
-                this.device = await this.adapter.requestDevice({ requiredFeatures });
+                try {
+                    this.device = await this.adapter.requestDevice({ requiredFeatures });
+                } catch (featErr) {
+                    console.warn('requestDevice with requiredFeatures failed, falling back without features:', featErr);
+                    this.device = await this.adapter.requestDevice();
+                }
             }
 
             // Create compute pipelines
@@ -199,7 +215,33 @@ export class WebGPUEngine {
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
             });
 
-            this.allocateOutputBuffers(this.maxResults);
+            // Setup timestamp queries if supported
+            if (this.device.features.has('timestamp-query')) {
+                try {
+                    this.querySet = this.device.createQuerySet({
+                        label: 'Search Timestamp QuerySet',
+                        type: 'timestamp',
+                        count: 2
+                    });
+                    this.queryResolveBuffer = this.device.createBuffer({
+                        label: 'Timestamp Resolve Buffer',
+                        size: 16,
+                        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
+                    });
+                    this.queryStagingBuffer = this.device.createBuffer({
+                        label: 'Timestamp Staging Buffer',
+                        size: 16,
+                        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+                    });
+                } catch (qErr) {
+                    console.warn('Failed to allocate timestamp query set:', qErr);
+                    this.querySet = null;
+                    this.queryResolveBuffer = null;
+                    this.queryStagingBuffer = null;
+                }
+            }
+
+            this.allocateOutputBuffers(this.candidateCapacity);
 
             return true;
         } catch (err) {
@@ -210,12 +252,12 @@ export class WebGPUEngine {
 
     private searchMutex: Promise<any> = Promise.resolve();
 
-    private allocateOutputBuffers(maxResults: number) {
+    private allocateOutputBuffers(candidateCapacity: number = 8192) {
         if (!this.device) return;
-        if (this.outputBuffer && maxResults <= this.maxResults) return;
-        this.maxResults = Math.max(maxResults, 1000);
-        // count (4 bytes) + pad (4 bytes) + maxResults * (index 4 bytes + score 4 bytes)
-        this.outputByteLength = 8 + this.maxResults * 8;
+        if (this.outputBuffer && candidateCapacity <= this.candidateCapacity) return;
+        this.candidateCapacity = Math.max(candidateCapacity, 8192);
+        // count (4 bytes) + pad (4 bytes) + candidateCapacity * (index 4 bytes + score 4 bytes)
+        this.outputByteLength = 8 + this.candidateCapacity * 8;
 
         if (this.outputBuffer) this.outputBuffer.destroy();
         if (this.stagingBuffer) this.stagingBuffer.destroy();
@@ -278,18 +320,24 @@ export class WebGPUEngine {
     }
 
     private async searchInternal(query: string, options: SearchOptions): Promise<SearchResult> {
+        const emptyTimings: SearchTimings = {
+            queryUploadMs: 0,
+            encodeSubmitMs: 0,
+            gpuExecutionMs: null,
+            readbackMs: 0,
+            totalMs: 0,
+            gpuDispatchMs: 0
+        };
+
         if (!this.device || !this.recordsBuffer || !this.uniformBuffer || !this.outputBuffer || !this.stagingBuffer) {
             return {
                 query,
                 mode: options.mode,
                 totalMatches: 0,
+                candidateCount: 0,
+                hasOverflow: false,
                 results: [],
-                timings: {
-                    queryUploadMs: 0,
-                    gpuDispatchMs: 0,
-                    readbackMs: 0,
-                    totalMs: 0
-                }
+                timings: emptyTimings
             };
         }
 
@@ -299,17 +347,17 @@ export class WebGPUEngine {
                 query: '',
                 mode: options.mode,
                 totalMatches: 0,
+                candidateCount: 0,
+                hasOverflow: false,
                 results: [],
-                timings: {
-                    queryUploadMs: 0,
-                    gpuDispatchMs: 0,
-                    readbackMs: 0,
-                    totalMs: 0
-                }
+                timings: emptyTimings
             };
         }
 
-        const maxResults = Math.min(options.maxResults ?? 1000, this.maxResults);
+        const maxResults = options.maxResults ?? 1000;
+        if (maxResults > this.candidateCapacity) {
+            this.allocateOutputBuffers(maxResults);
+        }
         const pipeline = options.mode === 'fuzzy' ? this.fuzzyPipeline! : this.substringPipeline!;
         const caseSensitive = !!options.caseSensitive;
 
@@ -322,7 +370,7 @@ export class WebGPUEngine {
         const queryLen = Math.min(cleanQuery.length, 59);
         u32Uniform[0] = this.currentDatasetSize;
         u32Uniform[1] = queryLen;
-        u32Uniform[2] = maxResults;
+        u32Uniform[2] = this.candidateCapacity;
         u32Uniform[3] = caseSensitive ? 1 : 0;
 
         for (let i = 0; i < queryLen; i++) {
@@ -349,7 +397,18 @@ export class WebGPUEngine {
             ]
         });
 
-        const passEncoder = commandEncoder.beginComputePass({ label: 'Search Compute Pass' });
+        const passDesc: GPUComputePassDescriptor = {
+            label: 'Search Compute Pass'
+        };
+        if (this.querySet) {
+            (passDesc as any).timestampWrites = {
+                querySet: this.querySet,
+                beginningOfPassWriteIndex: 0,
+                endOfPassWriteIndex: 1
+            };
+        }
+
+        const passEncoder = commandEncoder.beginComputePass(passDesc);
         passEncoder.setPipeline(pipeline);
         passEncoder.setBindGroup(0, bindGroup);
 
@@ -358,51 +417,92 @@ export class WebGPUEngine {
         passEncoder.dispatchWorkgroups(workgroupCount);
         passEncoder.end();
 
+        if (this.querySet && this.queryResolveBuffer && this.queryStagingBuffer) {
+            commandEncoder.resolveQuerySet(this.querySet, 0, 2, this.queryResolveBuffer, 0);
+            commandEncoder.copyBufferToBuffer(this.queryResolveBuffer, 0, this.queryStagingBuffer, 0, 16);
+        }
+
         // Copy output buffer to staging buffer for CPU readback
         commandEncoder.copyBufferToBuffer(this.outputBuffer, 0, this.stagingBuffer, 0, this.outputByteLength);
 
         this.device.queue.submit([commandEncoder.finish()]);
-        const gpuDispatchMs = performance.now() - tDispatchStart;
+        const encodeSubmitMs = performance.now() - tDispatchStart;
 
         // 3. MapAsync Readback
         const tReadbackStart = performance.now();
-        await this.stagingBuffer.mapAsync(GPUMapMode.READ);
-        const arrayBuffer = this.stagingBuffer.getMappedRange();
-
-        const u32Read = new Uint32Array(arrayBuffer);
-        const i32Read = new Int32Array(arrayBuffer);
-
-        const totalMatches = u32Read[0];
-        const numItems = Math.min(totalMatches, maxResults);
-        const results: Array<{ index: number; score: number; text?: string }> = new Array(numItems);
-
-        for (let i = 0; i < numItems; i++) {
-            const index = u32Read[2 + i * 2];
-            const score = i32Read[3 + i * 2];
-            results[i] = {
-                index,
-                score,
-                text: this.currentStrings ? this.currentStrings[index] : undefined
-            };
+        const mapPromises: Promise<void>[] = [this.stagingBuffer.mapAsync(GPUMapMode.READ)];
+        if (this.queryStagingBuffer) {
+            mapPromises.push(this.queryStagingBuffer.mapAsync(GPUMapMode.READ));
         }
 
-        this.stagingBuffer.unmap();
+        await Promise.all(mapPromises);
+
+        let gpuExecutionMs: number | null = null;
+        if (this.queryStagingBuffer) {
+            try {
+                const timeBuffer = this.queryStagingBuffer.getMappedRange();
+                const timeU64 = new BigUint64Array(timeBuffer);
+                const t0 = timeU64[0];
+                const t1 = timeU64[1];
+                if (t1 >= t0 && t0 > 0n) {
+                    gpuExecutionMs = Number(t1 - t0) / 1_000_000;
+                }
+            } catch (tsErr) {
+                console.warn('Failed to read timestamp query:', tsErr);
+            } finally {
+                this.queryStagingBuffer.unmap();
+            }
+        }
+
+        let totalMatches = 0;
+        let candidateCount = 0;
+        let hasOverflow = false;
+        let candidates: Array<{ index: number; score: number; text?: string }> = [];
+
+        try {
+            const arrayBuffer = this.stagingBuffer.getMappedRange();
+            const u32Read = new Uint32Array(arrayBuffer);
+            const i32Read = new Int32Array(arrayBuffer);
+
+            totalMatches = u32Read[0];
+            candidateCount = Math.min(totalMatches, this.candidateCapacity);
+            hasOverflow = totalMatches > this.candidateCapacity;
+
+            candidates = new Array(candidateCount);
+            for (let i = 0; i < candidateCount; i++) {
+                const index = u32Read[2 + i * 2];
+                const score = i32Read[3 + i * 2];
+                candidates[i] = {
+                    index,
+                    score,
+                    text: this.currentStrings ? this.currentStrings[index] : undefined
+                };
+            }
+        } finally {
+            this.stagingBuffer.unmap();
+        }
+
         const readbackMs = performance.now() - tReadbackStart;
         const totalMs = performance.now() - totalStart;
 
-        // Sort results by score descending
-        results.sort((a, b) => b.score - a.score);
+        // Sort candidates descending by score on CPU and slice top-K
+        candidates.sort((a, b) => b.score - a.score);
+        const results = candidates.slice(0, maxResults);
 
         return {
             query,
             mode: options.mode,
             totalMatches,
+            candidateCount,
+            hasOverflow,
             results,
             timings: {
                 queryUploadMs,
-                gpuDispatchMs,
+                encodeSubmitMs,
+                gpuExecutionMs,
                 readbackMs,
-                totalMs
+                totalMs,
+                gpuDispatchMs: encodeSubmitMs
             }
         };
     }
@@ -438,6 +538,9 @@ export class WebGPUEngine {
         if (this.uniformBuffer) this.uniformBuffer.destroy();
         if (this.outputBuffer) this.outputBuffer.destroy();
         if (this.stagingBuffer) this.stagingBuffer.destroy();
+        if (this.queryResolveBuffer) this.queryResolveBuffer.destroy();
+        if (this.queryStagingBuffer) this.queryStagingBuffer.destroy();
+        if (this.querySet) this.querySet.destroy();
         if (this.device) this.device.destroy();
     }
 }

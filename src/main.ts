@@ -226,6 +226,8 @@ async function init() {
         }, 300);
     }
 
+    (window as any).gpuEngine = gpuEngine;
+    (window as any).cpuEngine = cpuEngine;
     (window as any).__IS_INITIALIZED__ = true;
 }
 
@@ -308,7 +310,10 @@ async function executeLiveSearch() {
     if (gpuEngine.isReady && gpuResult) {
         const gpuTotal = gpuResult.timings.totalMs;
         meterGpuVal.textContent = `${gpuTotal.toFixed(2)} ms`;
-        meterGpuSub.textContent = `Dispatch: ${gpuResult.timings.gpuDispatchMs.toFixed(2)}ms | Readback: ${gpuResult.timings.readbackMs.toFixed(2)}ms`;
+        const execLabel = gpuResult.timings.gpuExecutionMs !== null
+            ? `Exec: ${gpuResult.timings.gpuExecutionMs.toFixed(2)}ms | `
+            : '';
+        meterGpuSub.textContent = `${execLabel}Submit: ${gpuResult.timings.encodeSubmitMs.toFixed(2)}ms | Readback: ${gpuResult.timings.readbackMs.toFixed(2)}ms`;
 
         const minTime = Math.min(gpuTotal, ufuzzyTotal, nativeTotal);
         if (minTime === gpuTotal) {
@@ -319,7 +324,10 @@ async function executeLiveSearch() {
             meterNative.classList.add('winner');
         }
 
-        resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU) | ${ufuzzyResult.totalMatches.toLocaleString()} (uFuzzy)`;
+        const overflowBadge = gpuResult.hasOverflow
+            ? ` (⚠️ pool overflow: top ${gpuResult.results.length} of ${gpuResult.totalMatches.toLocaleString()})`
+            : '';
+        resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU)${overflowBadge} | ${ufuzzyResult.totalMatches.toLocaleString()} (uFuzzy)`;
         renderResults(gpuResult.results, query);
     } else {
         meterGpuVal.textContent = 'Disabled';
@@ -499,14 +507,18 @@ function appendBenchmarkTableRow(tbody: HTMLElement, row: BenchmarkRowResult) {
             : `<span class="tag-crossover-loss">CPU Wins (${(1 / row.retainedVsUfuzzySpeedup).toFixed(1)}x)</span>`;
 
     const gpuRetainedTotal = row.gpuRetained.totalMs > 0 ? `${row.gpuRetained.totalMs} ms` : 'N/A';
-    const gpuDispatch = row.gpuRetained.gpuDispatchMs > 0 ? `${row.gpuRetained.gpuDispatchMs} ms` : '-';
+    const gpuSubmit = row.gpuRetained.encodeSubmitMs > 0 ? `${row.gpuRetained.encodeSubmitMs} ms` : '-';
+    const gpuExec = row.gpuRetained.gpuExecutionMs !== null
+        ? `${row.gpuRetained.gpuExecutionMs} ms`
+        : (row.gpuRetained.totalMs > 0 ? '<span title="Timestamp queries require hardware support or --enable-unsafe-webgpu" style="color: var(--text-muted); cursor: help;">N/A*</span>' : '-');
     const gpuReadback = row.gpuRetained.readbackMs > 0 ? `${row.gpuRetained.readbackMs} ms` : '-';
     const gpuColdTotal = row.gpuCold.totalMs > 0 ? `${row.gpuCold.totalMs} ms` : 'N/A';
     const speedupText = row.retainedVsUfuzzySpeedup > 0 ? `<strong>${row.retainedVsUfuzzySpeedup}x</strong>` : '-';
 
     tr.innerHTML = `
         <td><strong>${row.datasetSize.toLocaleString()}</strong></td>
-        <td>${gpuDispatch}</td>
+        <td>${gpuSubmit}</td>
+        <td>${gpuExec}</td>
         <td>${gpuReadback}</td>
         <td style="color: var(--color-gpu); font-weight: 600;">${gpuRetainedTotal}</td>
         <td style="color: var(--text-muted);">${gpuColdTotal}</td>

@@ -91,7 +91,8 @@ export function generateBenchmarkCsv(
         'GPU Architecture',
         'Max VRAM Buffer (MB)',
         'GPU Retained Total (ms)',
-        'GPU Dispatch (ms)',
+        'GPU Encode/Submit (ms)',
+        'GPU Execution ms (Timestamp Query)',
         'GPU Readback (ms)',
         'GPU Cold Total (ms)',
         'GPU Cold Upload (ms)',
@@ -101,6 +102,7 @@ export function generateBenchmarkCsv(
         'Speedup vs Native',
         'Winner',
         'GPU Total Matches',
+        'Candidate Overflow',
         'uFuzzy Total Matches'
     ].join(','));
 
@@ -116,7 +118,8 @@ export function generateBenchmarkCsv(
                 `"${gpuArch.replace(/"/g, '""')}"`,
                 gpuBufferMB,
                 hasGpuTiming ? r.gpuRetained.totalMs : 'N/A',
-                hasGpuTiming ? r.gpuRetained.gpuDispatchMs : 'N/A',
+                hasGpuTiming ? r.gpuRetained.encodeSubmitMs : 'N/A',
+                hasGpuTiming && r.gpuRetained.gpuExecutionMs !== null ? r.gpuRetained.gpuExecutionMs : 'N/A',
                 hasGpuTiming ? r.gpuRetained.readbackMs : 'N/A',
                 hasGpuTiming ? r.gpuCold.totalMs : 'N/A',
                 hasGpuTiming ? r.gpuCold.uploadMs : 'N/A',
@@ -126,6 +129,7 @@ export function generateBenchmarkCsv(
                 r.retainedVsNativeSpeedup > 0 ? `${r.retainedVsNativeSpeedup}x` : 'N/A',
                 hasGpuTiming ? (r.crossover.gpuRetainedBeatsUfuzzy ? 'GPU' : 'uFuzzy CPU') : 'uFuzzy CPU (GPU Off)',
                 r.matchCount.gpu,
+                r.hasOverflow ? 'YES (>8192 matches)' : 'NO',
                 r.matchCount.ufuzzy
             ].join(','));
         }

@@ -2,7 +2,7 @@ export const SUBSTRING_WGSL = /* wgsl */ `
 struct QueryUniforms {
     total_rows: u32,
     query_len: u32,
-    max_results: u32,
+    max_candidates: u32,
     case_sensitive: u32,
     query_chars: array<vec4<u32>, 16>, // 64 characters (16 vec4s)
 };
@@ -90,7 +90,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     if (matched) {
         let out_idx = atomicAdd(&output.count, 1u);
-        if (out_idx < uniforms.max_results) {
+        if (out_idx < uniforms.max_candidates) {
             // Calculate simple relevance score: earlier start = higher score, shorter string = higher score
             let score = 1000i - i32(match_start * 10u) - i32(str_len - query_len);
             output.results[out_idx] = MatchResult(row_id, score);

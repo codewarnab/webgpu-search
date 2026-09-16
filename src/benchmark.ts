@@ -9,8 +9,10 @@ export interface BenchmarkRowResult {
     gpuRetained: {
         totalMs: number;
         queryUploadMs: number;
-        gpuDispatchMs: number;
+        encodeSubmitMs: number;
+        gpuExecutionMs: number | null;
         readbackMs: number;
+        gpuDispatchMs: number;
     };
     gpuCold: {
         uploadMs: number;
@@ -31,6 +33,7 @@ export interface BenchmarkRowResult {
         ufuzzy: number;
         native: number;
     };
+    hasOverflow?: boolean;
 }
 
 export interface BenchmarkProgress {
@@ -86,9 +89,12 @@ export class BenchmarkRunner {
             let coldRes = { uploadMs: 0, coldTotalMs: 0 };
             let gpuRetainedTotal = 0;
             let gpuQueryUpload = 0;
-            let gpuDispatch = 0;
+            let gpuEncodeSubmit = 0;
+            let gpuExecutionSum = 0;
+            let gpuExecutionCount = 0;
             let gpuReadback = 0;
             let gpuMatches = 0;
+            let gpuHasOverflow = false;
 
             if (this.gpuEngine.isReady) {
                 // 1. Benchmark GPU Cold (measure upload + query once)
@@ -103,14 +109,19 @@ export class BenchmarkRunner {
                     const res = await this.gpuEngine.search(query, { mode, maxResults: 1000 });
                     gpuRetainedTotal += res.timings.totalMs;
                     gpuQueryUpload += res.timings.queryUploadMs;
-                    gpuDispatch += res.timings.gpuDispatchMs;
+                    gpuEncodeSubmit += res.timings.encodeSubmitMs;
+                    if (res.timings.gpuExecutionMs !== null) {
+                        gpuExecutionSum += res.timings.gpuExecutionMs;
+                        gpuExecutionCount++;
+                    }
                     gpuReadback += res.timings.readbackMs;
                     gpuMatches = res.totalMatches;
+                    if (res.hasOverflow) gpuHasOverflow = true;
                 }
 
                 gpuRetainedTotal /= iterations;
                 gpuQueryUpload /= iterations;
-                gpuDispatch /= iterations;
+                gpuEncodeSubmit /= iterations;
                 gpuReadback /= iterations;
             }
 
@@ -151,8 +162,10 @@ export class BenchmarkRunner {
                 gpuRetained: {
                     totalMs: Number(gpuRetainedTotal.toFixed(2)),
                     queryUploadMs: Number(gpuQueryUpload.toFixed(2)),
-                    gpuDispatchMs: Number(gpuDispatch.toFixed(2)),
-                    readbackMs: Number(gpuReadback.toFixed(2))
+                    encodeSubmitMs: Number(gpuEncodeSubmit.toFixed(2)),
+                    gpuExecutionMs: gpuExecutionCount > 0 ? Number((gpuExecutionSum / gpuExecutionCount).toFixed(2)) : null,
+                    readbackMs: Number(gpuReadback.toFixed(2)),
+                    gpuDispatchMs: Number(gpuEncodeSubmit.toFixed(2))
                 },
                 gpuCold: {
                     uploadMs: Number(coldRes.uploadMs.toFixed(2)),
@@ -172,7 +185,8 @@ export class BenchmarkRunner {
                     gpu: gpuMatches,
                     ufuzzy: ufuzzyMatches,
                     native: jsNativeMatches
-                }
+                },
+                hasOverflow: gpuHasOverflow
             };
 
             results.push(rowResult);
