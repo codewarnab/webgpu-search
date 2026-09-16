@@ -2,6 +2,24 @@ import { SUBSTRING_WGSL } from './shaders/substring.wgsl.ts';
 import { FUZZY_WGSL } from './shaders/fuzzy.wgsl.ts';
 import type { Dataset } from './dataset.ts';
 
+const BufferUsage = (typeof GPUBufferUsage !== 'undefined' ? GPUBufferUsage : {
+    MAP_READ: 0x0001,
+    MAP_WRITE: 0x0002,
+    COPY_SRC: 0x0004,
+    COPY_DST: 0x0008,
+    INDEX: 0x0010,
+    VERTEX: 0x0020,
+    UNIFORM: 0x0040,
+    STORAGE: 0x0080,
+    INDIRECT: 0x0100,
+    QUERY_RESOLVE: 0x0200
+});
+
+const MapMode = (typeof GPUMapMode !== 'undefined' ? GPUMapMode : {
+    READ: 0x0001,
+    WRITE: 0x0002
+});
+
 export interface SearchOptions {
     mode: 'substring' | 'fuzzy';
     caseSensitive?: boolean;
@@ -73,9 +91,26 @@ export class WebGPUEngine {
     }
 
     /**
-     * Check WebGPU support and initialize device and pipelines
+     * Check WebGPU support and initialize device and pipelines (supports custom device for testing/mocking)
      */
-    async init(): Promise<boolean> {
+    async init(customDevice?: any): Promise<boolean> {
+        if (customDevice) {
+            this.device = customDevice;
+            this.adapterInfo = {
+                vendor: 'Mock Vendor',
+                architecture: 'Mock Architecture',
+                device: 'Mock WebGPU Device',
+                description: 'Deterministic Mock Device (vgpu/mock) for CI / Headless Unit Testing',
+                renderer: 'Mock WebGPU Device',
+                maxBufferSizeMB: 256,
+                maxStorageBindingSizeMB: 128,
+                maxComputeWorkgroupsPerDimension: 65535,
+                maxComputeInvocationsPerWorkgroup: 256,
+                hasTimestampQuery: false
+            };
+            return await this.setupPipelinesAndBuffers();
+        }
+
         if (!navigator.gpu) {
             console.error('WebGPU is not supported in this browser.');
             return false;
@@ -179,75 +214,87 @@ export class WebGPUEngine {
                 }
             }
 
-            // Create compute pipelines
-            const substringModule = this.device.createShaderModule({
-                label: 'Substring Search Module',
-                code: SUBSTRING_WGSL
-            });
-
-            const fuzzyModule = this.device.createShaderModule({
-                label: 'Fuzzy Search Module',
-                code: FUZZY_WGSL
-            });
-
-            this.substringPipeline = await this.device.createComputePipelineAsync({
-                label: 'Substring Pipeline',
-                layout: 'auto',
-                compute: {
-                    module: substringModule,
-                    entryPoint: 'main'
-                }
-            });
-
-            this.fuzzyPipeline = await this.device.createComputePipelineAsync({
-                label: 'Fuzzy Pipeline',
-                layout: 'auto',
-                compute: {
-                    module: fuzzyModule,
-                    entryPoint: 'main'
-                }
-            });
-
-            // Uniform buffer: 272 bytes (16 bytes header + 256 bytes query array)
-            this.uniformBuffer = this.device.createBuffer({
-                label: 'Uniform Buffer',
-                size: 272,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
-            });
-
-            // Setup timestamp queries if supported
-            if (this.device.features.has('timestamp-query')) {
-                try {
-                    this.querySet = this.device.createQuerySet({
-                        label: 'Search Timestamp QuerySet',
-                        type: 'timestamp',
-                        count: 2
-                    });
-                    this.queryResolveBuffer = this.device.createBuffer({
-                        label: 'Timestamp Resolve Buffer',
-                        size: 16,
-                        usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC
-                    });
-                    this.queryStagingBuffer = this.device.createBuffer({
-                        label: 'Timestamp Staging Buffer',
-                        size: 16,
-                        usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-                    });
-                } catch (qErr) {
-                    console.warn('Failed to allocate timestamp query set:', qErr);
-                    this.querySet = null;
-                    this.queryResolveBuffer = null;
-                    this.queryStagingBuffer = null;
-                }
-            }
-
-            this.allocateOutputBuffers(this.candidateCapacity);
-
-            return true;
+            return await this.setupPipelinesAndBuffers();
         } catch (err) {
             console.error('Failed to initialize WebGPU:', err);
             return false;
         }
+    }
+
+    private async setupPipelinesAndBuffers(): Promise<boolean> {
+        if (!this.device) return false;
+
+        // Create compute pipelines
+        const substringModule = this.device.createShaderModule({
+            label: 'Substring Search Module',
+            code: SUBSTRING_WGSL
+        });
+
+        const fuzzyModule = this.device.createShaderModule({
+            label: 'Fuzzy Search Module',
+            code: FUZZY_WGSL
+        });
+
+        const createPipeline = async (desc: GPUComputePipelineDescriptor) => {
+            if (typeof (this.device as any).createComputePipelineAsync === 'function') {
+                return await this.device!.createComputePipelineAsync(desc);
+            }
+            return (this.device as any).createComputePipeline(desc);
+        };
+
+        this.substringPipeline = await createPipeline({
+            label: 'Substring Pipeline',
+            layout: 'auto',
+            compute: {
+                module: substringModule,
+                entryPoint: 'main'
+            }
+        });
+
+        this.fuzzyPipeline = await createPipeline({
+            label: 'Fuzzy Pipeline',
+            layout: 'auto',
+            compute: {
+                module: fuzzyModule,
+                entryPoint: 'main'
+            }
+        });
+
+        // Uniform buffer: 272 bytes (16 bytes header + 256 bytes query array)
+        this.uniformBuffer = this.device.createBuffer({
+            label: 'Uniform Buffer',
+            size: 272,
+            usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST
+        });
+
+        // Setup timestamp queries if supported
+        if (this.device.features && this.device.features.has('timestamp-query')) {
+            try {
+                this.querySet = this.device.createQuerySet({
+                    label: 'Search Timestamp QuerySet',
+                    type: 'timestamp',
+                    count: 2
+                });
+                this.queryResolveBuffer = this.device.createBuffer({
+                    label: 'Timestamp Resolve Buffer',
+                    size: 16,
+                    usage: BufferUsage.QUERY_RESOLVE | BufferUsage.COPY_SRC
+                });
+                this.queryStagingBuffer = this.device.createBuffer({
+                    label: 'Timestamp Staging Buffer',
+                    size: 16,
+                    usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST
+                });
+            } catch (qErr) {
+                console.warn('Failed to allocate timestamp query set:', qErr);
+                this.querySet = null;
+                this.queryResolveBuffer = null;
+                this.queryStagingBuffer = null;
+            }
+        }
+
+        this.allocateOutputBuffers(this.candidateCapacity);
+        return true;
     }
 
     private searchMutex: Promise<any> = Promise.resolve();
@@ -265,13 +312,13 @@ export class WebGPUEngine {
         this.outputBuffer = this.device.createBuffer({
             label: 'Output Buffer',
             size: this.outputByteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
+            usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST
         });
 
         this.stagingBuffer = this.device.createBuffer({
             label: 'Staging Buffer',
             size: this.outputByteLength,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+            usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST
         });
     }
 
@@ -295,7 +342,7 @@ export class WebGPUEngine {
         this.recordsBuffer = this.device.createBuffer({
             label: `Records Buffer (${dataset.size} items)`,
             size: dataset.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+            usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
         });
 
         this.device.queue.writeBuffer(this.recordsBuffer, 0, dataset.gpuBufferData);
@@ -385,7 +432,9 @@ export class WebGPUEngine {
         const commandEncoder = this.device.createCommandEncoder({ label: 'Search Command Encoder' });
 
         // Clear output count and header
-        commandEncoder.clearBuffer(this.outputBuffer, 0, this.outputByteLength);
+        if (typeof (commandEncoder as any).clearBuffer === 'function') {
+            commandEncoder.clearBuffer(this.outputBuffer, 0, this.outputByteLength);
+        }
 
         const bindGroup = this.device.createBindGroup({
             label: 'Search BindGroup',
@@ -430,9 +479,9 @@ export class WebGPUEngine {
 
         // 3. MapAsync Readback
         const tReadbackStart = performance.now();
-        const mapPromises: Promise<void>[] = [this.stagingBuffer.mapAsync(GPUMapMode.READ)];
+        const mapPromises: Promise<void>[] = [this.stagingBuffer.mapAsync(MapMode.READ)];
         if (this.queryStagingBuffer) {
-            mapPromises.push(this.queryStagingBuffer.mapAsync(GPUMapMode.READ));
+            mapPromises.push(this.queryStagingBuffer.mapAsync(MapMode.READ));
         }
 
         await Promise.all(mapPromises);

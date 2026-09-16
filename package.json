@@ -7,12 +7,16 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "bun scripts/test-regression.ts"
+    "check:shaders": "vgpu check src/shaders/fuzzy.wgsl && vgpu check src/shaders/substring.wgsl",
+    "test:mock": "bun scripts/test-vgpu-mock.ts",
+    "test:browser": "bun scripts/test-regression.ts",
+    "test": "bun run check:shaders && bun run test:mock"
   },
   "devDependencies": {
     "@webgpu/types": "^0.1.72",
     "puppeteer-core": "^25.10.0",
     "typescript": "~6.0.2",
+    "vgpu": "^0.5.0",
     "vite": "^8.2.2"
   },
   "dependencies": {
