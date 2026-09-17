@@ -95,7 +95,10 @@ export class SearchIndex {
    */
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
     const { mode = 'fuzzy', caseSensitive = false, signal } = options;
-    const clampedLimit = Math.max(1, Math.min(options.limit ?? options.maxResults ?? 50, 8192));
+    const requestedLimit = options.limit ?? options.maxResults ?? 50;
+    // Guard against NaN (e.g. a failed parseInt): Math.min/Math.max propagate
+    // NaN, which would poison downstream slicing. Treat it as "not provided".
+    const clampedLimit = Math.max(1, Math.min(Number.isNaN(requestedLimit) ? 50 : requestedLimit, 8192));
 
     if (signal?.aborted) {
       throw new DOMException('Search aborted', 'AbortError');

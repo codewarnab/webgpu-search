@@ -201,6 +201,7 @@ async function runMockTests() {
     const minimumLimit = await limitIndex.search('match-', { mode: 'substring', limit: 0 });
     const maximumLimit = await limitIndex.search('match-', { mode: 'substring', limit: 9_000 });
     const legacyAliasLimit = await limitIndex.search('match-', { mode: 'substring', maxResults: 3 });
+    const nanLimit = await limitIndex.search('match-', { mode: 'substring', limit: NaN });
     if (defaultLimit.results.length !== 50) {
         throw new Error(`Expected default limit of 50, got ${defaultLimit.results.length}`);
     }
@@ -212,6 +213,9 @@ async function runMockTests() {
     }
     if (legacyAliasLimit.results.length !== 3) {
         throw new Error(`Expected maxResults=3 alias to return 3 results, got ${legacyAliasLimit.results.length}`);
+    }
+    if (nanLimit.results.length !== 50) {
+        throw new Error(`Expected limit=NaN to fall back to default 50, got ${nanLimit.results.length}`);
     }
     limitIndex.destroy();
     console.log('   ✅ SearchIndex limit defaults, bounds, and maxResults alias verified on CPU');
