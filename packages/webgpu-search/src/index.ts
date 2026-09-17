@@ -24,6 +24,7 @@ export {
   SCORING_VERSION,
   SERIALIZED_MAGIC,
   UNICODE_VERSION,
+  countUnicodeCodePoints,
   IncompatibleIndexError,
   IncompatibleOptionError,
   ProfileMismatchError,
