@@ -135,7 +135,8 @@ gpu.destroy();
 ### `index.search(query, options?)`
 - `query: string`: Query string.
 - `options.mode`: `'fuzzy'` (subsequence + word-boundary scoring) or `'substring'` (case-insensitive substring).
-- `options.limit`: Max results to return (default: `50`, clamp: `8192`).
+- `options.limit`: Maximum results to return. Defaults to `50` and is clamped to the inclusive range `1..8192` on both CPU and WebGPU.
+- `options.maxResults`: Backwards-compatible alias for `limit`; `limit` takes precedence when both are provided.
 - `options.caseSensitive`: Case sensitivity flag (default: `false`).
 - `options.signal`: `AbortSignal` to cancel stale query readback during fast typing.
 
