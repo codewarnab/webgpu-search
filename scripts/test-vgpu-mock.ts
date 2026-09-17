@@ -7,6 +7,7 @@ import {
     checkMemoryBudget,
     sanitizeStringForSlot
 } from '../packages/webgpu-search/src/index';
+import type { SearchResponse } from '../packages/webgpu-search/src/index';
 
 function generateTestStrings(count: number): string[] {
     const prefixes = ['src/components', 'src/views', 'src/utils', 'src/services'];
@@ -256,6 +257,35 @@ async function runMockTests() {
     }
     directEngine.destroy();
     console.log('   ✅ Direct string[] callers on WebGPUEngine verified');
+
+    console.log('14. Testing concurrent searches and GPU fallback paths...');
+    const concurrentIndex = await SearchIndex.create(strings, { device: mockDevice, preferGpu: true });
+    const concurrentResults = await Promise.all([
+        concurrentIndex.search('Auth', { mode: 'substring', limit: 20 }),
+        concurrentIndex.search('Order', { mode: 'substring', limit: 20 }),
+        concurrentIndex.search('Service', { mode: 'substring', limit: 20 })
+    ]);
+    const expectedQueries = ['Auth', 'Order', 'Service'];
+    concurrentResults.forEach((result: SearchResponse, i: number) => {
+        if (result.query !== expectedQueries[i] || result.engine !== 'webgpu') {
+            throw new Error(`Concurrent search ${i} returned cross-talk: ${result.query}/${result.engine}`);
+        }
+    });
+    console.log('   ✅ Concurrent searches stay isolated with no cross-talk');
+
+    const gpuEngine = (concurrentIndex as any).gpuEngine;
+    const originalSearch = gpuEngine.search.bind(gpuEngine);
+    gpuEngine.search = async () => { throw new Error('injected GPU query failure'); };
+    try {
+        const fallbackResult = await concurrentIndex.search('Auth', { mode: 'substring', limit: 20 });
+        if (fallbackResult.engine !== 'cpu' || fallbackResult.results.length === 0) {
+            throw new Error('A GPU query failure must fall back to CPU results');
+        }
+    } finally {
+        gpuEngine.search = originalSearch;
+    }
+    concurrentIndex.destroy();
+    console.log('   ✅ GPU query errors fall back to CPU results');
 
     console.log('\n--- All vgpu/mock Tests Passed! (0ms GPU, 100% in-memory) ✅ ---');
 }
