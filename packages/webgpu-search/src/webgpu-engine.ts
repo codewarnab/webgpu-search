@@ -2,6 +2,8 @@ import SUBSTRING_WGSL from './shaders/substring.wgsl';
 import FUZZY_WGSL from './shaders/fuzzy.wgsl';
 import { WebGPUContextManager } from './context-manager';
 import { sanitizeStringForSlot, packStringsToGPUBuffer } from './buffer';
+import { compareParityResults } from './cpu-reference';
+import { clampLimit, nowMs, throwIfAborted } from './runtime-guards';
 import type { AdapterInfo, SearchOptions, SearchResultItem, SearchTimings, SearchMode } from './types';
 
 const BufferUsage = (typeof globalThis !== 'undefined' && 'GPUBufferUsage' in globalThis ? (globalThis as any).GPUBufferUsage : {
@@ -275,7 +277,7 @@ export class WebGPUEngine {
       this.recordsBuffer = null;
     }
 
-    const t0 = performance.now();
+    const t0 = nowMs();
 
     this.offsetsBuffer = this.device.createBuffer({
       label: `Offsets Buffer (${count} items)`,
@@ -293,7 +295,7 @@ export class WebGPUEngine {
     this.device.queue.writeBuffer(this.recordsBuffer, 0, recordsData);
     await this.device.queue.onSubmittedWorkDone();
 
-    const uploadTimeMs = performance.now() - t0;
+    const uploadTimeMs = nowMs() - t0;
     this.currentDatasetSize = count;
     this.currentStrings = strings;
 
@@ -312,7 +314,8 @@ export class WebGPUEngine {
 
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
     const mode = options.mode ?? 'fuzzy';
-    const limit = Math.max(1, Math.min(options.limit ?? options.maxResults ?? 50, 8192));
+    // Shared clamp (finite + floor + 1..8192); M2 legacy path must not diverge.
+    const limit = clampLimit(options.limit ?? options.maxResults ?? 50);
 
     const emptyTimings: SearchTimings = {
       queryUploadMs: 0,
@@ -335,9 +338,7 @@ export class WebGPUEngine {
       };
     }
 
-    if (options.signal?.aborted) {
-      throw new DOMException('Search aborted', 'AbortError');
-    }
+    throwIfAborted(options.signal);
 
     const cleanQuery = query.trim();
     if (cleanQuery.length === 0) {
@@ -358,10 +359,10 @@ export class WebGPUEngine {
     const pipeline = mode === 'fuzzy' ? this.fuzzyPipeline! : this.substringPipeline!;
     const caseSensitive = !!options.caseSensitive;
 
-    const totalStart = performance.now();
+    const totalStart = nowMs();
 
     // 1. Normalize Query and Upload Uniforms
-    const tQueryStart = performance.now();
+    const tQueryStart = nowMs();
     const uniformData = new ArrayBuffer(272);
     const u32Uniform = new Uint32Array(uniformData);
 
@@ -379,14 +380,12 @@ export class WebGPUEngine {
     }
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
-    const queryUploadMs = performance.now() - tQueryStart;
+    const queryUploadMs = nowMs() - tQueryStart;
 
-    if (options.signal?.aborted) {
-      throw new DOMException('Search aborted', 'AbortError');
-    }
+    throwIfAborted(options.signal);
 
     // 2. Dispatch Compute
-    const tDispatchStart = performance.now();
+    const tDispatchStart = nowMs();
     const commandEncoder = this.device.createCommandEncoder({ label: 'Search Command Encoder' });
 
     if (typeof (commandEncoder as any).clearBuffer === 'function') {
@@ -431,14 +430,12 @@ export class WebGPUEngine {
 
     commandEncoder.copyBufferToBuffer(this.outputBuffer, 0, this.stagingBuffer, 0, this.outputByteLength);
     this.device.queue.submit([commandEncoder.finish()]);
-    const encodeSubmitMs = performance.now() - tDispatchStart;
+    const encodeSubmitMs = nowMs() - tDispatchStart;
 
-    if (options.signal?.aborted) {
-      throw new DOMException('Search aborted', 'AbortError');
-    }
+    throwIfAborted(options.signal);
 
     // 3. MapAsync Readback with Scoped Cleanup
-    const tReadbackStart = performance.now();
+    const tReadbackStart = nowMs();
     let gpuExecutionMs: number | null = null;
 
     if (this.queryStagingBuffer) {
@@ -487,14 +484,12 @@ export class WebGPUEngine {
       this.stagingBuffer.unmap();
     }
 
-    if (options.signal?.aborted) {
-      throw new DOMException('Search aborted', 'AbortError');
-    }
+    throwIfAborted(options.signal);
 
-    const readbackMs = performance.now() - tReadbackStart;
-    const totalMs = performance.now() - totalStart;
+    const readbackMs = nowMs() - tReadbackStart;
+    const totalMs = nowMs() - totalStart;
 
-    candidates.sort((a, b) => b.score - a.score);
+    candidates.sort(compareParityResults);
     const results = candidates.slice(0, limit);
 
     return {
@@ -528,9 +523,9 @@ export class WebGPUEngine {
       };
     }
 
-    const tUploadStart = performance.now();
+    const tUploadStart = nowMs();
     await this.loadDataset(dataset);
-    const datasetUploadMs = performance.now() - tUploadStart;
+    const datasetUploadMs = nowMs() - tUploadStart;
 
     const warmResult = await this.search(query, options);
 

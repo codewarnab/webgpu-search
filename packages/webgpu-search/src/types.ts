@@ -17,16 +17,14 @@ export interface SearchOptions {
   signal?: AbortSignal;           // Cancel stale queries during rapid typing
   maxResults?: number;            // Backwards-compatible alias; limit takes precedence
   /**
-   * Default: 'parity' (v0.2 contract default). M1 shape-only note: the parity
-   * scorer lands in M2 (`cpu-reference.ts`); the M1 CPU path still serves the
-   * legacy uFuzzy (`mode:'fuzzy'`) / native (`mode:'substring'`) scorer while
-   * echoing the requested value. 'ufuzzy' = explicit opt-in CPU-only (skips GPU).
+   * Default: 'parity' (v0.2 contract default). M2 serves the shared-pipeline
+   * parity scorer (`cpu-reference.ts`); 'ufuzzy' = explicit opt-in CPU-only.
    */
   cpuAlgorithm?: CpuAlgorithm;
   /**
-   * Default: 'throw'. Enforced in M1 on a pre-fold code-point approximation
-   * (`countUnicodeCodePoints(trimmed query)` vs QUERY_TOKENS_MAX); exact
-   * post-fold enforcement lands in M2. 'cpu-fallback' forces the CPU path.
+   * Default: 'throw'. Enforced in M2 on the exact post-fold token count
+   * (`normalizeText(query, folded)` vs QUERY_TOKENS_MAX).
+   * 'cpu-fallback' forces the CPU path.
    */
   onQueryTooLong?: OnQueryTooLong;
 }
@@ -51,13 +49,13 @@ export interface SearchResponse {
   mode: SearchMode;
   engine: EngineType;             // Which engine serviced this query
   totalMatches: number;           // Total items passing threshold
-  candidateCount: number;         // Scored candidates returned from GPU/CPU
-  hasOverflow: boolean;           // True if matches > candidate pool capacity (RESULT_LIMIT_MAX)
-  results: SearchResultItem[];    // Top-K ranked results
+  candidateCount: number;         // min(totalMatches, pool capacity); NOT results.length (limit truncation does not set overflow)
+  hasOverflow: boolean;           // True iff totalMatches > pool capacity (RESULT_LIMIT_MAX); limit truncation alone leaves false
+  results: SearchResultItem[];    // Top-K ranked results (length <= clamped limit)
   timings: SearchTimings;
   profileId: TextProfileId;       // v0.2: text profile that served this query
   scoringVersion: typeof SCORING_VERSION; // v0.2: scoring contract version
-  cpuAlgorithm: CpuAlgorithm;     // v0.2: requested CPU scorer (M1 echoes request; M2 serves parity)
+  cpuAlgorithm: CpuAlgorithm;     // v0.2: requested CPU scorer (M2 serves parity)
 }
 
 export interface IndexOptions {
@@ -79,7 +77,7 @@ export interface IndexStats {
   profileId: TextProfileId;
   unicodeVersion: typeof UNICODE_VERSION;
   scoringVersion: typeof SCORING_VERSION;
-  tokenCount: number;             // M1: pre-fold code-point total (exact post-fold count lands in M2)
+  tokenCount: number;             // M2: exact post-fold code-point total
   folded: boolean;
   formatVersion: typeof FORMAT_VERSION;
 }

@@ -26,26 +26,54 @@ jobs:
       - name: Validate WGSL Shaders (vgpu check)
         run: bun run check:shaders
 
+      - name: Lint Parity Invariants (M2)
+        run: bun run lint:parity
+
+      - name: Verify Fold Table Freshness (M2)
+        run: bun scripts/generate-fold-table.ts --check
+
       - name: Typecheck Workspaces
         run: bun run typecheck
 
       - name: Production Build (Turborepo)
         run: bun run build
 
+      - name: Check Bundle Size Budget (M2)
+        run: bun run check:bundle
+
+      - name: Run M2 Preprocessing and Parity Tests
+        run: bun run test:preprocess
+
+      - name: Run M2 Tests Under tr-TR Locale
+        run: LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun run test:preprocess
+
       - name: Run Headless WebGPU Mock Tests (vgpu/mock)
         run: bun run test:mock
+
+      - name: Setup Chrome (browser regression gate)
+        id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
 
       - name: Run Browser WebGPU Regression Tests
         timeout-minutes: 5
         shell: bash
         run: |
           set -o pipefail
-          bun --cwd apps/benchmark run dev -- --host 127.0.0.1 --port 5173 > browser-server.log 2>&1 &
+          # NOTE: `bun --cwd <dir> run dev -- …` is rejected by bun 1.4.2
+          # (prints help, exit 1); plain `cd` avoids the CLI quirk.
+          (cd "$GITHUB_WORKSPACE/apps/benchmark" && bun run dev -- --host 127.0.0.1 --port 5173 > "$GITHUB_WORKSPACE/browser-server.log" 2>&1) &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"
-          if [ -z "$CHROME_BIN" ]; then
-            echo "Chrome/Chromium binary not found; failing browser regression gate." >&2
+          # Prefer the setup-chrome step output (absolute path, always set);
+          # fall back to PATH lookup for self-hosted / local `act` runs.
+          CHROME_BIN="${{ steps.setup-chrome.outputs.chrome-path }}"
+          if [ -z "$CHROME_BIN" ] || [ ! -x "$CHROME_BIN" ]; then
+            CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chrome || echo \"${CHROME_PATH:-}\")"
+          fi
+          if [ -z "$CHROME_BIN" ] || [ ! -x "$CHROME_BIN" ]; then
+            echo "Chrome/Chromium binary not found or not executable (got '${CHROME_BIN:-<empty>}'); failing browser regression gate." >&2
             exit 1
           fi
           export CHROME_BIN

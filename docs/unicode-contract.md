@@ -1,8 +1,9 @@
-# Unicode Contract — v0.2 Code-Point-Safe Matching (M1 frozen)
+# Unicode Contract — v0.2 Code-Point-Safe Matching (M2: CPU parity landed)
 
 > Source of truth for Issue #7. Frozen values in this file gate M2/M3.
-> Plan: `ISSUE-7-PLAN.md`. Status: M0 interim defaults recorded (HW latency
-> A/B deferred to M5 for lack of GPU in CI — see §3), M1 in progress.
+> Plan: `ISSUE-7-PLAN.md`. Status: M0 spikes recorded (HW latency A/B deferred
+> to M5 — see §3), M1 contract shape landed, M2 CPU parity landed (post-fold
+> sizing + `cpu-reference.ts` + fold table). GPU engine swap stays M3.
 
 ## 1. Pipeline (byte-exact order)
 
@@ -10,9 +11,11 @@
 raw JS string
   → String.trim
   → String.prototype.toWellFormed() where available,
-    else /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g → U+FFFD
-    (each lone surrogate → exactly one U+FFFD: high+high = 2, high+EOF = 1,
-    low-without-high = 1; genuine U+FFFD indistinguishable by design)
+    else pair-preserving fallback /([\uD800-\uDBFF][\uDC00-\uDFFF])|[\uD800-\uDFFF]/g
+    (group 1 = valid pair preserved, else lone surrogate → U+FFFD; lookbehind-free
+    for Safari <16.4 / old Hermes; each lone surrogate → exactly one U+FFFD:
+    high+high = 2, high+EOF = 1, low-without-high = 1; genuine U+FFFD
+    indistinguishable by design)
   → NFC (host String.normalize('NFC'), probe §6)
   → full default case fold (C+F only, S+T excluded) when folded, else NFC-only
   → NFC again (fold is not NFC-closed: U+0130 → U+0069 U+0307 + neighbors)
@@ -20,11 +23,21 @@ raw JS string
 ```
 
 Single function `normalizeText()` serves records and queries. `sanitizeStringForSlot`
-is deleted from the parity path. Limit/empty checks apply to **post-fold token
-count**; post-processing-empty queries (whitespace/mark/VS/ZWJ/tatweel-only)
-return unified empty results (`query: ''`). Scores, spans, `str_len − query_len`
-are in **post-fold code points**. Highlighting caveat: `"Straße"` → `"strasse"`
-(6→7 tokens); folded coordinates must NOT slice the original string.
+is deleted from the parity path (kept behind the M2 legacy GPU path only;
+removal in v0.3). Limit/empty checks apply to **post-fold token count**;
+whitespace-only (incl. U+3000) / empty queries return unified empty results
+(`query: ''`). Lone-mark / VS-only / ZWJ-only / tatweel-only inputs survive
+NFC+C+F as single tokens per the survival rule, so they search normally
+(usually 0 hits, echoing the original query) — pinned by test §8b. Scores,
+spans, `str_len − query_len` are in **post-fold code points**. Highlighting
+caveat: `"Straße"` → `"strasse"` (6→7 tokens); folded coordinates must NOT
+slice the original string.
+
+M2 GPU limitation (honest scaffolding, engine swap is M3): the GPU packer is
+still legacy sanitized bytes (NFKD strip + `?`, 59-char query truncation) while
+CPU is folded tokens. `SearchIndex` routes non-ASCII or >59-token queries to
+CPU; ASCII-only short queries may serve GPU. GPU fallback can re-score vs
+legacy GPU. Differential parity is asserted on CPU only until M3.
 
 ## 2. Frozen versions and caps
 
@@ -37,18 +50,19 @@ are in **post-fold code points**. Highlighting caveat: `"Straße"` → `"strasse
 | `RESULT_LIMIT_MAX` | `8192` | Clamp, tested |
 | `TextProfileId` | `'unicode-default'` | Only parity profile; legacy internal-only, removed v0.3 |
 | `folded` | index-construction-time | `IndexOptions.caseSensitive` (default `false`); per-query mismatch → `ProfileMismatchError` (breaking v0.2: build one index per mode) |
-| `CpuAlgorithm` | `'parity' \| 'ufuzzy'`, default `'parity'` | uFuzzy explicit opt-in only (CPU-only, skips GPU); fallback is always parity once `cpu-reference.ts` lands in M2. **M1 shape-only:** `SearchResponse.cpuAlgorithm` echoes the *requested* value while the M1 CPU path still serves legacy uFuzzy/native — see M1 limitation note below. `preferGpu:true + cpuAlgorithm:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
-| `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. **M1:** enforced on a pre-fold code-point approximation (`countUnicodeCodePoints(trimmed query)` vs `QUERY_TOKENS_MAX`); exact post-fold enforcement lands in M2. `'cpu-fallback'` forces the CPU path for that query. |
+| `CpuAlgorithm` | `'parity' \| 'ufuzzy'`, default `'parity'` | uFuzzy explicit opt-in only (CPU-only, explicitly non-conforming scores, skips GPU, excluded from parity matrix); default and GPU-failure fallback serve parity `cpu-reference.ts`. `preferGpu:true + cpuAlgorithm:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
+| `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. M2: enforced on the exact post-fold token count (`normalizeText(query, folded)` vs `QUERY_TOKENS_MAX`), with a cheap raw-length pre-gate before NFC+fold. `'cpu-fallback'` forces the CPU path for that query. |
 
-**M1 limitation (honest scaffolding, no engine changes):** the comparator,
-`cpu-reference.ts` parity scorer, and post-fold sizing land in M2; `M1`
-`SearchResponse.cpuAlgorithm` echoes the request rather than the serving
-scorer. Consumers must not treat an M1 `cpuAlgorithm:'parity'` echo as proof
-of parity scoring until M2.
+**M2 status (CPU parity landed, GPU legacy):** comparator, parity scorer, and
+post-fold sizing are enforced on the CPU path. GPU stays on the legacy
+sanitized-byte packer + 59-char truncation until M3, so GPU/CPU differential
+parity is NOT asserted in M2 (see limitation note in §1).
 
-Comparator both paths: `(b.score - a.score) || (a.index - b.index)` with
-`|0`/`Math.imul` i32 semantics (M1 doc-only; implemented in M2
-`cpu-reference.ts` + M3 WGSL rewrite). Determinism guaranteed iff
+Comparator both paths: score desc, index asc (wrap-free comparisons;
+`Math.imul`/`|0` retained for the score formulas only). M2 CPU
+(`cpu-reference.ts`) and M2 GPU readback sort share it; full WGSL scalar
+rewrite stays M3. `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
+in v0.2 (breaking; see `unicode-preprocess.ts` JSDoc). Determinism guaranteed iff
 `hasOverflow === false`; above cap assert `totalMatches + hasOverflow + score
 multiset` only (M1 doc-only; CPU `hasOverflow` fix lands in M3/M4).
 `mode:'fuzzy'` semantic change (uFuzzy → parity-subsequence) is
@@ -106,10 +120,15 @@ Simple-only (C+S) is fallback only (drops contracted `ß/ss`: ß is F-only).
 
 **Bundle baseline (measured 2026-09-17 post-M1-fix working tree):**
 `packages/webgpu-search/dist/index.js` 44,581 B raw / 10,206 B gzip
-(`gzip -c`; `tsup` with `minify:false` — i.e. gzip of the current unminified
-build, not a shipped min+gzip). Headroom to the 20 KB gzip budget ≈ 10 KB.
-Pre-PR baseline was 40,428 B / ~9,125 B; the delta is the M1 contract code
-itself. M2 asserts the fold-table delta against the ≤8 KB **gzip** cap.
+(historical `gzip -c` numbers; the M2 gate `scripts/check-m2-bundle.ts` uses
+deterministic gzip level 6 mtime=0, which differs from `gzip -c` by ~200–300 B
+filename/mtime bytes — do not compare across methods; re-baseline with the
+gate method before enforcing byte-tight deltas. `tsup` with `minify:false` —
+i.e. gzip of the current unminified build, not a shipped min+gzip). Headroom
+to the 20 KB gzip budget ≈ 10 KB at M1. Pre-PR baseline was 40,428 B / ~9,125 B;
+the delta is the M1 contract code itself. M2 asserts the fold-table delta
+against the ≤8 KB **gzip** cap (M2 measured +7,922 B deterministic — 270 B
+headroom; do not grow the table further without the lazy-chunk plan).
 
 ## 4. Buffers and bindings
 
@@ -144,8 +163,10 @@ Host `normalize('NFC')` ≠ pinned version: M1 conformance probe runs pinned
 `nfcProbedVersion`, never reports pinned as fact. `toLowerCase/toUpperCase/
 indexOf/charCodeAt` banned in parity path (lint) + `tr-TR` locale CI run.
 
-Match matrix (each × folded true/false): `I/i/İ/ı`, `ß/ss/SS`, `ς/σ/Σ`,
-`ﬀ/ff`, `ϴ/θ` (T-only, never folds), `e/é` (no match), ZWJ-family partial,
+Match matrix (each × folded true/false): `I/i/İ/ı` (I→i via C, never ı;
+İ→i+dot via F, never bare i; ı identity), `ß/ss/SS` (F; S excluded),
+`ς/σ/Σ` (C), `ﬀ/ff` (F), `ϴ/θ` (U+03F4 has C→U+03B8 in Unicode 16.0.0, so C+F
+folds it), `e/é` (no match), ZWJ-family partial,
 flag/keycap splits, Arabic bare-vs-vocalized (no match), presentation forms
 (distinct, NFC≠NFKC), Bengali/Devanagari conjuncts (visually-equal-but-unequal
 → no match), CJK `U+3000`/Unicode spaces (no word bonus — documented ASCII

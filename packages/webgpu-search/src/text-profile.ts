@@ -1,12 +1,7 @@
 /**
  * v0.2 Unicode text profile: version constants, profile types, error classes.
- * Frozen values mirror docs/unicode-contract.md (M1). Portable: no DOM refs.
- *
- * M1 scope note: this module freezes the *contract shape* (constants, types,
- * error classes). Full enforcement lands incrementally: query-length and
- * option-conflict checks are enforced in `hybrid-index.ts` on a pre-fold
- * code-point approximation; exact post-fold enforcement + parity scorer land
- * in M2 (`unicode-preprocess.ts` / `cpu-reference.ts`).
+ * Frozen values mirror docs/unicode-contract.md (M2: CPU post-fold enforced;
+ * GPU stays legacy until the M3 engine swap). Portable: no DOM refs.
  */
 
 export const UNICODE_VERSION = '16.0.0' as const;
@@ -22,22 +17,19 @@ export type TextProfileId = 'unicode-default';
  * Which CPU scorer the caller wants.
  *
  * - `'parity'`: contract default; the v0.2 parity scorer (`cpu-reference.ts`).
- *   M1 echoes the request but the CPU path still serves the legacy
- *   uFuzzy/native scorer until M2 lands — see `SearchOptions.cpuAlgorithm`.
  * - `'ufuzzy'`: explicit opt-in to the legacy uFuzzy CPU scorer (CPU-only,
- *   never routes to WebGPU).
+ *   explicitly non-conforming scores, never routes to WebGPU, excluded from
+ *   the differential matrix).
  */
 export type CpuAlgorithm = 'parity' | 'ufuzzy';
 
 export type OnQueryTooLong = 'throw' | 'cpu-fallback';
 
 /**
- * M1 interim code-point counter (pre-fold approximation).
- *
- * Counts Unicode code points via string iteration, so astral characters count
- * as 1 and each lone surrogate counts as 1 (matching the per-surrogate U+FFFD
- * policy). M2 replaces query/record sizing with exact post-fold token counts
- * from `unicode-preprocess.ts`. Portable: no DOM refs.
+ * @deprecated M1 interim pre-fold code-point counter. M2 sizes queries and
+ * records with exact post-fold token counts from `normalizeText()`.
+ * Kept for compat only; do not use for budgets/limits (e.g. `Strasse` is 6
+ * pre-fold vs 7 post-fold). Removal in v0.3.
  */
 export function countUnicodeCodePoints(s: string): number {
   if (!s) return 0;
@@ -77,16 +69,18 @@ export class IncompatibleIndexError extends Error {
 export class ProfileMismatchError extends Error {
   expected: unknown;
   actual: unknown;
-  constructor(expected: unknown, actual: unknown) {
+  property: string;
+  constructor(expected: unknown, actual: unknown, property: string = 'caseSensitive') {
     super(
-      `Profile mismatch (expected caseSensitive=${String(expected)}, got ${String(actual)}). ` +
-        `caseSensitive/profile is fixed at index-construction time: recreate the index with ` +
-        `IndexOptions.caseSensitive=${String(expected)} or retry the query with ` +
-        `caseSensitive=${String(expected)}.`
+      `Profile mismatch (expected ${property}=${String(expected)}, got ${String(actual)}). ` +
+        `${property} is fixed at index-construction time: recreate the index with ` +
+        `IndexOptions.${property}=${String(expected)} or retry the query with ` +
+        `${property}=${String(expected)}.`
     );
     this.name = 'ProfileMismatchError';
     this.expected = expected;
     this.actual = actual;
+    this.property = property;
   }
 }
 

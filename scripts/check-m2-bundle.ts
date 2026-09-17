@@ -1,0 +1,108 @@
+/**
+ * M2 bundle-size gate: fold-table delta <=8 KB gzip over baseline.
+ *
+ * Baseline (contract section 3, post-M1 working tree, tsup minify:false):
+ *   dist/index.js 44,581 B raw / 10,206 B gzip (deterministic gzip, level 6,
+ *   mtime=0 — NOT `gzip -c`, which embeds filename+mtime and differs by
+ *   ~200-300 B; do not cross-check with `gzip -c | wc -c`).
+ * Budget: 20 KB gzip total for dist/index.js. dist/index.cjs is measured and
+ * reported too (same cap applies per-file); sourcemaps are excluded from the
+ * gate but must not ship to npm (see package files note).
+ *
+ * Fail-closed: missing dist or dist older than src/fold-table.ts fails
+ * (a size gate that passes when there is nothing to measure is decoration).
+ *
+ * Portable: node:fs + node:zlib only (runs on Bun and Node).
+ * Run: bun scripts/check-m2-bundle.ts (or: node scripts/check-m2-bundle.ts)
+ */
+import { gzipSync, constants } from 'node:zlib';
+import { stat, readFile } from 'node:fs/promises';
+
+const BASELINE_RAW = 44581;
+const BASELINE_GZIP = 10206;
+const DELTA_CAP_GZIP = 8 * 1024;
+const TOTAL_BUDGET_GZIP = 20 * 1024;
+
+function gzipDeterministic(buf: Uint8Array): number {
+  return gzipSync(buf, {
+    level: constants.Z_DEFAULT_COMPRESSION,
+    mtime: 0,
+  }).length;
+}
+
+const distJsUrl = new URL('../packages/webgpu-search/dist/index.js', import.meta.url);
+const distCjsUrl = new URL('../packages/webgpu-search/dist/index.cjs', import.meta.url);
+const srcFoldUrl = new URL('../packages/webgpu-search/src/fold-table.ts', import.meta.url);
+
+let distStat;
+try {
+  distStat = await stat(distJsUrl);
+} catch {
+  console.error('FAIL dist/index.js missing. Run: bun run build (or turbo build) first.');
+  process.exit(1);
+}
+// Fail if dist is older than ANY library source (not just fold-table).
+const { readdir } = await import('node:fs/promises');
+const srcDirUrl = new URL('../packages/webgpu-search/src/', import.meta.url);
+let newestSrcMs = 0;
+try {
+  const names = await readdir(srcDirUrl);
+  for (const name of names) {
+    if (!name.endsWith('.ts')) continue;
+    try {
+      const st = await stat(new URL(name, srcDirUrl));
+      if (st.mtimeMs > newestSrcMs) newestSrcMs = st.mtimeMs;
+    } catch {}
+  }
+} catch {}
+try {
+  const foldStat = await stat(srcFoldUrl);
+  if (foldStat.mtimeMs > newestSrcMs) newestSrcMs = foldStat.mtimeMs;
+} catch {
+  console.error('FAIL src/fold-table.ts missing.');
+  process.exit(1);
+}
+if (newestSrcMs > 0 && distStat.mtimeMs < newestSrcMs) {
+  console.error('FAIL dist/index.js is older than library sources. Rebuild before gating.');
+  process.exit(1);
+}
+const buf = await readFile(distJsUrl);
+const raw = buf.byteLength;
+const gz = gzipDeterministic(buf);
+let cjsRaw = 0;
+let cjsGz = 0;
+try {
+  const cjs = await readFile(distCjsUrl);
+  cjsRaw = cjs.byteLength;
+  cjsGz = gzipDeterministic(cjs);
+} catch {
+  console.log('info dist/index.cjs missing (skipped CJS measure)');
+}
+const dRaw = raw - BASELINE_RAW;
+const dGz = gz - BASELINE_GZIP;
+
+console.log('--- M2 bundle-size report (deterministic gzip level 6, mtime=0; tsup minify:false) ---');
+console.log(`dist/index.js: ${raw} B raw / ${gz} B gzip`);
+if (cjsRaw > 0) console.log(`dist/index.cjs: ${cjsRaw} B raw / ${cjsGz} B gzip`);
+console.log(`baseline:      ${BASELINE_RAW} B raw / ${BASELINE_GZIP} B gzip`);
+console.log(`delta:         ${dRaw >= 0 ? '+' : ''}${dRaw} B raw / ${dGz >= 0 ? '+' : ''}${dGz} B gzip (cap +${DELTA_CAP_GZIP} B gzip)`);
+console.log(`total budget:  ${gz} / ${TOTAL_BUDGET_GZIP} B gzip (index.js)`);
+
+let fail = false;
+if (dGz > DELTA_CAP_GZIP) {
+  console.error(`FAIL fold-table gzip delta +${dGz} B exceeds +${DELTA_CAP_GZIP} B cap. Split table into a lazy chunk or re-encode.`);
+  fail = true;
+} else {
+  console.log('pass delta within cap');
+}
+if (gz > TOTAL_BUDGET_GZIP) {
+  console.error(`FAIL total gzip ${gz} B exceeds ${TOTAL_BUDGET_GZIP} B budget.`);
+  fail = true;
+} else {
+  console.log('pass total within 20 KB budget');
+}
+if (cjsRaw > 0 && cjsGz > TOTAL_BUDGET_GZIP) {
+  console.error(`FAIL dist/index.cjs gzip ${cjsGz} B exceeds ${TOTAL_BUDGET_GZIP} B budget.`);
+  fail = true;
+}
+if (fail) process.exit(1);
