@@ -61,7 +61,9 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          bun --cwd "$PWD/apps/benchmark" run dev -- --host 127.0.0.1 --port 5173 > browser-server.log 2>&1 &
+          # NOTE: `bun --cwd <dir> run dev -- …` is rejected by bun 1.4.2
+          # (prints help, exit 1); plain `cd` avoids the CLI quirk.
+          (cd "$GITHUB_WORKSPACE/apps/benchmark" && bun run dev -- --host 127.0.0.1 --port 5173 > "$GITHUB_WORKSPACE/browser-server.log" 2>&1) &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           # Prefer the setup-chrome step output (absolute path, always set);
