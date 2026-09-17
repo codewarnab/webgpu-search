@@ -15,3 +15,21 @@ export {
 
 // Unified Types
 export type * from './types';
+
+// v0.2 Unicode text profile (versions, errors, caps)
+export {
+  FORMAT_VERSION,
+  QUERY_TOKENS_MAX,
+  RESULT_LIMIT_MAX,
+  SCORING_VERSION,
+  SERIALIZED_MAGIC,
+  UNICODE_VERSION,
+  countUnicodeCodePoints,
+  IncompatibleIndexError,
+  IncompatibleOptionError,
+  ProfileMismatchError,
+  QueryTooLongError,
+  type CpuAlgorithm,
+  type OnQueryTooLong,
+  type TextProfileId,
+} from './text-profile';

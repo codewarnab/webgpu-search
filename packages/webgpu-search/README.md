@@ -103,8 +103,8 @@ For custom benchmarks, fine-grained buffer manipulation, or custom GPU pipelines
 ```ts
 import { WebGPUEngine, CPUEngine, packStringsToGPUBuffer } from 'webgpu-search';
 
-// 1. Pack arbitrary strings into GPU byte layout (64-byte or 128-byte slots)
-const packed = packStringsToGPUBuffer(myStrings, 64);
+// 1. Pack arbitrary strings into GPU variable-length byte layout (dynamic, no fixed slots)
+const packed = packStringsToGPUBuffer(myStrings);
 
 // 2. Direct WebGPU compute pipeline
 const gpu = new WebGPUEngine();
@@ -128,20 +128,28 @@ gpu.destroy();
 ### `SearchIndex.create(items, options?)`
 - `items: string[]`: Array of strings to index.
 - `options.threshold`: Item cutoff to use WebGPU vs CPU (default: `30000`).
-- `options.preferGpu`: Force WebGPU if available (default: `false`).
-- `options.slotBytes`: Row width, `64` (59 chars) or `128` (123 chars) (default: `64`).
+- `options.preferGpu`: Force WebGPU if available (default: `false`). Conflicts with `search({ cpuAlgorithm: 'ufuzzy' })` → `IncompatibleOptionError`.
+- `options.slotBytes`: v0.2 throw-on-use (`IncompatibleOptionError`; dynamic variable-length indexing replaced fixed slots; removal in v0.3). Remove it and rebuild.
+- `options.textProfile`: Index-level immutable profile (default: `'unicode-default'`; unknown values throw `ProfileMismatchError`).
+- `options.caseSensitive`: Pack-time fold control (default: `false` = folded/NFC+C+F; `true` = NFC-only). Fixed at construction.
 - `options.device`: Custom injected `GPUDevice`.
 
 ### `index.search(query, options?)`
 - `query: string`: Query string.
 - `options.mode`: `'fuzzy'` (subsequence + word-boundary scoring) or `'substring'` (case-insensitive substring).
-- `options.limit`: Maximum results to return. Defaults to `50` and is clamped to the inclusive range `1..8192` on both CPU and WebGPU.
+- `options.limit`: Maximum results to return. Defaults to `50` and is clamped to the inclusive range `1..8192` (`RESULT_LIMIT_MAX`) on both CPU and WebGPU.
 - `options.maxResults`: Backwards-compatible alias for `limit`; `limit` takes precedence when both are provided.
-- `options.caseSensitive`: Case sensitivity flag (default: `false`).
+- `options.caseSensitive`: Must match the index packed mode (default: `false`). Mismatch throws `ProfileMismatchError` — build one index per mode instead of varying per query (breaking v0.2 change).
+- `options.cpuAlgorithm`: `'parity'` (default, v0.2 contract) or `'ufuzzy'` (explicit opt-in CPU-only, skips GPU). M1 shape-only note: the parity scorer lands in M2; the M1 CPU path still serves legacy uFuzzy/native while echoing the request.
+- `options.onQueryTooLong`: `'throw'` (default, throws `QueryTooLongError` over `QUERY_TOKENS_MAX=128` tokens) or `'cpu-fallback'` (forces CPU for that query). M1 counts pre-fold code points; exact post-fold enforcement lands in M2.
 - `options.signal`: `AbortSignal` to cancel stale query readback during fast typing.
+- Returns `SearchResponse` with `profileId`/`scoringVersion`/`cpuAlgorithm` echo.
 
 ### `index.getStats()`
-Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer }`.
+Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer, profileId, unicodeVersion, scoringVersion, tokenCount, folded, formatVersion }`. `tokenCount` is the M1 pre-fold code-point total (exact post-fold count lands in M2).
+
+### v0.2 migration stub (full guide in M6)
+Rebuild required: byte offsets → token offsets; `ß/ss` + canonical merges; astral/mark fixes; two-key tie-break; `mode:'fuzzy'` becomes parity-subsequence; `slotBytes` throws; per-query `caseSensitive` must match the index. Check `getStats().profileId/unicodeVersion/scoringVersion/formatVersion` after rebuild. See `docs/unicode-contract.md`.
 
 ### `index.destroy()`
 Releases GPU buffers and releases reference from the shared context manager.
