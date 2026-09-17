@@ -94,8 +94,11 @@ export class SearchIndex {
    * Execute search across the indexed strings.
    */
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
-    const { mode = 'fuzzy', limit = 50, caseSensitive = false, signal } = options;
-    const clampedLimit = Math.max(1, Math.min(options.limit ?? options.maxResults ?? limit, 8192));
+    const { mode = 'fuzzy', caseSensitive = false, signal } = options;
+    const requestedLimit = options.limit ?? options.maxResults ?? 50;
+    // Guard against NaN (e.g. a failed parseInt): Math.min/Math.max propagate
+    // NaN, which would poison downstream slicing. Treat it as "not provided".
+    const clampedLimit = Math.max(1, Math.min(Number.isNaN(requestedLimit) ? 50 : requestedLimit, 8192));
 
     if (signal?.aborted) {
       throw new DOMException('Search aborted', 'AbortError');
@@ -176,9 +179,9 @@ export class SearchIndex {
     };
 
     if (mode === 'fuzzy') {
-      cpuResult = this.cpuEngine.searchUFuzzy(this.items, query, limit, caseSensitive);
+      cpuResult = this.cpuEngine.searchUFuzzy(this.items, query, clampedLimit, caseSensitive);
     } else {
-      cpuResult = this.cpuEngine.searchNative(this.items, query, limit, caseSensitive);
+      cpuResult = this.cpuEngine.searchNative(this.items, query, clampedLimit, caseSensitive);
     }
 
     if (signal?.aborted) {
@@ -235,3 +238,4 @@ export class SearchIndex {
     this.vramAllocatedBytes = 0;
   }
 }
+

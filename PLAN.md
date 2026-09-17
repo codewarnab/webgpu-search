@@ -4,7 +4,7 @@
 
 This plan outlines the architecture and execution roadmap for transforming `webgpu-fuzzy-search` from an interactive benchmark prototype into a production-grade **Turborepo monorepo** with two first-class workspaces:
 
-1. **`packages/webgpu-fuzzy`**: A zero-config, highly-optimized hybrid search library published to npm. It dynamically routes queries between **WebGPU compute shaders (WGSL)** and **uFuzzy (CPU)**, executing searches on retained VRAM in under 2ms while providing seamless fallback in non-WebGPU environments (Node.js, SSR, older browsers).
+1. **`packages/webgpu-fuzzy`**: A zero-config, highly-optimized hybrid search library published to npm. It dynamically routes queries between **WebGPU compute shaders (WGSL)** and **uFuzzy (CPU)**, accelerating large retained datasets while providing seamless fallback in non-WebGPU environments (Node.js, SSR, older browsers).
 2. **`apps/benchmark`**: The interactive web dashboard, hardware evaluation suite, SVG/PNG chart renderer, and multi-size crossover matrix runner.
 
 ---
@@ -561,3 +561,4 @@ export default defineConfig({
 4. **Scoring Consistency**: Results returned from CPU (`< 30k` items) and WebGPU (`>= 30k` items) adhere to the exact same `SearchResultItem` interface with valid descending scores.
 5. **No Context Exhaustion**: Creating 10 `SearchIndex` instances sequentially reuses the underlying `GPUDevice` and does not trigger browser WebGPU context loss.
 6. **Zero Stale UI Overwrites**: Triggering rapid queries with `AbortSignal` cancels in-flight candidate readback and returns the freshest result cleanly.
+
