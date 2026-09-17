@@ -2,13 +2,14 @@ import { WebGPUEngine } from './webgpu-engine';
 import { CPUEngine } from './cpu-engine';
 import { WebGPUContextManager } from './context-manager';
 import { packStringsToGPUBuffer, checkMemoryBudget } from './buffer';
+import { normalizeText } from './unicode-preprocess';
+import { searchCpuReference } from './cpu-reference';
 import {
   FORMAT_VERSION,
   QUERY_TOKENS_MAX,
   RESULT_LIMIT_MAX,
   SCORING_VERSION,
   UNICODE_VERSION,
-  countUnicodeCodePoints,
   IncompatibleOptionError,
   ProfileMismatchError,
   QueryTooLongError,
@@ -35,11 +36,18 @@ export class SearchIndex {
   private readonly folded: boolean;
   private readonly preferGpu: boolean;
   private tokenCount: number = 0;
+  private recordTokens: Uint32Array[] = [];
 
-  private constructor(items: string[], folded: boolean, preferGpu: boolean) {
+  private constructor(
+    items: string[],
+    folded: boolean,
+    preferGpu: boolean,
+    recordTokens: Uint32Array[] = [],
+  ) {
     this.items = items;
     this.folded = folded;
     this.preferGpu = preferGpu;
+    this.recordTokens = recordTokens;
     this.cpuEngine = new CPUEngine();
   }
 
@@ -58,12 +66,16 @@ export class SearchIndex {
     }
     const folded = !(options.caseSensitive ?? false);
     const preferGpu = options.preferGpu ?? false;
-    const index = new SearchIndex(items, folded, preferGpu);
-    // M1 interim tokenCount: pre-fold code-point total (exact post-fold count
-    // lands in M2 via unicode-preprocess). Computed for every path so CPU and
-    // empty indexes report a real count instead of 0.
+    // M2: exact post-fold tokenization shared by query gate + tokenCount.
+    // One normalizeText path for records; queries reuse it in search().
+    const recordTokens: Uint32Array[] = new Array(items.length);
     let corpusTokens = 0;
-    for (const s of items) corpusTokens += countUnicodeCodePoints(s ?? '');
+    for (let i = 0; i < items.length; i++) {
+      const norm = normalizeText(items[i] ?? '', folded);
+      recordTokens[i] = norm.tokens;
+      corpusTokens += norm.tokenCount;
+    }
+    const index = new SearchIndex(items, folded, preferGpu, recordTokens);
     index.tokenCount = corpusTokens;
 
     // Empty dataset fast path: zero allocation, route immediately to CPU
@@ -105,9 +117,8 @@ export class SearchIndex {
           index.gpuEngine = gpu;
           index.engineType = 'webgpu';
           index.vramAllocatedBytes = packed.byteLength;
-          // tokenCount stays the M1 pre-fold code-point total computed at
-          // construction; M2 replaces it with the post-fold count from
-          // unicode-preprocess (packed.totalChars is legacy sanitized length).
+          // tokenCount is the M2 post-fold total computed at construction;
+          // packed.totalChars is legacy sanitized length (ignored for stats).
 
           // Subscribe to device loss for automatic graceful fallback
           index.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
@@ -157,9 +168,9 @@ export class SearchIndex {
         "cpuAlgorithm:'ufuzzy' is explicit CPU-only and cannot be combined with preferGpu:true. Use preferGpu:false or cpuAlgorithm:'parity'."
       );
     }
-    // M1 query-length gate on a pre-fold code-point approximation
-    // (trim + countUnicodeCodePoints). Exact post-fold enforcement lands in M2.
-    const queryTokenCount = countUnicodeCodePoints((query ?? '').trim());
+    // M2 query-length gate on exact post-fold token count (shared pipeline).
+    const normalizedQuery = normalizeText(query ?? '', this.folded);
+    const queryTokenCount = normalizedQuery.tokenCount;
     let forceCpu = false;
     if (queryTokenCount > QUERY_TOKENS_MAX) {
       if (onQueryTooLong === 'cpu-fallback') {
@@ -177,7 +188,40 @@ export class SearchIndex {
       throw new DOMException('Search aborted', 'AbortError');
     }
 
-    // Empty dataset edge case: 0 items
+    // Degenerate post-processing queries that normalize to zero post-fold
+    // tokens (whitespace-only, U+3000-only, empty) return unified empty
+    // results with query:'' on both paths (resolves '' vs original echo
+    // divergence). Note: lone-mark / VS / ZWJ / tatweel-only inputs survive
+    // NFC+C+F as single tokens per the survival rule (acceptance checklist),
+    // so they are NOT empty here — they search normally (usually 0 hits,
+    // echoing the original query). The contract parenthetical listing them
+    // as "become empty" is inaccurate for the frozen pipeline (no stripping
+    // step); this behavior is pinned by test-m2-preprocess §8b.
+    if (normalizedQuery.isEmpty) {
+      const timings: SearchTimings = {
+        queryUploadMs: 0,
+        encodeSubmitMs: 0,
+        gpuExecutionMs: null,
+        readbackMs: 0,
+        totalMs: 0,
+        gpuDispatchMs: 0
+      };
+      return {
+        results: [],
+        totalMatches: 0,
+        query: '',
+        mode,
+        engine: 'cpu',
+        candidateCount: 0,
+        hasOverflow: false,
+        timings,
+        profileId: this.profileId,
+        scoringVersion: SCORING_VERSION,
+        cpuAlgorithm
+      };
+    }
+
+    // Empty dataset edge case: 0 items (non-empty query echoes original).
     if (this.items.length === 0) {
       const timings: SearchTimings = {
         queryUploadMs: 0,
@@ -246,23 +290,59 @@ export class SearchIndex {
       }
     }
 
-    // 2. CPU execution path
+    // 2. CPU execution path.
+    // uFuzzy is quarantined to explicit cpuAlgorithm:'ufuzzy' (CPU-only,
+    // never in the differential matrix). Default 'parity' serves the
+    // shared-pipeline reference scorer; GPU failures also land here.
     if (signal?.aborted) {
       throw new DOMException('Search aborted', 'AbortError');
     }
 
-    let cpuResult: {
-      query: string;
-      totalMatches: number;
-      results: SearchResultItem[];
-      durationMs: number;
-    };
-
-    if (mode === 'fuzzy') {
-      cpuResult = this.cpuEngine.searchUFuzzy(this.items, query, clampedLimit, caseSensitive);
-    } else {
-      cpuResult = this.cpuEngine.searchNative(this.items, query, clampedLimit, caseSensitive);
+    if (cpuAlgorithm === 'ufuzzy') {
+      let legacyResult: {
+        query: string;
+        totalMatches: number;
+        results: SearchResultItem[];
+        durationMs: number;
+      };
+      if (mode === 'fuzzy') {
+        legacyResult = this.cpuEngine.searchUFuzzy(this.items, query, clampedLimit, caseSensitive);
+      } else {
+        legacyResult = this.cpuEngine.searchNative(this.items, query, clampedLimit, caseSensitive);
+      }
+      if (signal?.aborted) {
+        throw new DOMException('Search aborted', 'AbortError');
+      }
+      const timings: SearchTimings = {
+        queryUploadMs: 0,
+        encodeSubmitMs: 0,
+        gpuExecutionMs: null,
+        readbackMs: 0,
+        totalMs: legacyResult.durationMs,
+        gpuDispatchMs: 0
+      };
+      return {
+        query: legacyResult.query,
+        mode,
+        engine: 'cpu',
+        totalMatches: legacyResult.totalMatches,
+        candidateCount: Math.min(legacyResult.totalMatches, RESULT_LIMIT_MAX),
+        hasOverflow: legacyResult.totalMatches > RESULT_LIMIT_MAX,
+        results: legacyResult.results,
+        timings,
+        profileId: this.profileId,
+        scoringVersion: SCORING_VERSION,
+        cpuAlgorithm
+      };
     }
+
+    const parityResult = searchCpuReference(
+      this.recordTokens,
+      normalizedQuery.tokens,
+      mode,
+      clampedLimit,
+      this.items,
+    );
 
     if (signal?.aborted) {
       throw new DOMException('Search aborted', 'AbortError');
@@ -273,18 +353,18 @@ export class SearchIndex {
       encodeSubmitMs: 0,
       gpuExecutionMs: null,
       readbackMs: 0,
-      totalMs: cpuResult.durationMs,
+      totalMs: parityResult.durationMs,
       gpuDispatchMs: 0
     };
 
     return {
-      query: cpuResult.query,
+      query,
       mode,
       engine: 'cpu',
-      totalMatches: cpuResult.totalMatches,
-      candidateCount: Math.min(cpuResult.totalMatches, RESULT_LIMIT_MAX),
-      hasOverflow: false,
-      results: cpuResult.results,
+      totalMatches: parityResult.totalMatches,
+      candidateCount: Math.min(parityResult.totalMatches, RESULT_LIMIT_MAX),
+      hasOverflow: parityResult.totalMatches > RESULT_LIMIT_MAX,
+      results: parityResult.results,
       timings,
       profileId: this.profileId,
       scoringVersion: SCORING_VERSION,

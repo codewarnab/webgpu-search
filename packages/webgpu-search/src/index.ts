@@ -33,3 +33,27 @@ export {
   type OnQueryTooLong,
   type TextProfileId,
 } from './text-profile';
+
+// v0.2 shared preprocessing + CPU reference (M2)
+export {
+  normalizeText,
+  toWellFormedSafe,
+  tokensEqual,
+  LONE_SURROGATE_PATTERN,
+  type NormalizedText,
+} from './unicode-preprocess';
+export {
+  compareParityResults,
+  scoreFuzzyTokens,
+  scoreSubstringTokens,
+  searchCpuReference,
+  type CpuReferenceOutput,
+} from './cpu-reference';
+export {
+  FOLD_EXPANSIONS,
+  FOLD_RANGES,
+  FOLD_C_COUNT,
+  FOLD_F_COUNT,
+  FOLD_UNICODE_VERSION,
+  foldCodePoint,
+} from './fold-table';
