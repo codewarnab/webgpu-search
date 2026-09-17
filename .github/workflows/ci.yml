@@ -50,6 +50,11 @@ jobs:
       - name: Run Headless WebGPU Mock Tests (vgpu/mock)
         run: bun run test:mock
 
+      - name: Setup Chrome (browser regression gate)
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
       - name: Run Browser WebGPU Regression Tests
         timeout-minutes: 5
         shell: bash
@@ -58,9 +63,9 @@ jobs:
           bun --cwd "$PWD/apps/benchmark" run dev -- --host 127.0.0.1 --port 5173 > browser-server.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"
-          if [ -z "$CHROME_BIN" ]; then
-            echo "Chrome/Chromium binary not found; failing browser regression gate." >&2
+          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chrome || echo \"${CHROME_PATH:-}\")"
+          if [ -z "$CHROME_BIN" ] || [ ! -x "$CHROME_BIN" ]; then
+            echo "Chrome/Chromium binary not found or not executable (got '${CHROME_BIN:-<empty>}'); failing browser regression gate." >&2
             exit 1
           fi
           export CHROME_BIN
