@@ -90,12 +90,12 @@ export class BenchmarkRunner {
                 });
             }
 
-            // PHASE 1: WebGPU Compute Engine (120 FPS Locked)
+            // PHASE 1: WebGPU Compute Engine off the main thread
             if (onProgress) {
                 onProgress({
                     currentStep: sIdx + 1,
                     totalSteps,
-                    stepName: `[${size.toLocaleString()} items] Phase 1/3: WebGPU Compute (120 FPS Locked)...`
+                    stepName: `[${size.toLocaleString()} items] Phase 1/3: WebGPU Compute (worker offload)...`
                 });
             }
 
@@ -253,3 +253,4 @@ export class BenchmarkRunner {
         return results;
     }
 }
+

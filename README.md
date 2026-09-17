@@ -4,7 +4,7 @@
 [![npm version](https://img.shields.io/npm/v/webgpu-search.svg)](https://www.npmjs.com/package/webgpu-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An ultra-fast hybrid fuzzy and substring search engine powered by parallel **WebGPU compute shaders (WGSL)** on retained VRAM, backed by **uFuzzy** CPU fallback, and featuring **zero-stutter Web Worker offloading** to guarantee **120 FPS** responsiveness across millions of records.
+An ultra-fast hybrid fuzzy and substring search engine powered by parallel **WebGPU compute shaders (WGSL)** on retained VRAM, backed by **uFuzzy** CPU fallback, with Web Worker offloading that keeps search work off the main thread. Responsiveness still depends on the display refresh rate, browser, device, dataset, query, and rendering workload.
 
 👉 **[Live Interactive Benchmark & Playground](https://webgpu-fuzzy-search.vercel.app)**
 
@@ -37,6 +37,8 @@ Open **`http://localhost:5173`** in any WebGPU-capable browser (Chrome, Edge, Sa
 
 Tested on **Intel(R) Iris(R) Xe Graphics (gen-12lp)** via Direct3D11 ANGLE on Windows 11 with query `"AuthController"`:
 
+> **Measurement scope:** These are observed values from one Intel Iris Xe device and query, not performance guarantees. WebGPU timings are retained end-to-end search time. UI FPS was reported by the benchmark telemetry during the run. Hardware timestamp-query support and candidate overflow should be recorded with any new benchmark export.
+
 ### 1. Exact Substring Search Matrix
 | Dataset Size | WebGPU Retained | uFuzzy (CPU) | Native JS | Speedup vs uFuzzy | UI Frame Rate (Worker vs Main) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -63,17 +65,17 @@ Tested on **Intel(R) Iris(R) Xe Graphics (gen-12lp)** via Direct3D11 ANGLE on Wi
 
 ### 1. The Retained VRAM vs Cold Upload Reality
 - **Cold Upload**: Transferring 1,000,000 records (~64 MB packed) over the PCIe bus via `queue.writeBuffer` takes **~8–20 ms**. If an application re-uploads data on every keystroke, **uFuzzy on CPU will always win**.
-- **Retained VRAM**: When dataset storage buffers are pre-loaded once into GPU VRAM, subsequent keystrokes only upload a **272-byte uniform buffer** (query characters, length, flags). The compute shader executes in parallel across thousands of GPU threads in **1.5ms – 5.5ms**.
+- **Retained VRAM**: When dataset storage buffers are pre-loaded once into GPU VRAM, subsequent keystrokes only upload a **272-byte uniform buffer** (query characters, length, flags). In the recorded Intel Iris Xe / Windows 11 / D3D11 ANGLE run above, retained end-to-end WebGPU searches measured **3.13-17.27 ms** from 100,000 to 2,000,000 rows, excluding the noted 59.10 ms outlier. These are single-device lab results, not cross-device guarantees.
 
 ### 2. The `mapAsync()` Fixed Latency Trap & Candidate Compaction
 - WebGPU buffer readbacks have an inherent synchronization floor (~1ms to 3ms). Below 50,000 records, CPU uFuzzy completes in <1ms, making CPU faster at small scales.
 - At 2,000,000 items, reading back a full result array across PCIe would introduce an extra 10–20ms transfer penalty.
 - **Candidate Pool Compaction**: The WGSL compute shader writes up to **8,192 scored candidate matches** (`{ index: u32, score: i32 }`) into a compact 64 KB output buffer using atomic counters (`atomicAdd(&output.count, 1u)`). The CPU then sorts these candidates descending to yield the top 1,000 matches in <1ms, avoiding PCIe bus stalls.
 
-### 3. Web Worker Offloading: The 120 FPS Guarantee
+### 3. Web Worker Offloading and UI Responsiveness
 Searching 2,000,000 records directly on the browser UI thread freezes the render loop for 170ms+ (plunging frame rates to 6 FPS).
 - By offloading the `WebGPUEngine`, buffers, and search execution to a dedicated **Web Worker**:
-  1. The main UI thread spends ~0.05ms posting the query to the worker, maintaining a locked **120 FPS**.
+  1. In the recorded Intel Iris Xe run, posting a query to the worker took about **0.05 ms**. The benchmark UI measures the actual frame rate live; it does not guarantee a fixed FPS.
   2. The worker dispatches compute pipelines and awaits buffer readbacks off-thread.
   3. Active `AbortController` cancellation discards in-flight passes during rapid user typing.
   4. Monotonic query IDs (`queryId`) ensure the UI only presents matches corresponding to the latest keystroke.
@@ -101,3 +103,4 @@ bun run build
 ## 📄 License
 
 MIT © [codewarnab](https://github.com/codewarnab)
+

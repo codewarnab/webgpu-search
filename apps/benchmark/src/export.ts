@@ -168,7 +168,7 @@ export function generateMarkdownSummary(
         for (const r of rows) {
             const gpuTime = r.gpuRetained.totalMs > 0 ? `${r.gpuRetained.totalMs} ms` : 'N/A';
             const speedup = r.retainedVsUfuzzySpeedup > 0 ? `**${r.retainedVsUfuzzySpeedup}x**` : '-';
-            const fpsStr = `⚡ 120 FPS vs ${r.uiTelemetry?.mainThreadFps ?? 60} FPS`;
+            const fpsStr = r.uiTelemetry ? `Measured ${r.uiTelemetry.workerFps} FPS vs estimated ${r.uiTelemetry.mainThreadFps} FPS` : 'Not recorded';
             lines.push(`| **${r.datasetSize.toLocaleString()}** | ${gpuTime} | ${r.ufuzzyMs} ms | ${r.jsNativeMs} ms | ${speedup} | ${fpsStr} |`);
         }
         return lines.join('\n');
@@ -178,7 +178,8 @@ export function generateMarkdownSummary(
         `# WebGPU vs CPU Search Benchmark Report`,
         `- **Hardware**: ${gpuName}`,
         `- **Date**: ${dateStr}`,
-        `- **UI Thread Guarantee**: Locked at **120 FPS** with zero dropped frames via Web Worker offloading`,
+        `- **UI responsiveness**: Worker FPS is measured by the benchmark page; main-thread FPS is an estimate derived from blocking search time. Neither is a performance guarantee.`,
+        `- **Timing scope**: Retained values are end-to-end search timings. Hardware timestamp-query availability and candidate overflow are included in the CSV export.`,
         '',
         formatTable(substringResults, '1. Exact Substring Search Matrix'),
         '',
@@ -201,3 +202,4 @@ export function downloadBlob(blob: Blob, filename: string) {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 }
+
