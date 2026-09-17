@@ -7,7 +7,7 @@
  *   span + length penalties (see shaders/fuzzy.wgsl).
  *
  * All arithmetic uses i32 semantics (`|0` / `Math.imul`) and the shared
- * two-key order `(b.score - a.score) || (a.index - b.index)`.
+ * two-key order (score desc, index asc; wrap-free).
  * Negative scores are legal (long record + late match); no clamping.
  * Units are post-fold code points on both paths.
  *
@@ -15,8 +15,17 @@
  */
 
 import type { SearchResultItem } from './types';
+import { clampLimit, nowMs } from './runtime-guards';
 
-/** ASCII delimiter set from shaders/fuzzy.wgsl (documented v0.2 limit). */
+/**
+ * ASCII delimiter set shared with shaders/fuzzy.wgsl (documented v0.2
+ * limitation: tab/newline/NBSP/U+3000 get no word bonus; changing the set
+ * is a scoring-version break requiring lockstep WGSL+CPU update).
+ */
+export const WORD_BOUNDARY_PREV: readonly number[] = Object.freeze([
+  47, 95, 45, 46, 32, 58, 92,
+] as const) as readonly number[];
+
 function isWordBoundaryPrev(prev: number): boolean {
   return (
     prev === 47 ||
@@ -30,19 +39,25 @@ function isWordBoundaryPrev(prev: number): boolean {
 }
 
 /**
- * Shared two-key comparator with i32 semantics.
+ * Shared two-key comparator (score desc, index asc).
+ * Wrap-free total order; identical in-range results to the old `|0` form.
  * Mirrors the host readback sort on both paths.
  */
 export function compareParityResults(
   a: { score: number; index: number },
   b: { score: number; index: number }
 ): number {
-  const byScore: number = ((b.score - a.score) | 0) as number;
-  if (byScore !== 0) return byScore;
-  return ((a.index - b.index) | 0) as number;
+  if (b.score !== a.score) return b.score > a.score ? 1 : -1;
+  if (a.index !== b.index) return a.index > b.index ? 1 : -1;
+  return 0;
 }
 
-/** Earliest-occurrence substring score on token streams. */
+/**
+ * Earliest-occurrence substring score on token streams.
+ * Note: `Math.imul(start, 10)` wraps only past ~214.7M-token start offsets
+ * (~859 MB single record) — unreachable in practice; corpus OOMs first.
+ * Kept bit-identical with WGSL by design.
+ */
 export function scoreSubstringTokens(
   record: Uint32Array,
   query: Uint32Array
@@ -124,19 +139,17 @@ export interface CpuReferenceOutput {
   durationMs: number;
 }
 
-function nowMs(): number {
-  return performance.now();
-}
-
 /**
  * Exhaustive parity scan over pre-normalized record token streams.
  *
  * @param recordTokens post-fold tokens per record (same order as texts).
  * @param queryTokens post-fold query tokens (non-empty; empty yields no hits).
  * @param mode parity algorithm to run.
- * @param limit max results to return (caller clamps to 1..8192).
+ * @param limit max results to return (shared clamp 1..8192).
  * @param texts original display strings for the `text` field (scores stay
  *   in normalized space; callers must not slice originals by folded spans).
+ * Precondition: `recordTokens`/`texts` are parallel arrays of valid
+ * `Uint32Array`/string entries (sparse/undefined entries throw TypeError).
  */
 export function searchCpuReference(
   recordTokens: readonly Uint32Array[],
@@ -165,10 +178,9 @@ export function searchCpuReference(
   }
   const totalMatches: number = hits.length;
   hits.sort(compareParityResults);
-  // Mirror hybrid-index clamping: NaN → default 50, then 1..8192 (caller
-  // clamps; this keeps direct callers symmetric).
-  const saneLimit: number = Number.isNaN(limit) ? 50 : limit;
-  const capped: number = saneLimit < 1 ? 1 : saneLimit;
+  // Shared clamp (1..8192, NaN/non-finite → 50, fractions floored) — same
+  // helper as hybrid-index so direct callers cannot bypass the cap.
+  const capped: number = clampLimit(limit);
   const results: SearchResultItem[] =
     hits.length > capped ? hits.slice(0, capped) : hits;
   const durationMs: number = nowMs() - t0;

@@ -26,11 +26,26 @@ jobs:
       - name: Validate WGSL Shaders (vgpu check)
         run: bun run check:shaders
 
+      - name: Lint Parity Invariants (M2)
+        run: bun run lint:parity
+
+      - name: Verify Fold Table Freshness (M2)
+        run: bun scripts/generate-fold-table.ts --check
+
       - name: Typecheck Workspaces
         run: bun run typecheck
 
       - name: Production Build (Turborepo)
         run: bun run build
+
+      - name: Check Bundle Size Budget (M2)
+        run: bun run check:bundle
+
+      - name: Run M2 Preprocessing and Parity Tests
+        run: bun run test:preprocess
+
+      - name: Run M2 Tests Under tr-TR Locale
+        run: LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun run test:preprocess
 
       - name: Run Headless WebGPU Mock Tests (vgpu/mock)
         run: bun run test:mock
@@ -40,7 +55,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          bun --cwd apps/benchmark run dev -- --host 127.0.0.1 --port 5173 > browser-server.log 2>&1 &
+          bun --cwd "$PWD/apps/benchmark" run dev -- --host 127.0.0.1 --port 5173 > browser-server.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || true)"

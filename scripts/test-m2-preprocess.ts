@@ -261,15 +261,28 @@ async function main(): Promise<void> {
     const lim2 = await idx2.search(q, { mode: 'substring', limit: 2 });
     const limNaN = await idx2.search(q, { mode: 'substring', limit: NaN });
     const limUndef = await idx2.search(q, { mode: 'substring' });
-    const limHuge = await idx2.search(q, { mode: 'substring', limit: 9000 });
+    const limHuge = await idx.search(q, { mode: 'substring', limit: 9000 });
     const limAlias = await idx2.search(q, { mode: 'substring', maxResults: 3 });
+    const limFloat = await idx2.search(q, { mode: 'substring', limit: 2.7 });
+    const limInf = await idx.search(q, { mode: 'substring', limit: Infinity });
     ok('limit=0 clamps to 1', lim0.results.length === 1);
     ok('limit=1 -> 1', lim1.results.length === 1);
     ok('limit=2 -> 2', lim2.results.length === 2);
     ok('limit=NaN -> 50', limNaN.results.length === 50);
     ok('limit=undef -> 50', limUndef.results.length === 50);
-    ok('limit=9000 clamps 8192', limHuge.results.length === 8192);
+    ok('limit=9000 clamps 8192 (8193 corpus)', limHuge.results.length === 8192 && limHuge.hasOverflow === true);
     ok('maxResults alias=3', limAlias.results.length === 3);
+    ok('limit=2.7 floors to 2', limFloat.results.length === 2);
+    ok('limit=Infinity -> 50 (non-finite default)', limInf.results.length === 50);
+    // Direct scorer must enforce the same cap (no unbounded slices).
+    {
+      const recT = items.map((s) => normalizeText(s, true).tokens);
+      const qT = normalizeText(q, true).tokens;
+      const direct = searchCpuReference(recT, qT, 'substring', 9000, items);
+      ok('direct searchCpuReference clamps 9000->8192', direct.results.length === 8192);
+      const directInf = searchCpuReference(recT, qT, 'substring', Infinity, items);
+      ok('direct searchCpuReference Infinity->50', directInf.results.length === 50);
+    }
     idx.destroy();
     idx2.destroy();
   }
@@ -308,6 +321,14 @@ async function main(): Promise<void> {
       parity.results.length !== ufuzzy.results.length ||
       parity.results.some((r, i) => r.index !== ufuzzy.results[i]?.index || r.score !== ufuzzy.results[i]?.score);
     ok('uFuzzy != parity on >=1 fixture', differ, `parity=${parity.totalMatches} ufuzzy=${ufuzzy.totalMatches}`);
+    // Same-mode quarantine: parity vs ufuzzy must also differ (scores are
+    // fabricated rank scores on the legacy path, formula scores on parity).
+    const parityFuzzy = await idx.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'parity' });
+    const ufuzzyFuzzy = await idx.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'ufuzzy' });
+    const sameModeDiffer =
+      parityFuzzy.totalMatches !== ufuzzyFuzzy.totalMatches ||
+      parityFuzzy.results.some((r, i) => r.score !== ufuzzyFuzzy.results[i]?.score);
+    ok('same-mode fuzzy parity != ufuzzy', sameModeDiffer);
     ok('parity echo', parity.cpuAlgorithm === 'parity');
     ok('ufuzzy echo', ufuzzy.cpuAlgorithm === 'ufuzzy');
     const recT = items.map((s) => normalizeText(s, true).tokens);

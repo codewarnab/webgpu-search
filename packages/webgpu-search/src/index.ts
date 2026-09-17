@@ -40,13 +40,24 @@ export {
   toWellFormedSafe,
   tokensEqual,
   LONE_SURROGATE_PATTERN,
+  LONE_SURROGATE_SOURCE,
   type NormalizedText,
 } from './unicode-preprocess';
+export {
+  clampLimit,
+  DEFAULT_LIMIT,
+  abortError,
+  nowMs,
+  throwIfAborted,
+  isAsciiTokens,
+  isPrintableAsciiTokens,
+} from './runtime-guards';
 export {
   compareParityResults,
   scoreFuzzyTokens,
   scoreSubstringTokens,
   searchCpuReference,
+  WORD_BOUNDARY_PREV,
   type CpuReferenceOutput,
 } from './cpu-reference';
 export {

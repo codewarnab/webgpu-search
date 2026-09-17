@@ -125,13 +125,13 @@ export const FOLD_RANGES: readonly number[] = [${flatRanges}];
 /** Flat [cp,len,m1,m2(,m3),…] for F (1→2/3) mappings. */
 export const FOLD_EXPANSIONS: readonly number[] = [${flatFStr}];
 
-const singleMap: Map<number, number> = new Map();
+const singleMap: Map<number, readonly number[]> = new Map();
 for (let i = 0; i < FOLD_RANGES.length; i += 3) {
   const start: number = FOLD_RANGES[i] as number;
   const end: number = FOLD_RANGES[i + 1] as number;
   const delta: number = FOLD_RANGES[i + 2] as number;
   for (let cp = start; cp <= end; cp++) {
-    singleMap.set(cp, cp + delta);
+    singleMap.set(cp, Object.freeze([cp + delta]) as readonly number[]);
   }
 }
 
@@ -139,20 +139,27 @@ const expansionMap: Map<number, readonly number[]> = new Map();
 for (let i = 0; i < FOLD_EXPANSIONS.length; ) {
   const cp: number = FOLD_EXPANSIONS[i] as number;
   const len: number = FOLD_EXPANSIONS[i + 1] as number;
-  expansionMap.set(cp, FOLD_EXPANSIONS.slice(i + 2, i + 2 + len));
+  expansionMap.set(
+    cp,
+    Object.freeze(FOLD_EXPANSIONS.slice(i + 2, i + 2 + len)) as readonly number[],
+  );
   i += 2 + len;
 }
 
+Object.freeze(FOLD_RANGES);
+Object.freeze(FOLD_EXPANSIONS);
+
 /**
  * Full default case fold for one scalar (C+F only, S+T excluded).
- * Returns the 1–3 folded scalars, or null if cp maps to itself.
- * Eager Maps built at module load; pure function of cp.
+ * Returns the shared frozen 1–3 scalar array, or null if cp maps to itself.
+ * Eager Maps built at module load; pure function of cp. Returned arrays are
+ * frozen — callers must not mutate them (zero per-fold allocation).
  */
 export function foldCodePoint(cp: number): readonly number[] | null {
   const multi = expansionMap.get(cp);
   if (multi !== undefined) return multi;
   const single = singleMap.get(cp);
-  if (single !== undefined) return [single];
+  if (single !== undefined) return single;
   return null;
 }
 
@@ -163,22 +170,44 @@ export const FOLD_F_COUNT: number = expansionMap.size;
 `;
 }
 
-async function loadSource(inputPath?: string): Promise<string> {
+async function loadSource(inputPath?: string): Promise<{ text: string; sha256: string }> {
+  const { readFile } = await import('node:fs/promises');
+  const { createHash } = await import('node:crypto');
   if (inputPath) {
-    return await Bun.file(inputPath).text();
+    const text = await readFile(inputPath, 'utf8');
+    const sha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+    return { text, sha256 };
   }
-  const res = await fetch(PINNED_URL);
-  if (!res.ok) throw new Error(`fetch ${PINNED_URL} failed: ${res.status}`);
-  return await res.text();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('fetch timeout 30s')), 30_000);
+  try {
+    const res = await fetch(PINNED_URL, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`fetch ${PINNED_URL} failed: ${res.status}`);
+    const text = await res.text();
+    const sha256 = createHash('sha256').update(text, 'utf8').digest('hex');
+    return { text, sha256 };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const checkOnly = args.includes('--check');
   const inputIdx = args.indexOf('--input');
+  if (inputIdx >= 0 && (args[inputIdx + 1] === undefined || (args[inputIdx + 1] as string).startsWith('--'))) {
+    console.error('FAIL --input requires a file path (got flag or nothing). Refusing network fallback.');
+    process.exit(1);
+  }
   const inputPath = inputIdx >= 0 ? args[inputIdx + 1] : undefined;
+  const shaIdx = args.indexOf('--expected-sha256');
+  const expectedSha = shaIdx >= 0 ? args[shaIdx + 1] : undefined;
 
-  const text = await loadSource(inputPath);
+  const { text, sha256 } = await loadSource(inputPath);
+  console.log(`CaseFolding sha256: ${sha256}`);
+  if (expectedSha !== undefined && sha256 !== expectedSha) {
+    throw new Error(`sha256 mismatch: expected ${expectedSha}, got ${sha256}`);
+  }
   const entries = parseCaseFolding(text);
   const cEntries = entries.filter((e) => e.status === 'C');
   const fEntries = entries.filter((e) => e.status === 'F');
@@ -252,16 +281,26 @@ async function main(): Promise<void> {
   if (lookup.has(0x0131)) throw new Error('U+0131 (ı) must have no C/F mapping (identity)');
 
   const out = emitTable(ranges, fEntries);
+  const { readFile, writeFile, rename } = await import('node:fs/promises');
   if (checkOnly) {
-    const current = await Bun.file(OUT_PATH).text().catch(() => '');
-    if (current !== out) {
-      console.error('fold-table.ts out of date. Run: bun scripts/generate-fold-table.ts');
+    let current = '';
+    try {
+      current = await readFile(OUT_PATH, 'utf8');
+    } catch {
+      current = '';
+    }
+    const norm = (s: string): string => s.replace(/\r\n/g, '\n').trimEnd() + '\n';
+    if (norm(current) !== norm(out)) {
+      console.error('fold-table.ts out of date (whitespace-normalized compare). Run: bun scripts/generate-fold-table.ts --input <CaseFolding.txt>');
       process.exit(1);
     }
     console.log('fold-table.ts up to date.');
     return;
   }
-  await Bun.write(OUT_PATH, out);
+  // Atomic write: tmp + rename (no half-written table on crash).
+  const tmpUrl = new URL('../packages/webgpu-search/src/fold-table.ts.tmp', import.meta.url);
+  await writeFile(tmpUrl, out, 'utf8');
+  await rename(tmpUrl, OUT_PATH);
   console.log(`Wrote ${OUT_PATH.pathname} (${out.length} chars)`);
 }
 

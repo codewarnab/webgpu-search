@@ -28,10 +28,14 @@ export interface MemoryBudgetCheck {
 }
 
 /**
- * Sanitizes an arbitrary string for GPU storage:
+ * Legacy v0.1 sanitizer for the GPU byte path (M2: legacy only, NOT parity).
  * 1. Strips diacritics via unicode normalization (NFKD).
  * 2. Replaces remaining non-ASCII characters with '?' to preserve position and prevent multi-byte misalignment.
  * 3. Truncates to maxChars only if maxChars is explicitly specified.
+ *
+ * @deprecated M2 parity uses `normalizeText()` folded tokens; this packer
+ * stays only behind the legacy GPU path until the M3 u32 rewrite. Excluded
+ * from the parity matrix. Removal in v0.3.
  */
 export function sanitizeStringForSlot(str: string, maxChars?: number): string {
   if (!str) return '';

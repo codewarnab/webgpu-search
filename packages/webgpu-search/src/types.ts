@@ -49,9 +49,9 @@ export interface SearchResponse {
   mode: SearchMode;
   engine: EngineType;             // Which engine serviced this query
   totalMatches: number;           // Total items passing threshold
-  candidateCount: number;         // Scored candidates returned from GPU/CPU
-  hasOverflow: boolean;           // True if matches > candidate pool capacity (RESULT_LIMIT_MAX)
-  results: SearchResultItem[];    // Top-K ranked results
+  candidateCount: number;         // min(totalMatches, pool capacity); NOT results.length (limit truncation does not set overflow)
+  hasOverflow: boolean;           // True iff totalMatches > pool capacity (RESULT_LIMIT_MAX); limit truncation alone leaves false
+  results: SearchResultItem[];    // Top-K ranked results (length <= clamped limit)
   timings: SearchTimings;
   profileId: TextProfileId;       // v0.2: text profile that served this query
   scoringVersion: typeof SCORING_VERSION; // v0.2: scoring contract version

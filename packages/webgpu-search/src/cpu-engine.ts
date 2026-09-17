@@ -1,5 +1,6 @@
 import uFuzzy from '@leeoniya/ufuzzy';
 import type { SearchResultItem } from './types';
+import { nowMs } from './runtime-guards';
 
 export interface CPUSearchResult {
   query: string;
@@ -32,7 +33,7 @@ export class CPUEngine {
       return { query: '', totalMatches: 0, results: [], durationMs: 0 };
     }
 
-    const t0 = performance.now();
+    const t0 = nowMs();
     let idxs: any = null;
     let info: any = null;
     let order: any = null;
@@ -43,17 +44,22 @@ export class CPUEngine {
       console.warn('uFuzzy search error:', err);
     }
 
-    const durationMs = performance.now() - t0;
+    const durationMs = nowMs() - t0;
     const results: SearchResultItem[] = [];
 
     const indices: number[] = (order && info && order.length > 0)
       ? order.map((o: number) => info.idx[o])
       : (idxs ?? []);
 
+    // NOTE (M2 quarantine): legacy uFuzzy path is explicitly non-conforming
+    // (locale-sensitive lowercasing lives here on purpose, rank scores are
+    // fabricated). Excluded from the parity matrix; use cpuAlgorithm:'parity'.
+    let skippedCaseSensitive = 0;
     for (let i = 0; i < indices.length; i++) {
       const itemIdx = indices[i];
       const text = strings[itemIdx] ?? '';
       if (caseSensitive && !text.includes(cleanQuery)) {
+        skippedCaseSensitive++;
         continue;
       }
       if (results.length < maxResults) {
@@ -68,7 +74,7 @@ export class CPUEngine {
 
     return {
       query,
-      totalMatches: idxs ? idxs.length : 0,
+      totalMatches: (idxs ? idxs.length : 0) - skippedCaseSensitive,
       results,
       durationMs
     };
@@ -88,7 +94,7 @@ export class CPUEngine {
       return { query: '', totalMatches: 0, results: [], durationMs: 0 };
     }
 
-    const t0 = performance.now();
+    const t0 = nowMs();
     const queryTerm = caseSensitive ? cleanQuery : cleanQuery.toLowerCase();
     const candidates: SearchResultItem[] = [];
     let totalMatches = 0;
@@ -111,7 +117,7 @@ export class CPUEngine {
 
     candidates.sort((a, b) => b.score - a.score);
     const results = candidates.slice(0, maxResults);
-    const durationMs = performance.now() - t0;
+    const durationMs = nowMs() - t0;
 
     return {
       query,

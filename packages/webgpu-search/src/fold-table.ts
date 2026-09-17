@@ -26,13 +26,13 @@ export const FOLD_RANGES: readonly number[] = [65,90,32,181,181,775,192,214,32,2
 /** Flat [cp,len,m1,m2(,m3),…] for F (1→2/3) mappings. */
 export const FOLD_EXPANSIONS: readonly number[] = [223,2,115,115,304,2,105,775,329,2,700,110,496,2,106,780,912,3,953,776,769,944,3,965,776,769,1415,2,1381,1410,7830,2,104,817,7831,2,116,776,7832,2,119,778,7833,2,121,778,7834,2,97,702,7838,2,115,115,8016,2,965,787,8018,3,965,787,768,8020,3,965,787,769,8022,3,965,787,834,8064,2,7936,953,8065,2,7937,953,8066,2,7938,953,8067,2,7939,953,8068,2,7940,953,8069,2,7941,953,8070,2,7942,953,8071,2,7943,953,8072,2,7936,953,8073,2,7937,953,8074,2,7938,953,8075,2,7939,953,8076,2,7940,953,8077,2,7941,953,8078,2,7942,953,8079,2,7943,953,8080,2,7968,953,8081,2,7969,953,8082,2,7970,953,8083,2,7971,953,8084,2,7972,953,8085,2,7973,953,8086,2,7974,953,8087,2,7975,953,8088,2,7968,953,8089,2,7969,953,8090,2,7970,953,8091,2,7971,953,8092,2,7972,953,8093,2,7973,953,8094,2,7974,953,8095,2,7975,953,8096,2,8032,953,8097,2,8033,953,8098,2,8034,953,8099,2,8035,953,8100,2,8036,953,8101,2,8037,953,8102,2,8038,953,8103,2,8039,953,8104,2,8032,953,8105,2,8033,953,8106,2,8034,953,8107,2,8035,953,8108,2,8036,953,8109,2,8037,953,8110,2,8038,953,8111,2,8039,953,8114,2,8048,953,8115,2,945,953,8116,2,940,953,8118,2,945,834,8119,3,945,834,953,8124,2,945,953,8130,2,8052,953,8131,2,951,953,8132,2,942,953,8134,2,951,834,8135,3,951,834,953,8140,2,951,953,8146,3,953,776,768,8147,3,953,776,769,8150,2,953,834,8151,3,953,776,834,8162,3,965,776,768,8163,3,965,776,769,8164,2,961,787,8166,2,965,834,8167,3,965,776,834,8178,2,8060,953,8179,2,969,953,8180,2,974,953,8182,2,969,834,8183,3,969,834,953,8188,2,969,953,64256,2,102,102,64257,2,102,105,64258,2,102,108,64259,3,102,102,105,64260,3,102,102,108,64261,2,115,116,64262,2,115,116,64275,2,1396,1398,64276,2,1396,1381,64277,2,1396,1387,64278,2,1406,1398,64279,2,1396,1389];
 
-const singleMap: Map<number, number> = new Map();
+const singleMap: Map<number, readonly number[]> = new Map();
 for (let i = 0; i < FOLD_RANGES.length; i += 3) {
   const start: number = FOLD_RANGES[i] as number;
   const end: number = FOLD_RANGES[i + 1] as number;
   const delta: number = FOLD_RANGES[i + 2] as number;
   for (let cp = start; cp <= end; cp++) {
-    singleMap.set(cp, cp + delta);
+    singleMap.set(cp, Object.freeze([cp + delta]) as readonly number[]);
   }
 }
 
@@ -40,20 +40,27 @@ const expansionMap: Map<number, readonly number[]> = new Map();
 for (let i = 0; i < FOLD_EXPANSIONS.length; ) {
   const cp: number = FOLD_EXPANSIONS[i] as number;
   const len: number = FOLD_EXPANSIONS[i + 1] as number;
-  expansionMap.set(cp, FOLD_EXPANSIONS.slice(i + 2, i + 2 + len));
+  expansionMap.set(
+    cp,
+    Object.freeze(FOLD_EXPANSIONS.slice(i + 2, i + 2 + len)) as readonly number[],
+  );
   i += 2 + len;
 }
 
+Object.freeze(FOLD_RANGES);
+Object.freeze(FOLD_EXPANSIONS);
+
 /**
  * Full default case fold for one scalar (C+F only, S+T excluded).
- * Returns the 1–3 folded scalars, or null if cp maps to itself.
- * Eager Maps built at module load; pure function of cp.
+ * Returns the shared frozen 1–3 scalar array, or null if cp maps to itself.
+ * Eager Maps built at module load; pure function of cp. Returned arrays are
+ * frozen — callers must not mutate them (zero per-fold allocation).
  */
 export function foldCodePoint(cp: number): readonly number[] | null {
   const multi = expansionMap.get(cp);
   if (multi !== undefined) return multi;
   const single = singleMap.get(cp);
-  if (single !== undefined) return [single];
+  if (single !== undefined) return single;
   return null;
 }
 

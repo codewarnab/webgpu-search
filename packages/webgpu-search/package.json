@@ -19,7 +19,10 @@
     }
   },
   "files": [
-    "dist",
+    "dist/index.js",
+    "dist/index.cjs",
+    "dist/index.d.ts",
+    "dist/index.d.cts",
     "README.md",
     "LICENSE"
   ],
@@ -32,7 +35,7 @@
   "bugs": {
     "url": "https://github.com/codewarnab/webgpu-fuzzy-search/issues"
   },
-  "sideEffects": false,
+  "sideEffects": true,
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
