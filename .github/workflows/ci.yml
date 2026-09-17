@@ -51,6 +51,7 @@ jobs:
         run: bun run test:mock
 
       - name: Setup Chrome (browser regression gate)
+        id: setup-chrome
         uses: browser-actions/setup-chrome@v1
         with:
           chrome-version: stable
@@ -63,7 +64,12 @@ jobs:
           bun --cwd "$PWD/apps/benchmark" run dev -- --host 127.0.0.1 --port 5173 > browser-server.log 2>&1 &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chrome || echo \"${CHROME_PATH:-}\")"
+          # Prefer the setup-chrome step output (absolute path, always set);
+          # fall back to PATH lookup for self-hosted / local `act` runs.
+          CHROME_BIN="${{ steps.setup-chrome.outputs.chrome-path }}"
+          if [ -z "$CHROME_BIN" ] || [ ! -x "$CHROME_BIN" ]; then
+            CHROME_BIN="$(command -v google-chrome-stable || command -v google-chrome || command -v chromium || command -v chrome || echo \"${CHROME_PATH:-}\")"
+          fi
           if [ -z "$CHROME_BIN" ] || [ ! -x "$CHROME_BIN" ]; then
             echo "Chrome/Chromium binary not found or not executable (got '${CHROME_BIN:-<empty>}'); failing browser regression gate." >&2
             exit 1
