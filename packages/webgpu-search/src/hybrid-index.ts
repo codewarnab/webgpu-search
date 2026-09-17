@@ -2,6 +2,12 @@ import { WebGPUEngine } from './webgpu-engine';
 import { CPUEngine } from './cpu-engine';
 import { WebGPUContextManager } from './context-manager';
 import { packStringsToGPUBuffer, checkMemoryBudget } from './buffer';
+import {
+  SCORING_VERSION,
+  UNICODE_VERSION,
+  ProfileMismatchError,
+  type TextProfileId,
+} from './text-profile';
 import type {
   EngineType,
   IndexOptions,
@@ -19,9 +25,13 @@ export class SearchIndex {
   private cpuEngine: CPUEngine;
   private vramAllocatedBytes: number = 0;
   private unsubscribeDeviceLost?: () => void;
+  private readonly profileId: TextProfileId = 'unicode-default';
+  private readonly folded: boolean;
+  private tokenCount: number = 0;
 
-  private constructor(items: string[]) {
+  private constructor(items: string[], folded: boolean) {
     this.items = items;
+    this.folded = folded;
     this.cpuEngine = new CPUEngine();
   }
 
@@ -29,7 +39,13 @@ export class SearchIndex {
    * Factory method to create a SearchIndex with dynamic routing between WebGPU and CPU.
    */
   static async create(items: string[], options: IndexOptions = {}): Promise<SearchIndex> {
-    const index = new SearchIndex(items);
+    if (options.slotBytes !== undefined) {
+      throw new Error(
+        '[webgpu-search] IndexOptions.slotBytes was removed in v0.2 (dynamic variable-length indexing). Remove it and rebuild the index.'
+      );
+    }
+    const folded = !(options.caseSensitive ?? false);
+    const index = new SearchIndex(items, folded);
 
     // Empty dataset fast path: zero allocation, route immediately to CPU
     if (items.length === 0) {
@@ -71,6 +87,8 @@ export class SearchIndex {
           index.gpuEngine = gpu;
           index.engineType = 'webgpu';
           index.vramAllocatedBytes = packed.byteLength;
+          // M2 replaces with post-fold tokenCount from unicode-preprocess.
+          index.tokenCount = packed.totalChars;
 
           // Subscribe to device loss for automatic graceful fallback
           index.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
@@ -94,7 +112,12 @@ export class SearchIndex {
    * Execute search across the indexed strings.
    */
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
-    const { mode = 'fuzzy', caseSensitive = false, signal } = options;
+    const { mode = 'fuzzy', caseSensitive = false, signal, cpuAlgorithm = 'parity' } = options;
+    if (caseSensitive === this.folded) {
+      // folded=true means index packed case-insensitive (caseSensitive:false).
+      // A per-query flag that disagrees with pack-time mode would silently mismatch.
+      throw new ProfileMismatchError(!this.folded, caseSensitive);
+    }
     const requestedLimit = options.limit ?? options.maxResults ?? 50;
     // Guard against NaN (e.g. a failed parseInt): Math.min/Math.max propagate
     // NaN, which would poison downstream slicing. Treat it as "not provided".
@@ -122,12 +145,15 @@ export class SearchIndex {
         engine: 'cpu',
         candidateCount: 0,
         hasOverflow: false,
-        timings
+        timings,
+        profileId: this.profileId,
+        scoringVersion: SCORING_VERSION,
+        cpuAlgorithm
       };
     }
 
-    // 1. WebGPU execution path
-    if (this.engineType === 'webgpu' && this.gpuEngine && this.gpuEngine.isReady) {
+    // 1. WebGPU execution path (parity scorer; explicit ufuzzy always serves CPU)
+    if (cpuAlgorithm !== 'ufuzzy' && this.engineType === 'webgpu' && this.gpuEngine && this.gpuEngine.isReady) {
       try {
         const gpuResult = await this.gpuEngine.search(query, {
           ...options,
@@ -155,7 +181,10 @@ export class SearchIndex {
           candidateCount: gpuResult.candidateCount,
           hasOverflow: gpuResult.hasOverflow,
           results: enrichedResults,
-          timings: gpuResult.timings
+          timings: gpuResult.timings,
+          profileId: this.profileId,
+          scoringVersion: SCORING_VERSION,
+          cpuAlgorithm
         };
       } catch (err: any) {
         if (err.name === 'AbortError') {
@@ -205,7 +234,10 @@ export class SearchIndex {
       candidateCount: Math.min(cpuResult.totalMatches, 8192),
       hasOverflow: false,
       results: cpuResult.results,
-      timings
+      timings,
+      profileId: this.profileId,
+      scoringVersion: SCORING_VERSION,
+      cpuAlgorithm
     };
   }
 
@@ -219,7 +251,13 @@ export class SearchIndex {
       engine: this.engineType,
       vramAllocatedBytes: this.vramAllocatedBytes,
       adapterVendor: adapter?.vendor,
-      adapterRenderer: adapter?.renderer
+      adapterRenderer: adapter?.renderer,
+      profileId: this.profileId,
+      unicodeVersion: UNICODE_VERSION,
+      scoringVersion: SCORING_VERSION,
+      tokenCount: this.tokenCount,
+      folded: this.folded,
+      formatVersion: 2
     };
   }
 

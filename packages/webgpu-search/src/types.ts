@@ -1,12 +1,16 @@
+import type { CpuAlgorithm, OnQueryTooLong, TextProfileId } from './text-profile';
+
 export type SearchMode = 'fuzzy' | 'substring';
 export type EngineType = 'webgpu' | 'cpu';
 
 export interface SearchOptions {
   mode?: SearchMode;              // Default: 'fuzzy'
   limit?: number;                 // Max results; default 50, clamped to 1..8192
-  caseSensitive?: boolean;        // Default: false
+  caseSensitive?: boolean;        // Default: false; must match index packed mode (v0.2)
   signal?: AbortSignal;           // Cancel stale queries during rapid typing
   maxResults?: number;            // Backwards-compatible alias; limit takes precedence
+  cpuAlgorithm?: CpuAlgorithm;    // Default: 'parity'; 'ufuzzy' = explicit opt-in CPU-only
+  onQueryTooLong?: OnQueryTooLong; // Default: 'throw'
 }
 
 export interface SearchResultItem {
@@ -33,6 +37,9 @@ export interface SearchResponse {
   hasOverflow: boolean;           // True if matches > candidate pool capacity (8192)
   results: SearchResultItem[];    // Top-K ranked results
   timings: SearchTimings;
+  profileId: TextProfileId;       // v0.2: text profile that served this query
+  scoringVersion: string;         // v0.2: scoring contract version
+  cpuAlgorithm: CpuAlgorithm;     // v0.2: which CPU scorer served / would serve fallback
 }
 
 export interface IndexOptions {
@@ -40,7 +47,9 @@ export interface IndexOptions {
   preferGpu?: boolean;            // Force WebGPU if available regardless of size
   device?: GPUDevice;             // Custom injected GPUDevice (for testing/context sharing)
   powerPreference?: GPUPowerPreference; // 'high-performance' | 'low-power'
-  slotBytes?: number;             // Legacy slot width (deprecated: dynamic variable-length string indexing now used)
+  slotBytes?: number;             // v0.2: throw-on-use (dynamic indexing replaced fixed slots)
+  textProfile?: TextProfileId;    // v0.2: index-level immutable profile (default 'unicode-default')
+  caseSensitive?: boolean;        // v0.2: pack-time fold control (default false = folded)
 }
 
 export interface IndexStats {
@@ -49,6 +58,12 @@ export interface IndexStats {
   vramAllocatedBytes: number;
   adapterVendor?: string;
   adapterRenderer?: string;
+  profileId: TextProfileId;
+  unicodeVersion: string;
+  scoringVersion: string;
+  tokenCount: number;
+  folded: boolean;
+  formatVersion: 2;
 }
 
 export interface AdapterInfo {
