@@ -4,9 +4,10 @@
  * M4 (Issue #7): the legacy v0.1 ASCII-mangling byte packer
  * (`packStringsToGPUBuffer`, NFKD + `?` replacement) is deleted from this
  * flow. Datasets are packed with the code-point-safe unicode pipeline
- * (`packUnicodeToGPUBuffer` → `serializeUnicodeDataset`); the serialized
- * U2F2 buffer is what crosses the worker boundary (transferable, zero-copy
- * with a transfer list — unlike `strings`, which always structured-clones).
+ * (`packUnicodeToGPUBuffer` -> `serializeUnicodeDataset`); the serialized
+ * U2F2 buffer is what crosses the worker boundary (transferable,
+ * copy-then-move with a transfer list -- unlike `strings`, which always
+ * structured-clones).
  */
 import {
   packUnicodeToGPUBuffer,
@@ -55,7 +56,7 @@ const EXTENSIONS = ['.ts', '.tsx', '.rs', '.go', '.py', '.js', '.jsx', '.json', 
 /**
  * Generate N synthetic code paths/symbols plus the U2F2 transfer buffer.
  * Pack mode is folded (`caseSensitive:false`), matching the benchmark
- * engine default — per-query mismatch would throw ProfileMismatchError.
+ * engine default -- per-query mismatch would throw ProfileMismatchError.
  */
 export function generateDataset(count: number, onProgress?: (percent: number) => void): Dataset {
   const strings = new Array<string>(count);

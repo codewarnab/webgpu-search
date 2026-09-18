@@ -11,6 +11,10 @@ let gpuEngine: WebGPUEngine | null = null;
 let cpuEngine: CPUEngine | null = null;
 let datasetStrings: string[] = [];
 let datasetSize = 0;
+// Monotonic dataset generation: bumped only on successful LOAD_DATASET
+// commit. SEARCH_RESULTS echoes it so the main thread can drop hits that
+// belong to a stale dataset (load vs in-flight search race).
+let datasetGeneration = 0;
 let latestQueryId = 0;
 let activeAbortController: AbortController | null = null;
 
@@ -21,15 +25,19 @@ let activeAbortController: AbortController | null = null;
  * `strings` duplication in VRAM residency) and returns compact
  * `{index,score}[]` hits on the SEARCH path; the main thread maps `text`
  * from its own `currentDataset.strings` copy. This removes the per-keystroke
- * worker→main text clone: a 1000-hit full `SearchResult` carries ~50 KB of
- * string payload back, the compact form carries `1000 × 8 B ≈ 8 KB`
- * (index+score only) — ~6× smaller structured-clone per keystroke
+ * worker->main text clone: a 1000-hit full `SearchResult` carries ~50 KB of
+ * string payload back, the compact form carries `1000 x 8 B ~ 8 KB`
+ * (index+score only) -- ~6x smaller structured-clone per keystroke
  * (browser-measured confirmation is pending-hardware; the byte math is
- * structural: `hits × avgTextLen` vs `hits × 8`).
+ * structural: `hits x avgTextLen` vs `hits x 8`. Note: per-object
+ * structured-clone overhead means `{index,score}` objects cost more than
+ * 8 B on the wire and text length is UTF-16 units, not bytes -- treat the
+ * ratio as order-of-magnitude, not exact).
  *
  * Toggle to `false` for the legacy full-text return path when doing
  * before/after measurement. LOAD_DATASET still receives `strings` (needed
- * for in-worker CPU comparison); the GPU load itself is token-only.
+ * for in-worker CPU comparison); the GPU load itself is token-only only
+ * when the flag is true.
  */
 export const STRING_ISOLATED_ENRICHMENT = true;
 
@@ -81,19 +89,37 @@ self.onmessage = async (e: MessageEvent) => {
   if (type === 'LOAD_DATASET') {
     const strings: string[] | undefined = payload?.strings;
     const serialized: ArrayBuffer | undefined = payload?.serialized;
+    // Adopt the main-thread epoch when provided (stale LOADs with an older
+    // epoch are dropped to avoid out-of-order commit going backwards).
+    // Harness LOADs omit it, in which case the worker bumps its own counter.
+    const incomingGeneration: number | undefined =
+      typeof payload?.datasetGeneration === 'number' ? payload.datasetGeneration : undefined;
+    if (incomingGeneration !== undefined && incomingGeneration < datasetGeneration) {
+      self.postMessage({
+        type: 'DATASET_LOADED',
+        payload: {
+          size: datasetSize,
+          uploadTimeMs: 0,
+          packMs: 0,
+          datasetGeneration,
+          error: `[search.worker] stale LOAD_DATASET generation ${incomingGeneration} < ${datasetGeneration}; dropped.`
+        }
+      });
+      return;
+    }
 
     // Fail fast on legacy v0.1 byte buffers (M4 blocker fix). The M3 engine
     // silently ignores `recordsBufferData`/`offsetsBufferData` whenever
-    // `strings` is present and repacks from `strings` — so sending them is
+    // `strings` is present and repacks from `strings` -- so sending them is
     // pure structured-clone waste plus a dead packer. Reject explicitly so
     // callers migrate to `{strings}` / `{serialized}` (U2F2) instead of
-    // silently paying the clone.
+    // silently paying the clone. Rejected even when combined with new
+    // fields: the combo still pays the exact clone waste this guard exists
+    // to kill.
     if (
-      strings === undefined &&
-      serialized === undefined &&
-      (payload?.recordsBufferData !== undefined ||
-        payload?.offsetsBufferData !== undefined ||
-        payload?.gpuBufferData !== undefined)
+      payload?.recordsBufferData !== undefined ||
+      payload?.offsetsBufferData !== undefined ||
+      payload?.gpuBufferData !== undefined
     ) {
       self.postMessage({
         type: 'DATASET_LOADED',
@@ -101,6 +127,7 @@ self.onmessage = async (e: MessageEvent) => {
           size: 0,
           uploadTimeMs: 0,
           packMs: 0,
+          datasetGeneration,
           error:
             '[search.worker] legacy v0.1 byte buffers rejected (no U2F2 magic). ' +
             'Send {strings} or {serialized} (packUnicodeToGPUBuffer/serialize). Rebuild required.'
@@ -109,14 +136,22 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
-    // Preferred path: U2F2 serialized buffer (transferable, zero-copy with a
-    // transfer list). `strings` may ride along for in-worker CPU comparison.
+    // Preferred path: U2F2 serialized buffer (transferable; the `.slice(0)`
+    // copy in main.ts is moved with a transfer list -- copy-then-move, not
+    // zero-copy, since the original is retained for reuse. `strings` may
+    // ride along for in-worker CPU comparison.
     if (serialized !== undefined) {
       // Neutered-buffer guard: a transferred-then-reused or detached buffer
-      // reports byteLength 0 — explicit re-create path, never a silent empty
+      // reports byteLength 0 -- explicit re-create path, never a silent empty
       // index (matches library `deserializeUnicodeDataset` fail-closed rule).
+      // Duck-typed (byteLength number + slice function) to match the
+      // library cross-realm rule; foreign-realm ArrayBuffers are accepted,
+      // non-buffers and neutered views are rejected.
+      const asBuf = serialized as unknown as { byteLength?: unknown; slice?: unknown };
       const byteLen: number =
-        serialized instanceof ArrayBuffer ? serialized.byteLength : 0;
+        typeof asBuf?.byteLength === 'number' && typeof asBuf?.slice === 'function'
+          ? (asBuf.byteLength as number)
+          : 0;
       if (byteLen === 0) {
         self.postMessage({
           type: 'DATASET_LOADED',
@@ -124,6 +159,7 @@ self.onmessage = async (e: MessageEvent) => {
             size: 0,
             uploadTimeMs: 0,
             packMs: 0,
+            datasetGeneration,
             error:
               '[search.worker] neutered serialized buffer (byteLength 0 post-transfer). Re-create required.'
           }
@@ -134,15 +170,24 @@ self.onmessage = async (e: MessageEvent) => {
       try {
         const packed = deserializeUnicodeDataset(serialized);
         const packMs = performance.now() - t0;
-        datasetStrings = Array.isArray(strings) ? strings : [];
-        datasetSize = packed.rowCount;
+        const nextStrings = Array.isArray(strings) ? strings : [];
+        const nextSize = packed.rowCount;
         let uploadTimeMs = 0;
         if (gpuEngine?.isReady) {
           try {
-            const res = await gpuEngine.loadDataset(packed);
+            // Honor STRING_ISOLATED_ENRICHMENT on this path too: false means
+            // full-text load when strings are available (before/after
+            // measurement toggle); otherwise token-only packed load.
+            const loadable =
+              STRING_ISOLATED_ENRICHMENT || nextStrings.length === 0
+                ? packed
+                : { size: nextStrings.length, strings: nextStrings };
+            const res = await gpuEngine.loadDataset(loadable);
             uploadTimeMs = res.uploadTimeMs;
           } catch (loadErr) {
             console.error('[search.worker] GPU loadDataset failed:', loadErr);
+            // Fail-closed: keep the previous dataset (do not commit partial
+            // state) so subsequent SEARCH hits stay consistent with the GPU.
             self.postMessage({
               type: 'DATASET_LOADED',
               payload: {
@@ -150,13 +195,19 @@ self.onmessage = async (e: MessageEvent) => {
                 uploadTimeMs,
                 packMs,
                 serializedBytes: byteLen,
-                stringsChars: countChars(datasetStrings),
+                stringsChars: countChars(nextStrings),
+                datasetGeneration,
                 error: String(loadErr)
               }
             });
             return;
           }
         }
+        // Commit only after successful deserialize + GPU load.
+        datasetStrings = nextStrings;
+        datasetSize = nextSize;
+        datasetGeneration =
+          incomingGeneration !== undefined ? incomingGeneration : datasetGeneration + 1;
         self.postMessage({
           type: 'DATASET_LOADED',
           payload: {
@@ -166,18 +217,20 @@ self.onmessage = async (e: MessageEvent) => {
             serializedBytes: byteLen,
             stringsChars: countChars(datasetStrings),
             tokenCount: packed.tokenCount,
-            folded: packed.folded
+            folded: packed.folded,
+            datasetGeneration
           }
         });
       } catch (err) {
         // deserializeUnicodeDataset throws IncompatibleIndexError on
-        // magic/version/checksum/shape failures — surface, don't swallow.
+        // magic/version/checksum/shape failures -- surface, don't swallow.
         self.postMessage({
           type: 'DATASET_LOADED',
           payload: {
             size: 0,
             uploadTimeMs: 0,
             packMs: performance.now() - t0,
+            datasetGeneration,
             error: String(err)
           }
         });
@@ -185,34 +238,84 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
-    // Fallback path: raw strings (structured-clone cost is real — the array
+    // Fallback path: raw strings (structured-clone cost is real -- the array
     // is fully copied into the worker; see DATASET_LOADED `stringsChars`).
     // Packs via the unicode pipeline (M4; the legacy `packStringsToGPUBuffer`
     // ASCII-mangling packer is deleted from this flow).
-    const list: string[] = Array.isArray(strings) ? strings : [];
-    datasetStrings = list;
-    datasetSize = list.length;
-
+    // Fail-closed: missing/non-array `strings` (with no `serialized`) never
+    // wipes a good index with an empty success. An explicit `[]` is allowed
+    // (clears the index); anything else posts an error and keeps state.
+    if (!Array.isArray(strings)) {
+      self.postMessage({
+        type: 'DATASET_LOADED',
+        payload: {
+          size: datasetSize,
+          uploadTimeMs: 0,
+          packMs: 0,
+          datasetGeneration,
+          error: '[search.worker] LOAD_DATASET requires {strings: string[]} or {serialized: ArrayBuffer}. Got neither; keeping previous dataset.'
+        }
+      });
+      return;
+    }
+    const list: string[] = strings;
+    // Always pack for metrics, even when the GPU is not ready (CPU-only
+    // worker still reports tokenCount instead of a misleading 0).
     const t0 = performance.now();
-    let packMs = 0;
+    let packedForMetrics: { tokenCount: number } | null = null;
+    try {
+      packedForMetrics = packUnicodeToGPUBuffer(list, { folded: true });
+    } catch (packErr) {
+      self.postMessage({
+        type: 'DATASET_LOADED',
+        payload: {
+          size: datasetSize,
+          uploadTimeMs: 0,
+          packMs: performance.now() - t0,
+          datasetGeneration,
+          error: String(packErr)
+        }
+      });
+      return;
+    }
+    const packMs = performance.now() - t0;
+    const tokenCount = packedForMetrics.tokenCount;
     let uploadTimeMs = 0;
-    let tokenCount = 0;
     if (gpuEngine?.isReady) {
       try {
-        const packed = packUnicodeToGPUBuffer(list, { folded: true });
-        packMs = performance.now() - t0;
-        tokenCount = packed.tokenCount;
-        // String-isolated: token-only load (engine resolves `text` to `''`;
+        // String-isolated: token-only load (engine resolves `text` to ``;
         // SEARCH returns compact hits, main enriches). Legacy path loads
         // `strings` into the engine for full-text returns.
-        const res = await gpuEngine.loadDataset(
-          STRING_ISOLATED_ENRICHMENT ? packed : { size: list.length, strings: list }
-        );
+        const loadable = STRING_ISOLATED_ENRICHMENT
+          ? packUnicodeToGPUBuffer(list, { folded: true })
+          : { size: list.length, strings: list };
+        const res = await gpuEngine.loadDataset(loadable);
         uploadTimeMs = res.uploadTimeMs;
       } catch (loadErr) {
         console.error('[search.worker] GPU loadDataset failed:', loadErr);
+        // Keep previous dataset on failure; surface the error.
+        self.postMessage({
+          type: 'DATASET_LOADED',
+          payload: {
+            size: datasetSize,
+            uploadTimeMs: 0,
+            packMs,
+            stringsChars: countChars(list),
+            tokenCount,
+            stringIsolated: STRING_ISOLATED_ENRICHMENT,
+            datasetGeneration,
+            error: String(loadErr)
+          }
+        });
+        return;
       }
     }
+
+    // Commit only after successful pack + GPU load.
+    datasetStrings = list;
+    datasetSize = list.length;
+    datasetGeneration =
+      incomingGeneration !== undefined ? incomingGeneration : datasetGeneration + 1;
 
     self.postMessage({
       type: 'DATASET_LOADED',
@@ -222,14 +325,33 @@ self.onmessage = async (e: MessageEvent) => {
         packMs,
         stringsChars: countChars(list),
         tokenCount,
-        stringIsolated: STRING_ISOLATED_ENRICHMENT
+        stringIsolated: STRING_ISOLATED_ENRICHMENT,
+        datasetGeneration
       }
     });
     return;
   }
 
   if (type === 'SEARCH') {
-    const { queryId, query, mode, limit = 1000, runCpuComparison = false } = payload;
+    const { queryId, query, mode, limit = 1000, runCpuComparison = false } = payload ?? {};
+    const requestGeneration: number | undefined =
+      typeof payload?.datasetGeneration === 'number' ? payload.datasetGeneration : undefined;
+
+    // Fail-closed payload validation: a malformed queryId must post
+    // SEARCH_ERROR and must never poison latestQueryId (otherwise all
+    // future `<` comparisons go false and the drop logic dies).
+    if (!Number.isInteger(queryId) || (queryId as number) < 0) {
+      self.postMessage({
+        type: 'SEARCH_ERROR',
+        payload: {
+          queryId: typeof queryId === 'number' ? queryId : null,
+          query: typeof query === 'string' ? query : '',
+          datasetGeneration,
+          error: '[search.worker] SEARCH requires integer queryId >= 0.'
+        }
+      });
+      return;
+    }
 
     if (queryId < latestQueryId) {
       return; // Superseded by a newer query
@@ -249,6 +371,13 @@ self.onmessage = async (e: MessageEvent) => {
     let nativeResult: CPUSearchResult | null = null;
 
     try {
+      // Validate mode upfront (independent of engine readiness) so invalid
+      // modes surface as SEARCH_ERROR instead of silent empty results.
+      if (mode !== 'substring' && mode !== 'fuzzy') {
+        throw new TypeError(`[search.worker] SEARCH mode must be 'substring'|'fuzzy', got ${String(mode)}.`);
+      }
+      // Validate compact-hit bounds lazily at enrich time in main; here just
+      // ensure limit is sane via the shared clamp (engine clamps again).
       if (gpuEngine?.isReady && query) {
         const full = await gpuEngine.search(query, {
           mode,
@@ -259,6 +388,13 @@ self.onmessage = async (e: MessageEvent) => {
           // Strip `text` at the boundary: the main thread owns display
           // strings and re-attaches them by index (same contract as
           // SearchIndex enrichment over token-only engine results).
+          // Validate indices before posting (defensive: engine is trusted,
+          // but a corrupt index must not become a main-thread OOB read).
+          for (const r of full.results) {
+            if (!Number.isInteger(r.index) || r.index < 0 || r.index >= datasetSize) {
+              throw new Error(`[search.worker] compact hit index out of bounds: ${r.index} (size ${datasetSize}).`);
+            }
+          }
           gpuCompact = full.results.map((r) => ({ index: r.index, score: r.score }));
           gpuMeta = {
             query: full.query,
@@ -292,6 +428,8 @@ self.onmessage = async (e: MessageEvent) => {
         payload: {
           queryId,
           query,
+          datasetGeneration,
+          requestGeneration,
           gpuResult,
           gpuCompact,
           gpuMeta,
@@ -304,6 +442,15 @@ self.onmessage = async (e: MessageEvent) => {
         return; // Expected abort on rapid user keystrokes
       }
       console.error('[search.worker] Search error:', err);
+      self.postMessage({
+        type: 'SEARCH_ERROR',
+        payload: {
+          queryId,
+          query: typeof query === 'string' ? query : '',
+          datasetGeneration,
+          error: String(err)
+        }
+      });
     }
     return;
   }

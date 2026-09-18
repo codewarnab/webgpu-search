@@ -702,7 +702,7 @@ async function runMockTests() {
     if (/packStringsToGPUBuffer\s*\(/.test(workerCode) || /import[^;]*packStringsToGPUBuffer/.test(workerCode)) {
         throw new Error('search.worker.ts must not use legacy packStringsToGPUBuffer (M4 blocker)');
     }
-    for (const token of ['packUnicodeToGPUBuffer', 'deserializeUnicodeDataset', 'STRING_ISOLATED_ENRICHMENT', 'latestQueryId']) {
+    for (const token of ['packUnicodeToGPUBuffer', 'deserializeUnicodeDataset', 'STRING_ISOLATED_ENRICHMENT', 'latestQueryId', 'SEARCH_ERROR', 'datasetGeneration']) {
         if (!workerSrc.includes(token)) throw new Error(`search.worker.ts missing M4 token: ${token}`);
     }
     // Main thread enriches compact hits and transfers the U2F2 buffer.
@@ -712,6 +712,9 @@ async function runMockTests() {
     }
     if (!mainSrc.includes('gpuCompact') || !mainSrc.includes('serializedU2F2.slice(0)')) {
         throw new Error('main.ts missing string-isolated enrichment / U2F2 transfer (M4 blocker)');
+    }
+    for (const token of ['SEARCH_ERROR', 'activeDatasetGeneration', 'requestGeneration']) {
+        if (!mainSrc.includes(token)) throw new Error(`main.ts missing M4 token: ${token}`);
     }
     console.log('   ✅ M4 sentinels verified (scripts-only, ufuzzy conflict, worker unicode path)');
 

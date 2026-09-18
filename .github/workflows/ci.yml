@@ -51,6 +51,9 @@ jobs:
         run: bun run test:mock
 
       - name: Run M4 Parity Harness (differential + fallback + worker)
+        timeout-minutes: 10
+        # Single-shard in CI; M4_SHARD_* sharding is local-only (validated
+        # fail-closed in-harness: bad env or empty shard exits non-zero).
         run: bun run test:parity
 
       - name: Setup Chrome (browser regression gate)

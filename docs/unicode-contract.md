@@ -49,20 +49,25 @@ fall back to the parity CPU scorer with identical semantics.
 
 M4 parity position (landed): `scripts/test-m4-parity.ts` pins the (a)-(n)
 matrix corrections, echo contracts, failure-injection delta, and
-concurrency/abort against the mock device (110 asserts green; exact
+concurrency/abort against the mock device (110+ asserts green; exact
 GPU-order cells report `pending-hardware` because `vgpu/mock` never executes
-WGSL — mock-green alone ships nothing). The benchmark worker migrates with
+WGSL -- mock-green alone ships nothing). The benchmark worker migrates with
 it: `LOAD_DATASET` takes `{strings}` / U2F2 `{serialized}` (legacy v0.1 byte
-buffers rejected, neutered `byteLength===0` guarded) and SEARCH returns
+buffers rejected even in combo, neutered `byteLength===0` guarded,
+fail-closed empty payload, state commits only on success) and SEARCH returns
 compact `{index,score}[]` behind `STRING_ISOLATED_ENRICHMENT` for main-thread
-text enrichment (~6× smaller worker→main clone per keystroke by byte math;
-browser-ms confirmation is pending-hardware). True ordered
-`(index,score,text)` parity on executing hardware is release-gated by the
-M4 browser block in `scripts/test-regression.ts`. By type design that block
-is order/text-only: `WebGPUSearchResult` (engine level) carries no version
-fields, so `profileId/scoringVersion/cpuAlgorithm` identity is pinned at the
-`SearchIndex` level in the mock harness instead (fallback changes only
-`engine`/timings by assertion).
+text enrichment (~6x smaller worker->main clone per keystroke by byte math,
+order-of-magnitude: per-object clone overhead and UTF-16-vs-bytes ignored;
+browser-ms confirmation is pending-hardware). SEARCH failures post
+`SEARCH_ERROR` (never silent stale); dataset switches carry a generation so
+stale-dataset hits are dropped. True ordered `(index,score,text)` parity on
+executing hardware is gated by the M4 browser block in
+`scripts/test-regression.ts` (per-PR CI gate and release gate; oracle in
+Bun/Node vs subject in Chrome -- same-host assumption, see in-file note).
+By type design that block is order/text-only: `WebGPUSearchResult` (engine
+level) carries no version fields, so `profileId/scoringVersion/cpuAlgorithm`
+identity is pinned at the `SearchIndex` level in the mock harness instead
+(fallback changes only `engine`/timings by assertion).
 
 ## 2. Frozen versions and caps
 
@@ -181,9 +186,11 @@ a gate. Bloom 64-bit pre-filter allowed post-parity in M5, never as parity
 substitute. `loadDataset` reports `normalizeMs/packMs/uploadMs` with
 chunked/yielded packing (M2 design: 1M×48 ICU calls must not block the main
 thread). Worker `LOAD_DATASET` clone cost measured in M4/M5
-(`search.worker.ts:40-41` clones `strings`; `main.ts:356-362` has no transfer
-list → no detachment today); string-isolated enrichment as measured
-optimization; `loadDataset` guards neutered buffers (`byteLength===0`).
+(`search.worker.ts` `LOAD_DATASET` clones `strings`; `main.ts`
+`switchDataset` moves a `.slice(0)` copy of `serializedU2F2` with a transfer
+list -- copy-then-move, not zero-copy, since the original is retained);
+string-isolated enrichment as measured optimization; `loadDataset` guards
+neutered buffers (`byteLength===0`).
 
 ## 6. Versioning, probe, locale ban
 

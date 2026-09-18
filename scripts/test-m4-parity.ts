@@ -2,7 +2,7 @@
  * M4 differential harness (Issue #7): CPU/GPU parity, fallback, CI.
  *
  * Scripts-only: this file must NEVER be imported by `src/index.ts` (bundle
- * gate `scripts/check-m2-bundle.ts` — harness weight stays out of the
+ * gate `scripts/check-m2-bundle.ts` -- harness weight stays out of the
  * shipped library). Run: `bun scripts/test-m4-parity.ts`.
  * Sharding: `M4_SHARD_INDEX` / `M4_SHARD_TOTAL` (defaults 0/1).
  * Per-cell timeout 15 s. Durations reported as median/p95 (never mean-of-3).
@@ -19,7 +19,10 @@
  *   harness self-consistency, echo contracts, failure injection delta,
  *   concurrency/abort, worker contract.
  *
- * ASCII-only source: non-ASCII strings built via String.fromCodePoint.
+ * ASCII-only source (comments + code): non-ASCII test strings are built
+ * only via String.fromCodePoint (FCP). Do not introduce literal non-ASCII
+ * characters anywhere in this file -- use FCP(0x...) so that
+ * `rg '[^\\x00-\\x7F]'` stays clean.
  */
 import { createMockAdapter } from 'vgpu/mock';
 import {
@@ -139,8 +142,34 @@ function multisetsEqual(a: Map<number, number>, b: Map<number, number>): boolean
 }
 
 const CELL_TIMEOUT_MS = 15000;
-const shardIndex = Number(process.env.M4_SHARD_INDEX ?? 0);
-const shardTotal = Math.max(1, Number(process.env.M4_SHARD_TOTAL ?? 1));
+function parseShardEnv(raw: string | undefined, def: number): number {
+  if (raw === undefined || raw === '') return def;
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : NaN;
+}
+const _shardIndexRaw = parseShardEnv(process.env.M4_SHARD_INDEX, 0);
+const _shardTotalRaw = parseShardEnv(process.env.M4_SHARD_TOTAL, 1);
+const shardTotal =
+  Number.isInteger(_shardTotalRaw) && (_shardTotalRaw as number) >= 1
+    ? (_shardTotalRaw as number)
+    : 1;
+const shardIndex =
+  Number.isInteger(_shardIndexRaw) &&
+  (_shardIndexRaw as number) >= 0 &&
+  (_shardIndexRaw as number) < shardTotal
+    ? (_shardIndexRaw as number)
+    : 0;
+// Fail-closed validation runs in main(): non-numeric/out-of-range shard env
+// or an empty shard selection is a harness error, never a silent green.
+const _shardEnvInvalid =
+  (process.env.M4_SHARD_INDEX !== undefined &&
+    process.env.M4_SHARD_INDEX !== '' &&
+    (!Number.isInteger(_shardIndexRaw) ||
+      (_shardIndexRaw as number) < 0 ||
+      (_shardIndexRaw as number) >= shardTotal)) ||
+  (process.env.M4_SHARD_TOTAL !== undefined &&
+    process.env.M4_SHARD_TOTAL !== '' &&
+    (!Number.isInteger(_shardTotalRaw) || (_shardTotalRaw as number) < 1));
 
 // ---------------------------------------------------------------- corpora
 function asciiCorpus(n: number, seed: number): string[] {
@@ -419,7 +448,7 @@ async function main(): Promise<void> {
     }
     ok('(h) neutered byteLength 0 throws', neut);
     // Cross-realm duck-typing via node:vm (genuine foreign-realm buffers:
-    // `instanceof` fails but typed-array construction still works — exactly
+    // `instanceof` fails but typed-array construction still works -- exactly
     // the iframe/worker case the duck-type guards target).
     const vm = await import('node:vm');
     const xRealmU8 = vm.runInNewContext('new Uint8Array(8)');
@@ -576,7 +605,7 @@ async function main(): Promise<void> {
     const st = idx.getStats();
     // Probe deferred: pack-level is exactly null; stats type carries no probe
     // field at all (a future warn+record change must add the field AND flip
-    // this assert — no `||` escape).
+    // this assert -- no `||` escape).
     ok('echo stats carry no nfcProbedVersion field', !('nfcProbedVersion' in (st as unknown as Record<string, unknown>)));
     const p = packUnicodeToGPUBuffer(['hello'], { folded: true });
     ok('echo pack nfcProbedVersion null', p.nfcProbedVersion === null);
@@ -608,16 +637,33 @@ async function main(): Promise<void> {
 
   // ============================================================ Part 2: CPU wiring differential
   console.log('Part 2. Harness self-check + CPU wiring differential (cells)');
+  if (_shardEnvInvalid) {
+    ok(
+      'shard env valid',
+      false,
+      `M4_SHARD_INDEX=${process.env.M4_SHARD_INDEX ?? ''} M4_SHARD_TOTAL=${process.env.M4_SHARD_TOTAL ?? ''}`
+    );
+    process.exit(1);
+  }
   const cells = buildCells().filter((_, i) => i % shardTotal === shardIndex);
   console.log(`   ${cells.length} cells on this shard`);
+  if (cells.length === 0) {
+    ok('shard selects at least one cell', false, `shard ${shardIndex}/${shardTotal} selected 0 cells`);
+    process.exit(1);
+  }
   const cpuDurations: number[] = [];
   for (const cell of cells) {
+    // Timeout guard: withTimeout() races but does not cancel run(). If the
+    // cell times out, the leaked run() must not double-count (passed++ or
+    // ok(false)) nor pollute cpuDurations when it eventually settles.
+    const cellState = { timedOut: false };
     const run = async (): Promise<void> => {
       const t0 = performance.now();
       const cs = cell.caseSensitive ?? false;
       const idx = await SearchIndex.create(cell.corpus, { preferGpu: false, caseSensitive: cs });
       try {
         const res = await idx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuAlgorithm: 'parity' });
+        if (cellState.timedOut) return;
         const recordTokens = (idx as unknown as { recordTokens: Uint32Array[] }).recordTokens;
         const folded = (idx as unknown as { folded: boolean }).folded;
         const qT = normalizeText(cell.query, folded).tokens;
@@ -656,7 +702,8 @@ async function main(): Promise<void> {
         if (!postEmpty && cell.query === 'a'.repeat(QUERY_TOKENS_MAX) && res.query !== cell.query) {
           echo = 'at-cap must echo original';
         }
-        const problem = drift ?? enrich ?? echo;
+        const problem = drift || enrich || echo;
+        if (cellState.timedOut) return;
         if (problem) {
           ok(`cell ${cell.name}`, false, problem);
         } else {
@@ -665,11 +712,12 @@ async function main(): Promise<void> {
       } finally {
         idx.destroy();
       }
-      cpuDurations.push(performance.now() - t0);
+      if (!cellState.timedOut) cpuDurations.push(performance.now() - t0);
     };
     try {
       await withTimeout(run(), CELL_TIMEOUT_MS, cell.name);
     } catch (e) {
+      if (e instanceof CellTimeoutError) cellState.timedOut = true;
       ok(`cell ${cell.name}`, false, String(e));
     }
   }
@@ -708,6 +756,7 @@ async function main(): Promise<void> {
       pend('gpu-parity cells', `non-executing device (mock GPU total=${cGpu.totalMatches} vs CPU total=${cCpu.totalMatches}); browser subset is the release gate`);
     } else {
       for (const cell of cells) {
+        const gpuState = { timedOut: false };
         try {
           await withTimeout((async () => {
             const cs = cell.caseSensitive ?? false;
@@ -716,17 +765,39 @@ async function main(): Promise<void> {
             try {
               const a = await cpuIdx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuAlgorithm: 'parity' });
               const b = await gpuIdx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuAlgorithm: 'parity' });
+              if (gpuState.timedOut) return;
               const drift = compareResponses(
                 { totalMatches: b.totalMatches, candidateCount: b.candidateCount, hasOverflow: b.hasOverflow, results: b.results, profileId: b.profileId, scoringVersion: b.scoringVersion, cpuAlgorithm: b.cpuAlgorithm },
                 { totalMatches: a.totalMatches, candidateCount: a.candidateCount, hasOverflow: a.hasOverflow, results: a.results, profileId: a.profileId, scoringVersion: a.scoringVersion, cpuAlgorithm: a.cpuAlgorithm }
               );
-              ok(`gpu-cell ${cell.name}`, drift === null, drift ?? '');
+              // Pin the executing path: a silent CPU fallback must not pass
+              // as GPU parity. SearchIndex enriches text on both paths, so
+              // text parity holds here (engine-level token-only '' is pinned
+              // separately below).
+              const engineOk = b.engine === 'webgpu';
+              let textDrift = '';
+              if (b.results.length === a.results.length) {
+                for (let i = 0; i < b.results.length; i++) {
+                  const x = b.results[i] as { text: string };
+                  const y = a.results[i] as { text: string };
+                  if (x.text !== y.text) {
+                    textDrift = `text drift at [${i}]`;
+                    break;
+                  }
+                }
+              } else {
+                textDrift = `results.length ${b.results.length} vs ${a.results.length}`;
+              }
+              const problem = drift || (engineOk ? '' : `engine=${b.engine}, expected webgpu`) || textDrift;
+              if (gpuState.timedOut) return;
+              ok(`gpu-cell ${cell.name}`, problem === '', problem);
             } finally {
               cpuIdx.destroy();
               gpuIdx.destroy();
             }
           })(), CELL_TIMEOUT_MS, `gpu-cell ${cell.name}`);
         } catch (e) {
+          if (e instanceof CellTimeoutError) gpuState.timedOut = true;
           ok(`gpu-cell ${cell.name}`, false, String(e));
         }
       }
@@ -775,11 +846,14 @@ async function main(): Promise<void> {
       }) as unknown as (d: unknown) => GPUBuffer;
       let oom = false;
       try {
-        await eng.loadDataset(['replacement-a', 'replacement-b']);
-      } catch {
-        oom = true;
+        try {
+          await eng.loadDataset(['replacement-a', 'replacement-b']);
+        } catch (e) {
+          oom = e instanceof Error && (e as Error).message.includes('injected records OOM');
+        }
+      } finally {
+        (mockDevice as unknown as { createBuffer: (d: unknown) => GPUBuffer }).createBuffer = realCreate as unknown as (d: unknown) => GPUBuffer;
       }
-      (mockDevice as unknown as { createBuffer: (d: unknown) => GPUBuffer }).createBuffer = realCreate as unknown as (d: unknown) => GPUBuffer;
       ok('records-OOM throws (no silent half-load)', oom);
       ok('stats restored after partial OOM', eng.currentSize === sizeBefore);
       await eng.loadDataset(['recovered']);
@@ -794,30 +868,37 @@ async function main(): Promise<void> {
       await eng.loadDataset(['apple']);
       const sb = (eng as unknown as { stagingBuffer: { mapAsync: () => Promise<void> } }).stagingBuffer;
       const orig = sb.mapAsync.bind(sb);
-      sb.mapAsync = () => Promise.reject(new Error('injected mapAsync failure'));
-      let raw = false;
       try {
-        await eng.search('apple', { mode: 'substring' });
-      } catch (e) {
-        raw = (e as Error).message === 'injected mapAsync failure';
+        sb.mapAsync = () => Promise.reject(new Error('injected mapAsync failure'));
+        let raw = false;
+        try {
+          await eng.search('apple', { mode: 'substring' });
+        } catch (e) {
+          raw = (e as Error).message === 'injected mapAsync failure';
+        }
+        ok('mapAsync reject propagates when epoch intact', raw);
+        // Move the epoch *inside* the in-flight await (destroy-race shape):
+        // gen is captured before mapAsync, so a bump during the await reads
+        // as moved and must map to AbortError (never fallback-eligible).
+        sb.mapAsync = () => {
+          (eng as unknown as { generation: number }).generation += 1;
+          return Promise.reject(new Error('injected mapAsync failure'));
+        };
+        let aborted = false;
+        try {
+          await eng.search('apple', { mode: 'substring' });
+        } catch (e) {
+          aborted = (e as { name?: string }).name === 'AbortError';
+        }
+        ok('mapAsync reject + moved epoch -> AbortError', aborted);
+      } finally {
+        try {
+          sb.mapAsync = orig;
+        } catch {
+          // Engine may have torn down stagingBuffer; restore best-effort.
+        }
+        eng.destroy();
       }
-      ok('mapAsync reject propagates when epoch intact', raw);
-      // Move the epoch *inside* the in-flight await (destroy-race shape):
-      // gen is captured before mapAsync, so a bump during the await reads
-      // as moved and must map to AbortError (never fallback-eligible).
-      sb.mapAsync = () => {
-        (eng as unknown as { generation: number }).generation += 1;
-        return Promise.reject(new Error('injected mapAsync failure'));
-      };
-      let aborted = false;
-      try {
-        await eng.search('apple', { mode: 'substring' });
-      } catch (e) {
-        aborted = (e as { name?: string }).name === 'AbortError';
-      }
-      ok('mapAsync reject + moved epoch -> AbortError', aborted);
-      sb.mapAsync = orig;
-      eng.destroy();
     }
 
     // AbortError through SearchIndex never converts to CPU fallback.
@@ -826,21 +907,28 @@ async function main(): Promise<void> {
       const engHandle = (idx as unknown as { gpuEngine: WebGPUEngine }).gpuEngine;
       const sb = (engHandle as unknown as { stagingBuffer: { mapAsync: () => Promise<void> } }).stagingBuffer;
       const orig = sb.mapAsync.bind(sb);
-      // Epoch moves mid-flight (destroy-race shape) -> AbortError, which the
-      // hybrid must rethrow instead of converting to a CPU fallback.
-      sb.mapAsync = () => {
-        (engHandle as unknown as { generation: number }).generation += 1;
-        return Promise.reject(new Error('injected mid-flight failure'));
-      };
-      let aborted = false;
       try {
-        await idx.search('apple', { mode: 'substring' });
-      } catch (e) {
-        aborted = (e as { name?: string }).name === 'AbortError';
+        // Epoch moves mid-flight (destroy-race shape) -> AbortError, which the
+        // hybrid must rethrow instead of converting to a CPU fallback.
+        sb.mapAsync = () => {
+          (engHandle as unknown as { generation: number }).generation += 1;
+          return Promise.reject(new Error('injected mid-flight failure'));
+        };
+        let aborted = false;
+        try {
+          await idx.search('apple', { mode: 'substring' });
+        } catch (e) {
+          aborted = (e as { name?: string }).name === 'AbortError';
+        }
+        ok('AbortError propagates through SearchIndex (no fallback)', aborted);
+      } finally {
+        try {
+          sb.mapAsync = orig;
+        } catch {
+          // Best-effort restore; index destroy below still runs.
+        }
+        idx.destroy();
       }
-      ok('AbortError propagates through SearchIndex (no fallback)', aborted);
-      sb.mapAsync = orig;
-      idx.destroy();
     }
 
     // Simulated device loss: destroy mid-suite -> subsequent index is CPU-tagged.
@@ -854,8 +942,8 @@ async function main(): Promise<void> {
       let destroyedThrows = false;
       try {
         await idx.search('hello', { mode: 'substring' });
-      } catch {
-        destroyedThrows = true;
+      } catch (e) {
+        destroyedThrows = e instanceof Error;
       }
       ok('destroyed index throws (fail-closed)', destroyedThrows);
     }
@@ -869,9 +957,48 @@ async function main(): Promise<void> {
       WebGPUContextManager.releaseDevice(mockDevice, false);
       const d3 = await WebGPUContextManager.acquireDevice({ device: mockDevice });
       ok('non-shared release is a no-op (device still acquirable)', d3 !== null && d3.device === mockDevice);
-      const unsub = WebGPUContextManager.onDeviceLost(() => {});
-      unsub();
-      ok('device-loss subscribe/unsubscribe round-trip', true);
+      // Real subscribe/unsubscribe: the listener set must grow/shrink, double
+      // unsubscribe must be safe, and an unsubscribed listener must not fire.
+      const mgr = WebGPUContextManager as unknown as {
+        deviceLostListeners: Set<(reason: string) => void>;
+      };
+      const sizeBefore = mgr.deviceLostListeners.size;
+      let firedA = false;
+      let firedB = false;
+      const listenerA = (): void => {
+        firedA = true;
+      };
+      const listenerB = (): void => {
+        firedB = true;
+      };
+      const unsubA = WebGPUContextManager.onDeviceLost(listenerA);
+      const unsubB = WebGPUContextManager.onDeviceLost(listenerB);
+      const grewByTwo = mgr.deviceLostListeners.size === sizeBefore + 2;
+      const bothPresent = mgr.deviceLostListeners.has(listenerA) && mgr.deviceLostListeners.has(listenerB);
+      unsubA();
+      const shrankByOne =
+        mgr.deviceLostListeners.size === sizeBefore + 1 &&
+        !mgr.deviceLostListeners.has(listenerA) &&
+        mgr.deviceLostListeners.has(listenerB);
+      let doubleUnsubSafe = false;
+      try {
+        unsubA();
+        doubleUnsubSafe = mgr.deviceLostListeners.size === sizeBefore + 1;
+      } catch {
+        doubleUnsubSafe = false;
+      }
+      // Invoke only our own remaining listener directly (never fire the whole
+      // set: live SearchIndex instances subscribe here for device-loss
+      // fallback and must not observe a synthetic probe).
+      listenerB();
+      const onlyBfired = firedB === true && firedA === false;
+      firedB = false;
+      unsubB();
+      const cleanedUp = mgr.deviceLostListeners.size === sizeBefore && !mgr.deviceLostListeners.has(listenerB);
+      ok(
+        'device-loss subscribe/unsubscribe round-trip',
+        grewByTwo && bothPresent && shrankByOne && doubleUnsubSafe && onlyBfired && cleanedUp
+      );
     }
   }
 
@@ -887,7 +1014,14 @@ async function main(): Promise<void> {
         eng.loadDataset(['aaa', 'aab', 'aac']),
         eng.search('aaa', { mode: 'substring' }),
       ]);
-      ok('loadDataset||search both settle', typeof ld.uploadTimeMs === 'number' && typeof sr.totalMs === 'undefined');
+      ok(
+        'loadDataset||search both settle',
+        typeof ld.uploadTimeMs === 'number' &&
+          typeof sr.totalMatches === 'number' &&
+          typeof sr.query === 'string' &&
+          Array.isArray(sr.results) &&
+          typeof sr.candidateCount === 'number'
+      );
       ok('post-race dataset is the loaded one', eng.currentSize === 3);
       eng.destroy();
     }
@@ -902,7 +1036,15 @@ async function main(): Promise<void> {
         eng.searchCold(corpusB, 'query-beta', { mode: 'substring' }),
       ]);
       ok('searchCold interleave keeps query echo', ra.query === 'query-alpha' && rb.query === 'query-beta');
-      ok('searchCold interleave keeps mode/timings shape', typeof ra.coldTotalMs === 'number' && typeof rb.datasetUploadMs === 'number');
+      ok(
+        'searchCold interleave keeps mode/timings shape',
+        typeof ra.coldTotalMs === 'number' &&
+          typeof ra.datasetUploadMs === 'number' &&
+          typeof rb.coldTotalMs === 'number' &&
+          typeof rb.datasetUploadMs === 'number' &&
+          ra.mode === 'substring' &&
+          rb.mode === 'substring'
+      );
       eng.destroy();
     }
     // Abort mid-mapAsync via controller (deterministic: abort inside mapAsync).
@@ -912,20 +1054,27 @@ async function main(): Promise<void> {
       await eng.loadDataset(['apple']);
       const sb = (eng as unknown as { stagingBuffer: { mapAsync: () => Promise<void> } }).stagingBuffer;
       const orig = sb.mapAsync.bind(sb);
-      const ac = new AbortController();
-      sb.mapAsync = async (): Promise<void> => {
-        ac.abort();
-        return orig();
-      };
-      let aborted = false;
       try {
-        await eng.search('apple', { mode: 'substring', signal: ac.signal });
-      } catch (e) {
-        aborted = (e as { name?: string }).name === 'AbortError';
+        const ac = new AbortController();
+        sb.mapAsync = async (): Promise<void> => {
+          ac.abort();
+          return orig();
+        };
+        let aborted = false;
+        try {
+          await eng.search('apple', { mode: 'substring', signal: ac.signal });
+        } catch (e) {
+          aborted = (e as { name?: string }).name === 'AbortError';
+        }
+        ok('abort during mapAsync -> AbortError (epoch discard)', aborted);
+      } finally {
+        try {
+          sb.mapAsync = orig;
+        } catch {
+          // Best-effort restore.
+        }
+        eng.destroy();
       }
-      ok('abort during mapAsync -> AbortError (epoch discard)', aborted);
-      sb.mapAsync = orig;
-      eng.destroy();
     }
     // CPU-scan abort (pre-aborted fast path on the parity scorer).
     {
@@ -963,53 +1112,126 @@ async function main(): Promise<void> {
       },
       onmessage: null as unknown as ((e: MessageEvent) => Promise<void>) | null,
     };
+    const prevSelf = (globalThis as unknown as { self?: unknown }).self;
     (globalThis as unknown as { self: unknown }).self = fakeSelf;
-    await import('../apps/benchmark/src/search.worker.ts');
-    const send = async (data: unknown): Promise<void> => {
-      if (fakeSelf.onmessage === null) throw new Error('worker onmessage not installed');
-      await fakeSelf.onmessage({ data } as MessageEvent);
-    };
-    const take = (type: string): unknown[] => {
-      const out = posted.filter((m) => (m as { type?: string }).type === type);
+    try {
+      await import('../apps/benchmark/src/search.worker.ts');
+      const send = async (data: unknown): Promise<void> => {
+        if (fakeSelf.onmessage === null) throw new Error('worker onmessage not installed');
+        await fakeSelf.onmessage({ data } as MessageEvent);
+      };
+      // Drain only matching type; leave other message types queued so a
+      // SEARCH_ERROR arriving alongside SEARCH_RESULTS is not discarded.
+      const take = (type: string): unknown[] => {
+        const out: unknown[] = [];
+        const rest: unknown[] = [];
+        for (const m of posted) {
+          if ((m as { type?: string }).type === type) out.push(m);
+          else rest.push(m);
+        }
+        posted.length = 0;
+        posted.push(...rest);
+        return out;
+      };
+      const takeAll = (): unknown[] => {
+        const out = [...posted];
+        posted.length = 0;
+        return out;
+      };
+
+      await send({ type: 'INIT' });
+      const initDone = take('INIT_DONE');
+      ok('worker INIT_DONE (CPU software, no GPU here)', initDone.length === 1);
+
+      // Legacy buffers without strings/serialized fail fast (no silent repack).
+      await send({ type: 'LOAD_DATASET', payload: { recordsBufferData: new ArrayBuffer(16), offsetsBufferData: new ArrayBuffer(16) } });
+      const legacy = take('DATASET_LOADED') as Array<{ payload: { error?: string } }>;
+      ok('worker rejects legacy v0.1 buffers explicitly', legacy.length === 1 && typeof legacy[0]?.payload.error === 'string');
+
+      // Legacy + new fields combo still rejected (no silent clone waste).
+      const comboPacked = packUnicodeToGPUBuffer(['combo'], { folded: true });
+      const comboSer = serializeUnicodeDataset(comboPacked);
+      await send({
+        type: 'LOAD_DATASET',
+        payload: { strings: ['combo'], serialized: comboSer, recordsBufferData: new ArrayBuffer(16) },
+      });
+      const combo = take('DATASET_LOADED') as Array<{ payload: { error?: string } }>;
+      ok('worker rejects legacy combo (legacy + serialized)', combo.length === 1 && typeof combo[0]?.payload.error === 'string');
+
+      // Neutered serialized buffer -> explicit re-create error.
+      await send({ type: 'LOAD_DATASET', payload: { serialized: new ArrayBuffer(0) } });
+      const neut = take('DATASET_LOADED') as Array<{ payload: { error?: string } }>;
+      ok('worker neutered guard (byteLength 0)', neut.length === 1 && typeof neut[0]?.payload.error === 'string');
+
+      // Missing payload (no strings/serialized) fails closed, never wipes index.
+      await send({ type: 'LOAD_DATASET', payload: {} });
+      const emptyFail = take('DATASET_LOADED') as Array<{ payload: { error?: string; size?: number } }>;
+      ok(
+        'worker empty LOAD_DATASET fails closed',
+        emptyFail.length === 1 && typeof emptyFail[0]?.payload.error === 'string'
+      );
+
+      // Strings path: unicode pack, metrics reported.
+      await send({ type: 'LOAD_DATASET', payload: { strings: ['hello', 'world'] } });
+      const loaded = take('DATASET_LOADED') as Array<{
+        payload: { size: number; error?: string; stringsChars: number; tokenCount: number; datasetGeneration: number };
+      }>;
+      ok('worker strings LOAD_DATASET (unicode, no legacy packer)', loaded.length === 1 && loaded[0]?.payload.size === 2 && loaded[0]?.payload.error === undefined);
+      const genAfterStrings = (loaded[0] as { payload: { datasetGeneration: number } }).payload.datasetGeneration;
+
+      // Serialized path carries generation; state only commits on success.
+      const packed = packUnicodeToGPUBuffer(['alpha', 'beta'], { folded: true });
+      const serialized = serializeUnicodeDataset(packed);
+      await send({ type: 'LOAD_DATASET', payload: { strings: ['alpha', 'beta'], serialized } });
+      const sloaded = take('DATASET_LOADED') as Array<{
+        payload: { size: number; error?: string; serializedBytes: number; datasetGeneration: number };
+      }>;
+      ok('worker serialized LOAD_DATASET (U2F2)', sloaded.length === 1 && sloaded[0]?.payload.size === 2 && sloaded[0]?.payload.serializedBytes === serialized.byteLength);
+      const genAfterSerialized = (sloaded[0] as { payload: { datasetGeneration: number } }).payload.datasetGeneration;
+      ok('worker dataset generation advances on commit', genAfterSerialized !== genAfterStrings);
+
+      // SEARCH: CPU comparison runs (no GPU here); latestQueryId drops stale.
+      // Include the committed generation so main can drop stale-dataset hits.
+      await send({ type: 'SEARCH', payload: { queryId: 10, query: 'alpha', mode: 'substring', limit: 5, runCpuComparison: true, datasetGeneration: genAfterSerialized } });
+      const first = take('SEARCH_RESULTS') as Array<{
+        payload: { queryId: number; ufuzzyResult: unknown; gpuCompact: unknown; datasetGeneration: number };
+      }>;
+      ok('worker SEARCH runs CPU comparison', first.length === 1 && first[0]?.payload.ufuzzyResult !== null);
+      ok(
+        'worker SEARCH echoes dataset generation',
+        first.length === 1 && first[0]?.payload.datasetGeneration === genAfterSerialized
+      );
+      await send({ type: 'SEARCH', payload: { queryId: 20, query: 'alpha', mode: 'substring', limit: 5, datasetGeneration: genAfterSerialized } });
+      await send({ type: 'SEARCH', payload: { queryId: 15, query: 'alpha', mode: 'substring', limit: 5, datasetGeneration: genAfterSerialized } });
+      const dropped = take('SEARCH_RESULTS') as Array<{ payload: { queryId: number } }>;
+      ok('worker latestQueryId drops superseded query', dropped.length === 1 && dropped[0]?.payload.queryId === 20);
+
+      // SEARCH payload validation: non-integer queryId posts SEARCH_ERROR, never poisons drop logic.
       posted.length = 0;
-      return out;
-    };
+      await send({ type: 'SEARCH', payload: { query: 'alpha', mode: 'substring', limit: 5 } });
+      const badId = take('SEARCH_ERROR') as Array<{ payload: { error?: string } }>;
+      ok('worker SEARCH without queryId posts SEARCH_ERROR', badId.length === 1 && typeof badId[0]?.payload.error === 'string');
+      // Drop logic still healthy after the malformed request.
+      await send({ type: 'SEARCH', payload: { queryId: 30, query: 'alpha', mode: 'substring', limit: 5, datasetGeneration: genAfterSerialized } });
+      const afterBad = take('SEARCH_RESULTS') as Array<{ payload: { queryId: number } }>;
+      ok('worker drop logic survives malformed queryId', afterBad.length === 1 && afterBad[0]?.payload.queryId === 30);
 
-    await send({ type: 'INIT' });
-    const initDone = take('INIT_DONE');
-    ok('worker INIT_DONE (CPU software, no GPU here)', initDone.length === 1);
-
-    // Legacy buffers without strings/serialized fail fast (no silent repack).
-    await send({ type: 'LOAD_DATASET', payload: { recordsBufferData: new ArrayBuffer(16), offsetsBufferData: new ArrayBuffer(16) } });
-    const legacy = take('DATASET_LOADED') as Array<{ payload: { error?: string } }>;
-    ok('worker rejects legacy v0.1 buffers explicitly', legacy.length === 1 && typeof legacy[0]?.payload.error === 'string');
-
-    // Neutered serialized buffer -> explicit re-create error.
-    await send({ type: 'LOAD_DATASET', payload: { serialized: new ArrayBuffer(0) } });
-    const neut = take('DATASET_LOADED') as Array<{ payload: { error?: string } }>;
-    ok('worker neutered guard (byteLength 0)', neut.length === 1 && typeof neut[0]?.payload.error === 'string');
-
-    // Strings path: unicode pack, metrics reported.
-    await send({ type: 'LOAD_DATASET', payload: { strings: ['hello', 'world'] } });
-    const loaded = take('DATASET_LOADED') as Array<{ payload: { size: number; error?: string; stringsChars: number; tokenCount: number } }>;
-    ok('worker strings LOAD_DATASET (unicode, no legacy packer)', loaded.length === 1 && loaded[0]?.payload.size === 2 && loaded[0]?.payload.error === undefined);
-
-    // Serialized path.
-    const packed = packUnicodeToGPUBuffer(['alpha', 'beta'], { folded: true });
-    const serialized = serializeUnicodeDataset(packed);
-    await send({ type: 'LOAD_DATASET', payload: { strings: ['alpha', 'beta'], serialized } });
-    const sloaded = take('DATASET_LOADED') as Array<{ payload: { size: number; error?: string; serializedBytes: number } }>;
-    ok('worker serialized LOAD_DATASET (U2F2)', sloaded.length === 1 && sloaded[0]?.payload.size === 2 && sloaded[0]?.payload.serializedBytes === serialized.byteLength);
-
-    // SEARCH: CPU comparison runs (no GPU here); latestQueryId drops stale.
-    await send({ type: 'SEARCH', payload: { queryId: 10, query: 'alpha', mode: 'substring', limit: 5, runCpuComparison: true } });
-    const first = take('SEARCH_RESULTS') as Array<{ payload: { queryId: number; ufuzzyResult: unknown; gpuCompact: unknown } }>;
-    ok('worker SEARCH runs CPU comparison', first.length === 1 && first[0]?.payload.ufuzzyResult !== null);
-    await send({ type: 'SEARCH', payload: { queryId: 20, query: 'alpha', mode: 'substring', limit: 5 } });
-    await send({ type: 'SEARCH', payload: { queryId: 15, query: 'alpha', mode: 'substring', limit: 5 } });
-    const dropped = take('SEARCH_RESULTS') as Array<{ payload: { queryId: number } }>;
-    ok('worker latestQueryId drops superseded query', dropped.length === 1 && dropped[0]?.payload.queryId === 20);
-    delete (globalThis as unknown as { self?: unknown }).self;
+      // SEARCH error path posts SEARCH_ERROR (invalid mode) instead of swallowing.
+      await send({ type: 'SEARCH', payload: { queryId: 31, query: 'alpha', mode: 'regex', limit: 5, datasetGeneration: genAfterSerialized } });
+      const searchErr = take('SEARCH_ERROR') as Array<{ payload: { queryId: number; error?: string } }>;
+      const strayResults = take('SEARCH_RESULTS');
+      ok(
+        'worker SEARCH invalid mode posts SEARCH_ERROR',
+        searchErr.length === 1 && searchErr[0]?.payload.queryId === 31 && typeof searchErr[0]?.payload.error === 'string' && strayResults.length === 0
+      );
+      void takeAll;
+    } finally {
+      if (prevSelf === undefined) {
+        delete (globalThis as unknown as { self?: unknown }).self;
+      } else {
+        (globalThis as unknown as { self: unknown }).self = prevSelf;
+      }
+    }
   }
 
   // ---------------------------------------------------------------- report

@@ -122,7 +122,7 @@ async function main() {
             // 2. Test: Candidate collection across >1000 items with late high-scoring matches
             // Generate synthetic dataset of 3,000 variable-length items where
             // items 1200..1249 start with the query (highest substring score).
-            // M3: variable-length u32 packing — plain strings in, the engine
+            // M3: variable-length u32 packing -- plain strings in, the engine
             // normalizes to post-fold tokens (no 59-char truncation, no slots).
             const count = 3000;
             const strings = new Array<string>(count);
@@ -204,14 +204,18 @@ async function main() {
             return { success: true, results };
         });
 
-        // 5. Test: M4 CPU/GPU differential parity on real hardware (release gate).
-        // Node computes the parity reference over the same post-fold tokens;
-        // the page executes WGSL. Exact ordered (index,score) + text parity
-        // asserted (small corpora, never overflow). Same-host/ICU only.
+        // 5. Test: M4 CPU/GPU differential parity on real hardware (per-PR browser
+        // gate in CI + release gate). Node computes the parity reference over
+        // the same post-fold tokens; the page executes WGSL. Exact ordered
+        // (index,score) + text parity asserted (small corpora, never
+        // overflow). Same-host only: the oracle runs in Bun/Node while the
+        // subject runs in Chrome, so this assumes Bun ICU and Chrome ICU
+        // agree on NFC for this ASCII-heavy corpus (negligible risk here;
+        // cross-runtime NFC is probed/reported, not gated).
         const FCP = String.fromCodePoint;
         const parityStrings: string[] = [];
         for (let i = 0; i < 200; i++) {
-            parityStrings.push(`src/services/Auth${i % 7 === 0 ? 'ß' : 's'}Controller_${i}.ts`);
+            parityStrings.push(`src/services/Auth${i % 7 === 0 ? FCP(0xdf) : 's'}Controller_${i}.ts`);
         }
         parityStrings.push(
             'strasse', 'STRASSE', 'stra' + FCP(0xdf) + 'e',
@@ -233,47 +237,66 @@ async function main() {
             { query: 'zzz-no-match', mode: 'fuzzy', limit: 50 },
         ] as Array<{ query: string; mode: 'substring' | 'fuzzy'; limit: number }>;
         const recordTokens = parityStrings.map((s) => normalizeText(s, true).tokens);
-        const gpuParityOut = await page.evaluate(async (args: { strings: string[]; cells: Array<{ query: string; mode: string; limit: number }> }) => {
-            const engine = (window as any).gpuEngine;
-            await engine.loadDataset({ size: args.strings.length, strings: args.strings });
-            const out: Array<{ totalMatches: number; candidateCount: number; hasOverflow: boolean; results: Array<{ index: number; score: number; text: string }> }> = [];
-            for (const c of args.cells) {
-                const r = await engine.search(c.query, { mode: c.mode, maxResults: c.limit });
-                out.push({
-                    totalMatches: r.totalMatches,
-                    candidateCount: r.candidateCount,
-                    hasOverflow: r.hasOverflow,
-                    results: r.results.map((x: any) => ({ index: x.index, score: x.score, text: x.text }))
-                });
-            }
-            return out;
-        }, { strings: parityStrings, cells: parityCells });
-        if ((testResults as any).success && Array.isArray((testResults as any).results)) {
-            parityCells.forEach((cell, ci) => {
-                const qT = normalizeText(cell.query, true).tokens;
-                const expected = searchCpuReference(recordTokens, qT, cell.mode, cell.limit, parityStrings);
-                const got = (gpuParityOut as any[])[ci];
-                let pass = got.totalMatches === expected.totalMatches && got.hasOverflow === false;
-                if (pass) {
-                    if (got.results.length !== expected.results.length) {
-                        pass = false;
-                    } else {
-                        for (let k = 0; k < got.results.length; k++) {
-                            const g = got.results[k];
-                            const e = expected.results[k];
-                            if (g.index !== e.index || g.score !== e.score || g.text !== e.text) {
-                                pass = false;
-                                break;
+        // Skip the GPU evaluate entirely when the engine never became ready:
+        // without this guard a dead engine turns into a fatal evaluate throw
+        // instead of a clear gate failure.
+        if (!(testResults as any).success) {
+            (testResults as any).results.push({
+                name: 'M4 parity (skipped: WebGPU engine not ready)',
+                passed: false,
+                details: testResults
+            });
+        } else {
+            const PARITY_TIMEOUT_MS = 120000;
+            const parityEvaluate = page.evaluate(async (args: { strings: string[]; cells: Array<{ query: string; mode: string; limit: number }> }) => {
+                const engine = (window as any).gpuEngine;
+                await engine.loadDataset({ size: args.strings.length, strings: args.strings });
+                const out: Array<{ totalMatches: number; candidateCount: number; hasOverflow: boolean; results: Array<{ index: number; score: number; text: string }> }> = [];
+                for (const c of args.cells) {
+                    const r = await engine.search(c.query, { mode: c.mode, maxResults: c.limit });
+                    out.push({
+                        totalMatches: r.totalMatches,
+                        candidateCount: r.candidateCount,
+                        hasOverflow: r.hasOverflow,
+                        results: r.results.map((x: any) => ({ index: x.index, score: x.score, text: x.text }))
+                    });
+                }
+                return out;
+            }, { strings: parityStrings, cells: parityCells });
+            const gpuParityOut = await Promise.race([
+                parityEvaluate,
+                new Promise<never>((_, rej) => setTimeout(() => rej(new Error('M4 parity browser evaluate timed out after 120s')), PARITY_TIMEOUT_MS)),
+            ]);
+            if ((testResults as any).success && Array.isArray((testResults as any).results)) {
+                parityCells.forEach((cell, ci) => {
+                    const qT = normalizeText(cell.query, true).tokens;
+                    const expected = searchCpuReference(recordTokens, qT, cell.mode, cell.limit, parityStrings);
+                    const got = (gpuParityOut as any[])[ci];
+                    // Small corpora: never overflow, so candidateCount must
+                    // equal totalMatches (matches the mock-harness contract
+                    // which also pins candidateCount).
+                    let pass = got.totalMatches === expected.totalMatches && got.hasOverflow === false && got.candidateCount === expected.totalMatches;
+                    if (pass) {
+                        if (got.results.length !== expected.results.length) {
+                            pass = false;
+                        } else {
+                            for (let k = 0; k < got.results.length; k++) {
+                                const g = got.results[k];
+                                const e = expected.results[k];
+                                if (g.index !== e.index || g.score !== e.score || g.text !== e.text) {
+                                    pass = false;
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                (testResults as any).results.push({
-                    name: `M4 parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
-                    passed: pass,
-                    details: { totalMatches: got.totalMatches, expected: expected.totalMatches }
+                    (testResults as any).results.push({
+                        name: `M4 parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
+                        passed: pass,
+                        details: { totalMatches: got.totalMatches, candidateCount: got.candidateCount, expected: expected.totalMatches }
+                    });
                 });
-            });
+            }
         }
 
         console.log('\n--- Test Suite Summary ---');
@@ -283,7 +306,7 @@ async function main() {
             console.error('Some tests failed!');
             process.exit(1);
         } else {
-            console.log('\nAll regression tests passed successfully! ✅');
+            console.log('\nAll regression tests passed successfully! [pass]');
         }
     } finally {
         await browser.close();
