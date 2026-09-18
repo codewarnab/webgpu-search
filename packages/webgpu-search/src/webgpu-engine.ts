@@ -292,7 +292,7 @@ export class WebGPUEngine {
     this.outputByteLength = 8 + this.candidateCapacity * 8;
 
     // Unmap-before-destroy (symmetric with destroy()): destroying a mapped
-    // buffer throws / leavesFdtorn state on some implementations.
+    // buffer throws / leaves torn state on some implementations.
     for (const b of [this.outputBuffer, this.stagingBuffer]) {
       try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
     }
