@@ -456,12 +456,18 @@ select:focus {
    ========================================================================== */
 .metrics-strip {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 0.75rem;
   margin-bottom: 1.25rem;
 }
 
-@media (max-width: 800px) {
+@media (max-width: 1000px) {
+  .metrics-strip {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
   .metrics-strip {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -505,6 +511,7 @@ select:focus {
 }
 
 .metric-gpu .metric-value { color: var(--color-gpu); }
+.metric-parity .metric-value { color: #f43f5e; }
 .metric-ufuzzy .metric-value { color: var(--color-ufuzzy); }
 .metric-native .metric-value { color: var(--color-native); }
 .metric-fps .metric-value { color: var(--color-emerald); }

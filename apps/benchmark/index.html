@@ -81,6 +81,17 @@
             </div>
 
             <div class="control-group">
+              <label for="corpus-type-select">CORPUS CLASS</label>
+              <div class="select-wrapper">
+                <select id="corpus-type-select">
+                  <option value="ascii" selected>ASCII Code Paths (v0.1 Parity)</option>
+                  <option value="cjk">CJK Multi-Byte Terms (Hanzi/Kana)</option>
+                  <option value="emoji">Emoji & Mixed-Script (Astral/ZWJ)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="control-group">
               <label for="search-mode-select">ALGORITHM</label>
               <div class="select-wrapper">
                 <select id="search-mode-select">
@@ -126,18 +137,25 @@
               <button class="btn-chip" data-query="AuthController">AuthController</button>
               <button class="btn-chip" data-query="rsctl">Acronym ("rsctl")</button>
               <button class="btn-chip" data-query="src">High-Match ("src")</button>
-              <button class="btn-chip" data-query="a">Single-Char ("a")</button>
-              <button class="btn-chip" data-query="@tanstack/react">Symbols ("@tanstack")</button>
+              <button class="btn-chip" data-query="ユーザー">CJK ("ユーザー")</button>
+              <button class="btn-chip" data-query="🧑‍💻">Emoji ("🧑‍💻")</button>
+              <button class="btn-chip" data-query="&#x200D;">Degenerate ZWJ</button>
               <button class="btn-chip" data-query="xyz999_nomatch">Zero-Match</button>
             </div>
           </div>
 
-          <!-- Minimalist 4-Metric Performance Strip -->
+          <!-- Minimalist 5-Metric Performance Strip -->
           <div class="metrics-strip">
             <div class="metric-block metric-gpu" id="meter-gpu">
               <div class="metric-eyebrow">WEBGPU (RETAINED)</div>
               <div class="metric-value mono" id="meter-gpu-val">-- ms</div>
               <div class="metric-footnote" id="meter-gpu-sub">Dispatch: -- | Readback: --</div>
+            </div>
+
+            <div class="metric-block metric-parity" id="meter-parity">
+              <div class="metric-eyebrow">CPU PARITY (REFERENCE)</div>
+              <div class="metric-value mono" id="meter-parity-val">-- ms</div>
+              <div class="metric-footnote">Contracted v0.2 fallback</div>
             </div>
 
             <div class="metric-block metric-ufuzzy" id="meter-ufuzzy">
@@ -238,16 +256,16 @@
                 <thead>
                   <tr>
                     <th>Dataset Size (N)</th>
-                    <th>GPU Submit (ms)</th>
-                    <th>GPU Exec (ms)</th>
-                    <th>GPU Readback (ms)</th>
-                    <th>GPU Retained Total</th>
+                    <th>Corpus</th>
+                    <th>GPU Retained (ms)</th>
                     <th>GPU Cold Total</th>
+                    <th>CPU Parity (ms)</th>
                     <th>uFuzzy (CPU)</th>
                     <th>JS Native (CPU)</th>
+                    <th>Speedup vs Parity</th>
                     <th>Speedup vs uFuzzy</th>
                     <th>UI Frame Rate</th>
-                    <th>Verdict / Crossover</th>
+                    <th>Verdict / Status</th>
                   </tr>
                 </thead>
                 <tbody id="table-body-substring">
@@ -272,16 +290,16 @@
                 <thead>
                   <tr>
                     <th>Dataset Size (N)</th>
-                    <th>GPU Submit (ms)</th>
-                    <th>GPU Exec (ms)</th>
-                    <th>GPU Readback (ms)</th>
-                    <th>GPU Retained Total</th>
+                    <th>Corpus</th>
+                    <th>GPU Retained (ms)</th>
                     <th>GPU Cold Total</th>
+                    <th>CPU Parity (ms)</th>
                     <th>uFuzzy (CPU)</th>
                     <th>JS Native (CPU)</th>
+                    <th>Speedup vs Parity</th>
                     <th>Speedup vs uFuzzy</th>
                     <th>UI Frame Rate</th>
-                    <th>Verdict / Crossover</th>
+                    <th>Verdict / Status</th>
                   </tr>
                 </thead>
                 <tbody id="table-body-fuzzy">

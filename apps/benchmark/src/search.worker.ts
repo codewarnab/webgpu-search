@@ -89,6 +89,8 @@ self.onmessage = async (e: MessageEvent) => {
   if (type === 'LOAD_DATASET') {
     const strings: string[] | undefined = payload?.strings;
     const serialized: ArrayBuffer | undefined = payload?.serialized;
+    const sentTimestamp: number | undefined = typeof payload?.sentTimestamp === 'number' ? payload.sentTimestamp : undefined;
+    const transferLatencyMs = sentTimestamp !== undefined ? performance.now() - sentTimestamp : undefined;
     // Adopt the main-thread epoch when provided (stale LOADs with an older
     // epoch are dropped to avoid out-of-order commit going backwards).
     // Harness LOADs omit it, in which case the worker bumps its own counter.
@@ -218,6 +220,7 @@ self.onmessage = async (e: MessageEvent) => {
             stringsChars: countChars(datasetStrings),
             tokenCount: packed.tokenCount,
             folded: packed.folded,
+            transferLatencyMs: transferLatencyMs !== undefined ? Number(transferLatencyMs.toFixed(2)) : undefined,
             datasetGeneration
           }
         });
@@ -326,6 +329,7 @@ self.onmessage = async (e: MessageEvent) => {
         stringsChars: countChars(list),
         tokenCount,
         stringIsolated: STRING_ISOLATED_ENRICHMENT,
+        transferLatencyMs: transferLatencyMs !== undefined ? Number(transferLatencyMs.toFixed(2)) : undefined,
         datasetGeneration
       }
     });
@@ -333,7 +337,8 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   if (type === 'SEARCH') {
-    const { queryId, query, mode, limit = 1000, runCpuComparison = false } = payload ?? {};
+    const { queryId, query, mode, limit = 1000, runCpuComparison = false, stringIsolated } = payload ?? {};
+    const isStringIsolated = typeof stringIsolated === 'boolean' ? stringIsolated : STRING_ISOLATED_ENRICHMENT;
     const requestGeneration: number | undefined =
       typeof payload?.datasetGeneration === 'number' ? payload.datasetGeneration : undefined;
 
@@ -369,6 +374,7 @@ self.onmessage = async (e: MessageEvent) => {
     let gpuMeta: WorkerGpuMeta | null = null;
     let ufuzzyResult: CPUSearchResult | null = null;
     let nativeResult: CPUSearchResult | null = null;
+    let workerSerializationMs = 0;
 
     try {
       // Validate mode upfront (independent of engine readiness) so invalid
@@ -384,7 +390,8 @@ self.onmessage = async (e: MessageEvent) => {
           limit,
           signal
         });
-        if (STRING_ISOLATED_ENRICHMENT) {
+        const tSer0 = performance.now();
+        if (isStringIsolated) {
           // Strip `text` at the boundary: the main thread owns display
           // strings and re-attaches them by index (same contract as
           // SearchIndex enrichment over token-only engine results).
@@ -408,6 +415,7 @@ self.onmessage = async (e: MessageEvent) => {
         } else {
           gpuResult = full;
         }
+        workerSerializationMs = performance.now() - tSer0;
       }
 
       if (signal.aborted || queryId < latestQueryId) {
@@ -434,7 +442,10 @@ self.onmessage = async (e: MessageEvent) => {
           gpuCompact,
           gpuMeta,
           ufuzzyResult,
-          nativeResult
+          nativeResult,
+          workerPostTimestamp: performance.now(),
+          workerSerializationMs: Number(workerSerializationMs.toFixed(2)),
+          stringIsolated: isStringIsolated
         }
       });
     } catch (err: unknown) {

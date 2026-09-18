@@ -2,73 +2,23 @@ import puppeteer from 'puppeteer-core';
 import path from 'path';
 import fs from 'fs';
 import { normalizeText, searchCpuReference } from '../packages/webgpu-search/src/index';
-
-function getChromeExecutablePath(): string {
-    if (process.env.CHROME_BIN && fs.existsSync(process.env.CHROME_BIN)) {
-        return process.env.CHROME_BIN;
-    }
-    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
-        return process.env.PUPPETEER_EXECUTABLE_PATH;
-    }
-
-    const platform = process.platform;
-    if (platform === 'win32') {
-        const progFiles = process.env.PROGRAMFILES || 'C:\\Program Files';
-        const progFilesX86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
-        const localAppData = process.env.LOCALAPPDATA || '';
-        const candidates = [
-            path.join(progFiles, 'Google\\Chrome\\Application\\chrome.exe'),
-            path.join(progFilesX86, 'Google\\Chrome\\Application\\chrome.exe'),
-            path.join(localAppData, 'Google\\Chrome\\Application\\chrome.exe'),
-            path.join(progFiles, 'Microsoft\\Edge\\Application\\msedge.exe')
-        ];
-        for (const p of candidates) {
-            if (fs.existsSync(p)) return p;
-        }
-    } else if (platform === 'darwin') {
-        const candidates = [
-            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-            '/Applications/Chromium.app/Contents/MacOS/Chromium'
-        ];
-        for (const p of candidates) {
-            if (fs.existsSync(p)) return p;
-        }
-    } else {
-        const candidates = [
-            '/usr/bin/google-chrome-stable',
-            '/usr/bin/google-chrome',
-            '/usr/bin/chromium-browser',
-            '/usr/bin/chromium',
-            '/snap/bin/chromium'
-        ];
-        for (const p of candidates) {
-            if (fs.existsSync(p)) return p;
-        }
-    }
-
-    throw new Error('Could not automatically find Chrome executable. Please set CHROME_BIN environment variable.');
-}
+import {
+    getChromeExecutablePath,
+    getChromeLaunchArgs,
+    ensureBenchmarkServer
+} from './browser-utils';
 
 async function main() {
     console.log('--- Running WebGPU Top-K & Timing Regression Tests ---');
     const chromePath = getChromeExecutablePath();
     console.log(`Using Chrome binary: ${chromePath}`);
 
-    const args = [
-        '--enable-unsafe-webgpu',
-        '--enable-features=Vulkan,DefaultANGLEVulkan,WebGPU',
-        '--enable-gpu-rasterization',
-        '--no-sandbox',
-        '--disable-setuid-sandbox'
-    ];
-    if (process.platform === 'win32') {
-        args.push('--use-angle=d3d11');
-    }
+    const server = await ensureBenchmarkServer(5173);
 
     const browser = await puppeteer.launch({
         executablePath: chromePath,
         headless: 'new',
-        args
+        args: getChromeLaunchArgs()
     });
 
     try {
@@ -84,7 +34,7 @@ async function main() {
         let loaded = false;
         for (let i = 0; i < 10; i++) {
             try {
-                await page.goto('http://localhost:5173/', { waitUntil: 'networkidle0', timeout: 5000 });
+                await page.goto(`${server.url}/`, { waitUntil: 'networkidle0', timeout: 15000 });
                 loaded = true;
                 break;
             } catch (err) {
@@ -92,8 +42,13 @@ async function main() {
             }
         }
         if (!loaded) {
-            throw new Error('Failed to connect to http://localhost:5173/ after multiple attempts');
+            throw new Error(`Failed to connect to ${server.url}/ after multiple attempts`);
         }
+
+        await page.waitForFunction(
+            () => (window as any).gpuEngine && (window as any).gpuEngine.isReady,
+            { timeout: 15000 }
+        );
 
         // Evaluate inside page context where WebGPU engine is initialized
         const testResults = await page.evaluate(async () => {
@@ -309,8 +264,10 @@ async function main() {
             console.log('\nAll regression tests passed successfully! [pass]');
         }
     } finally {
-        await browser.close();
+        await browser.close().catch(() => {});
+        await server.close().catch(() => {});
     }
+    process.exit(0);
 }
 
 main().catch(err => {

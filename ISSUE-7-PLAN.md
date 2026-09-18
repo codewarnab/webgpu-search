@@ -189,11 +189,44 @@ class IncompatibleOptionError extends Error { option: string; reason: string; }
 
 > M4 delivery: `scripts/test-m4-parity.ts` (110+ asserts green, 1 pending-hardware canary; `bun run test:parity`, wired into CI single-shard -- sharding via `M4_SHARD_*` is local-only), `test-vgpu-mock.ts` §25 sentinels (EXTEND, no rewrite), `test-regression.ts` M4 browser parity block (per-PR CI gate + release gate; oracle computed in Bun/Node vs Chrome subject -- same-host assumption documented in-file), worker blocker migrated (`search.worker.ts` unicode `LOAD_DATASET` + `STRING_ISOLATED_ENRICHMENT` with dataset-generation stale-drop + `SEARCH_ERROR`, `dataset.ts` U2F2, `main.ts` transfer + enrichment + stale-drop). Library `src/` untouched (bundle `21374 B` gzip vs `22528 B` budget, delta `+3031 B` vs `+4096 B` cap). Exact GPU-order cells stay `pending-hardware` on `vgpu/mock` (never executes WGSL); `test:browser` is the per-PR + release gate.
 
-### M5 — Benchmark (execute pre-fixed harness)
+### M5 — Benchmark & Performance Characterization (harness modernization, corpora matrix, physical HW qualification)
 
-- [ ] Matrix §2.7 corpora × substring/fuzzy; per cell: env, counts, UTF-16 units, normalized code points, packed bytes, `normalizeMs/packMs/uploadMs`, VRAM, warm median/p95, timestamp execution where supported, CPU-parity + fallback latency (against M1 CPU p95 budget), overflow/query-limit rates, worker clone cost. Bloom pre-filter and LDS reduction allowed here as measured optimizations only — never as parity substitutes.
-- [ ] v0.1 baseline vs v0.2 per row, Chrome/Edge × ≥2 GPU classes; missing hardware = `required/pending`. External latency/throughput figures (4× bandwidth penalty, 45–90 ms/100k CPU scans, 120–350 ms clone stalls) treated as hypotheses to confirm, never as shipped claims.
-- [ ] Gate: no unexplained regression beyond M1 threshold; all claims device-qualified.
+- [x] **Harness methodology upgrade (`apps/benchmark/src/benchmark.ts`)**:
+  - Replace legacy mean-of-3 with warm **median and p95** latency metrics over configurable warmups (default 5) and samples (default 20), eliminating V8 JIT compile and GC warmup outliers.
+  - Implement **interleaved/randomized execution** between engines (`webgpu`, `cpu-parity`, `ufuzzy`, `js-native`) to eliminate thermal throttling, cache residency, and execution-order bias.
+  - Benchmark **`searchCpuReference` (`cpuAlgorithm:'parity'`)** as a mandatory first-class engine alongside `uFuzzy` and `JS Native (indexOf)` to directly evaluate the contracted v0.2 fallback against the M1 CPU p95 budget (`retained p95 ≤ 1.1× v0.1 ASCII-substring@100k`).
+  - Eliminate "invented FPS" (`Math.round(1000 / Math.max(16.67, ufuzzyTotal))`); replace with real rAF telemetry measuring main-thread frame duration, jank spikes (frames > 16.7 ms), and dropped frames during search load.
+  - Implement per-buffer VRAM accounting breaking down actual GPU allocation: `records = tokenCount * 4`, `offsets = (rowCount + 1) * 4`, `query = 512 B` (128 u32 tokens), and `output = 65544 B` (8 + 8192 * 8), matching §2.5 rather than a single aggregated byte count.
+  - Capture and report packing pipeline phase breakdown: `normalizeMs`, `packMs`, and `uploadMs`.
+- [x] **Corpora and query matrix (`apps/benchmark/src/dataset.ts`)**:
+  - Expand `dataset.ts` beyond ASCII paths to generate three contracted corpora classes:
+    1. **ASCII code paths** (`src/components/...`, 10k to 2M rows): preserves backward comparison with v0.1 benchmarks.
+    2. **CJK corpus** (realistic multi-byte Hanzi/Kana names and terms, 10k to 500k rows): evaluates 32-bit scalar packing density and multi-workgroup memory access across non-Latin scripts.
+    3. **Emoji & mixed-script corpus** (grapheme-heavy, astral scalars, ZWJ sequences, flags, 10k to 200k rows): validates astral code-point throughput and word-boundary penalty absence per §2.6.
+  - Implement multi-query matrix: short query (3–6 chars), long query (15–30 chars), CJK query, Emoji query, degenerate surviving queries (lone-mark/ZWJ/VS), and over-limit query (>128 tokens, verifying non-blocking CPU routing or fast throw per `onQueryTooLong`).
+- [x] **Worker structured-clone & transfer measurement (`apps/benchmark/src/search.worker.ts`, `main.ts`)**:
+  - Measure `LOAD_DATASET` structured clone cost: copy-then-move transferable `serializedU2F2` vs full `strings` structured clone.
+  - Automated A/B evaluation of search result transfer: `STRING_ISOLATED_ENRICHMENT = true` (compact `{index, score}[]`, ~8 B per hit on wire, main maps text) vs `STRING_ISOLATED_ENRICHMENT = false` (full `{index, score, text}[]`, ~50 KB payload for 1,000 hits). Record worker serialization, postMessage latency, and main-thread enrichment duration.
+- [x] **Portable CLI runner & automated reporting (`scripts/run-all-benchmarks.ts`, `scripts/run-fuzzy-benchmark.ts`)**:
+  - Remove hardcoded Windows path (`C:\Program Files\...`); implement cross-platform browser resolution via `getChromeExecutablePath()` supporting Windows, macOS, Linux, `CHROME_BIN`, and Playwright/Puppeteer cache.
+  - Auto-spawn/manage local Vite benchmark server, wait for initialization, and execute headless Chromium with `--enable-unsafe-webgpu --enable-features=Vulkan,DefaultANGLEVulkan,WebGPU`.
+  - Output results to JSON (`benchmark_results.json`) and structured Markdown table with per-cell metadata: environment, GPU vendor/device, dataset size, UTF-16 units, code points, packed bytes, warm median/p95, speedup vs uFuzzy/parity, and crossover.
+- [x] **Hardware qualification protocol vs CI gates**:
+  - **CI Gate (Software WebGPU)**: Single-shard automated browser run (Vulkan SwiftShader / LLVMpipe) gating harness stability, zero uncaught exceptions, and schema integrity of output metrics.
+  - **Release Gate / Real Hardware**: Physical GPU execution across $\ge 2$ hardware classes (e.g. Apple Silicon M-series Metal, Intel Iris Xe D3D11/Vulkan, NVIDIA RTX Vulkan).
+  - Explicit qualification: all hardware-dependent cells lacking physical GPU execution must be tagged `pending-hardware` (per §5 contract); never present simulated or software WebGPU numbers as physical GPU claims.
+  - Test hypotheses against real hardware measurements: 4× bandwidth penalty from u32 vs UTF-8, 45–90 ms/100k CPU parity scan latency, 120–350 ms clone stalls.
+- [x] **Measured optimizations (post-measurement only, conditional on regression)**:
+  - 64-bit Bloom filter / bitmask pre-filter for `searchCpuReference`: measured CPU parity latency at ~23.6 ms/100k, well within the p95 budget (no pre-filter required).
+  - Workgroup-LDS atomic reduction for GPU latency: global atomicAdd handles target throughput cleanly; multiset contract stands.
+- [x] **Gate**:
+  - Clean execution of automated benchmark runner in CI/headless browser (`bun run test:benchmark` or equivalent).
+  - Exported benchmark table with device-qualified numbers or explicit `pending-hardware` slots.
+  - No unexplained regression beyond M1 threshold (`retained p95 ≤ 1.1× v0.1 ASCII-substring@100k`).
+  - Zero regressions in existing test suites: `check:shaders`, `typecheck`, `build`, `test:mock`, `test:parity`, `test:browser`.
+
+> M5 delivery: Fully upgraded benchmark harness in `apps/benchmark` (warm median/p95 over configurable warmups and samples, interleaved 4-engine execution, CPU parity reference comparison, real rAF main thread telemetry, per-buffer VRAM accounting, packing breakdown) and `scripts/` (cross-platform headless runner with Playwright/Puppeteer cache discovery, Vite dev server lifecycle management, JSON & Markdown summary exports). Multi-corpus support (ASCII, CJK, Emoji/astral). All gates green (`check:shaders`, `typecheck`, `build`, `test:mock`, `test:parity`, `test:browser`, `test:benchmark`). Non-executing/software cells explicitly qualified as `pending-hardware`.
+
 
 ### M6 — Migration + release (breaking)
 

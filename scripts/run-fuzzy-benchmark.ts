@@ -1,69 +1,119 @@
 import puppeteer from 'puppeteer-core';
 import fs from 'fs';
 import path from 'path';
+import {
+    getChromeExecutablePath,
+    getChromeLaunchArgs,
+    ensureBenchmarkServer,
+    formatBenchmarkMarkdown
+} from './browser-utils';
 
 async function main() {
-    console.log('Launching Chrome with WebGPU enabled...');
-    const chromePath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+    console.log('--- WebGPU Fuzzy Search: Single-Algorithm Benchmark Runner (Fuzzy) ---');
+
+    const args = process.argv.slice(2);
+    const getArg = (name: string): string | undefined => {
+        const prefix = `--${name}=`;
+        const item = args.find(a => a.startsWith(prefix));
+        return item ? item.slice(prefix.length) : undefined;
+    };
+    const isFast = args.includes('--fast');
+
+    const sizesArg = getArg('sizes') || (isFast ? '10000,100000' : '10000,100000,500000,1000000,2000000');
+    const corpusArg = getArg('corpus') || 'ascii';
+    const queryArg = getArg('query');
+    const warmupsArg = getArg('warmups') || (isFast ? '2' : '5');
+    const samplesArg = getArg('samples') || (isFast ? '5' : '20');
+
+    const chromePath = getChromeExecutablePath();
+    console.log(`Discovered Chrome binary: ${chromePath}`);
+
+    const server = await ensureBenchmarkServer(5173);
+
+    const queryParams = new URLSearchParams({
+        autorun: 'fuzzy',
+        sizes: sizesArg,
+        corpus: corpusArg,
+        warmups: warmupsArg,
+        samples: samplesArg
+    });
+    if (queryArg) {
+        queryParams.set('query', queryArg);
+    }
+
+    const targetUrl = `${server.url}/?${queryParams.toString()}`;
+    console.log(`Launching headless browser with WebGPU flags...`);
 
     const browser = await puppeteer.launch({
         executablePath: chromePath,
         headless: 'new',
-        args: [
-            '--enable-unsafe-webgpu',
-            '--use-angle=d3d11',
-            '--enable-features=Vulkan,DefaultANGLEVulkan,WebGPU',
-            '--enable-gpu-rasterization',
-            '--window-size=1280,900',
-            '--no-sandbox',
-            '--disable-setuid-sandbox'
-        ]
+        args: getChromeLaunchArgs(),
+        protocolTimeout: 0
     });
 
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900 });
+    try {
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1280, height: 950 });
 
-    page.on('console', msg => {
-        const text = msg.text();
-        if (text.includes('WebGPU') || text.includes('Benchmark') || text.includes('Error')) {
-            console.log('[Browser Console]', text);
-        }
-    });
+        page.on('console', msg => {
+            console.log(`[Browser Console ${msg.type()}]`, msg.text());
+        });
 
-    console.log('Navigating to http://127.0.0.1:5173/?autorun=fuzzy ...');
-    await page.goto('http://127.0.0.1:5173/?autorun=fuzzy', { waitUntil: 'networkidle0' });
+        page.on('pageerror', err => {
+            console.error('[Browser PageError]', err);
+        });
 
-    console.log('Waiting for WebGPU initialization and benchmark completion...');
-    // Poll for window.__BENCHMARK_RESULTS__
-    const results = await page.waitForFunction(() => {
-        return (window as any).__BENCHMARK_RESULTS__;
-    }, { timeout: 180000 });
+        console.log(`Navigating to: ${targetUrl}`);
+        await page.goto(targetUrl, { waitUntil: 'networkidle0', timeout: 30000 });
 
-    const benchmarkData = await results.jsonValue();
-    console.log('\n================ BENCHMARK RESULTS (FUZZY) ================\n');
-    console.table(benchmarkData.map((r: any) => ({
-        Size: r.datasetSize.toLocaleString(),
-        'GPU Retained (ms)': r.gpuRetained.totalMs,
-        'uFuzzy (ms)': r.ufuzzyMs,
-        'JS Native (ms)': r.jsNativeMs,
-        'GPU Cold (ms)': r.gpuCold.totalMs,
-        Speedup: `${r.retainedVsUfuzzySpeedup}x`,
-        Winner: r.crossover.gpuRetainedBeatsUfuzzy ? 'GPU' : 'CPU'
-    })));
+        console.log('Waiting for fuzzy benchmark completion...');
+        const resultsHandle = await page.waitForFunction(() => {
+            if ((window as any).__BENCHMARK_ERROR__) {
+                throw new Error(`Benchmark execution failed in browser: ${(window as any).__BENCHMARK_ERROR__}`);
+            }
+            const res = (window as any).__BENCHMARK_RESULTS__;
+            if (!res) return false;
+            if (Array.isArray(res) && res.length > 0) return res;
+            if (res.fuzzy && res.fuzzy.length > 0) return res;
+            return false;
+        }, { timeout: 360000, polling: 1000 });
 
-    // Take a screenshot of the benchmark UI
-    const screenshotPath = path.resolve('fuzzy-benchmark-results.png');
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    console.log(`\nScreenshot saved to: ${screenshotPath}`);
+        const rawData = await resultsHandle.jsonValue() as any;
+        const rows: any[] = Array.isArray(rawData) ? rawData : (rawData.fuzzy || []);
 
-    // Save JSON data
-    fs.writeFileSync('fuzzy-benchmark-results.json', JSON.stringify(benchmarkData, null, 2));
+        console.log('\n================ BENCHMARK RESULTS (FUZZY) ================\n');
+        console.table(rows.map(r => ({
+            Size: (r.datasetSize || 0).toLocaleString(),
+            Corpus: r.corpusType || 'ascii',
+            'VRAM (MB)': r.vramAllocation?.totalBytes ? (r.vramAllocation.totalBytes / (1024 * 1024)).toFixed(2) : 'N/A',
+            'GPU Ret (med/p95)': r.gpuRetained ? `${r.gpuRetained.medianMs.toFixed(2)} / ${r.gpuRetained.p95Ms.toFixed(2)} ms` : 'N/A',
+            'CPU Parity (med/p95)': r.cpuParity ? `${r.cpuParity.medianMs.toFixed(2)} / ${r.cpuParity.p95Ms.toFixed(2)} ms` : `${(r.cpuParityMs || 0).toFixed(2)} ms`,
+            'uFuzzy (med)': r.ufuzzy ? `${r.ufuzzy.medianMs.toFixed(2)} ms` : `${(r.ufuzzyMs || 0).toFixed(2)} ms`,
+            'JS Native (med)': r.jsNative ? `${r.jsNative.medianMs.toFixed(2)} ms` : `${(r.jsNativeMs || 0).toFixed(2)} ms`,
+            'Speedup vs uFuzzy': `${r.retainedVsUfuzzySpeedup || 0}x`,
+            'Speedup vs Parity': `${r.retainedVsParitySpeedup || 0}x`,
+            Status: r.qualificationStatus || 'pending-hardware'
+        })));
 
-    await browser.close();
-    console.log('\nAll done!');
+        // Screenshot
+        const screenshotPath = path.resolve('fuzzy-benchmark-results.png');
+        await page.screenshot({ path: screenshotPath, fullPage: true });
+        console.log(`Saved screenshot to: ${screenshotPath}`);
+
+        // Save JSON
+        const jsonPath = path.resolve('fuzzy-benchmark-results.json');
+        fs.writeFileSync(jsonPath, JSON.stringify(rawData, null, 2));
+        console.log(`Saved JSON data to: ${jsonPath}`);
+
+        console.log('\nFuzzy benchmark complete!');
+    } finally {
+        await browser.close().catch(() => {});
+        await server.close().catch(() => {});
+    }
+    process.exit(0);
 }
 
 main().catch(err => {
-    console.error('Error running benchmark:', err);
+    console.error('Fatal error running fuzzy benchmark:', err);
     process.exit(1);
 });
