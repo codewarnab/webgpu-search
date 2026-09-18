@@ -1,10 +1,18 @@
 /**
  * M2 bundle-size gate: fold-table delta <=8 KB gzip over baseline.
  *
- * Baseline (contract section 3, post-M1 working tree, tsup minify:false):
- *   dist/index.js 44,581 B raw / 10,206 B gzip (deterministic gzip, level 6,
+ * Baseline (M3 re-baselined to post-M2 working tree, tsup minify:false):
+ *   dist/index.js 70,455 B raw / 18,343 B gzip (deterministic gzip, level 6,
  *   mtime=0 — NOT `gzip -c`, which embeds filename+mtime and differs by
  *   ~200-300 B; do not cross-check with `gzip -c | wc -c`).
+ *   (Pre-M3 baseline was 44,581 B raw / 10,206 B gzip post-M1.)
+ * Decision: re-baseline (not exemption). Rationale: the delta cap did its job
+ * policing the M2 fold-table landing; the table is now permanent baseline, so
+ * measuring all future work against a pre-table baseline guarantees false
+ * failures on the first M3 commit. Rejected: exemption (keep old baseline,
+ * gate M3 on total only) — leaves a permanently-redundant check future agents
+ * misread as live. DELTA_CAP_GZIP/TOTAL_BUDGET_GZIP unchanged; the 20 KB
+ * total stays the real constraint.
  * Budget: 20 KB gzip total for dist/index.js. dist/index.cjs is measured and
  * reported too (same cap applies per-file); sourcemaps are excluded from the
  * gate but must not ship to npm (see package files note).
@@ -18,8 +26,8 @@
 import { gzipSync, constants } from 'node:zlib';
 import { stat, readFile } from 'node:fs/promises';
 
-const BASELINE_RAW = 44581;
-const BASELINE_GZIP = 10206;
+const BASELINE_RAW = 70455;
+const BASELINE_GZIP = 18343;
 const DELTA_CAP_GZIP = 8 * 1024;
 const TOTAL_BUDGET_GZIP = 20 * 1024;
 

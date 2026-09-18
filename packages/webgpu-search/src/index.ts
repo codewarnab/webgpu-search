@@ -2,14 +2,19 @@
 export { SearchIndex } from './hybrid-index';
 
 // Low-Level Engines & Hardware Utilities for Power Users & Benchmarks
-export { WebGPUEngine, type DatasetLike, type ColdSearchResult, type WebGPUSearchResult, type SearchResult } from './webgpu-engine';
+export { WebGPUEngine, type DatasetLike, type EngineDataset, type ColdSearchResult, type WebGPUSearchResult, type SearchResult } from './webgpu-engine';
 export { CPUEngine, type CPUSearchResult } from './cpu-engine';
 export { WebGPUContextManager, type AcquiredDeviceContext } from './context-manager';
 export {
   packStringsToGPUBuffer,
   sanitizeStringForSlot,
+  packUnicodeToGPUBuffer,
+  serializeUnicodeDataset,
+  deserializeUnicodeDataset,
   checkMemoryBudget,
   type PackedGPUBuffer,
+  type PackedUnicodeBufferV2,
+  type UnicodePackOptions,
   type MemoryBudgetCheck
 } from './buffer';
 
@@ -24,6 +29,12 @@ export {
   SCORING_VERSION,
   SERIALIZED_MAGIC,
   UNICODE_VERSION,
+  PROFILE_TO_ENUM,
+  ENUM_TO_PROFILE,
+  UNICODE_VERSION_TO_ENUM,
+  ENUM_TO_UNICODE_VERSION,
+  SCORING_TO_ENUM,
+  ENUM_TO_SCORING,
   countUnicodeCodePoints,
   IncompatibleIndexError,
   IncompatibleOptionError,

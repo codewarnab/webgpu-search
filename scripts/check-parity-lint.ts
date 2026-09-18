@@ -1,19 +1,26 @@
 /**
- * M2 parity-path lint: bans locale/UTF-16 helpers in the parity path.
+ * M3 parity-path lint: bans locale/UTF-16 helpers in the parity path.
  *
  * Strict targets (fail on hit): unicode-preprocess.ts, cpu-reference.ts,
- * runtime-guards.ts, fold-table.ts. Extended bans: charCodeAt (except the
- * vetted ASCII/surrogate-scan contexts below), toLowerCase, toUpperCase,
- * toLocaleLowerCase, toLocaleUpperCase, localeCompare, indexOf, `.includes(`
- * (as indexOf substitute), charAt.
+ * runtime-guards.ts, fold-table.ts, buffer.ts, webgpu-engine.ts. Extended
+ * bans: charCodeAt (except the vetted ASCII/surrogate-scan contexts below),
+ * toLowerCase, toUpperCase, toLocaleLowerCase, toLocaleUpperCase,
+ * localeCompare, indexOf, `.includes(` (as indexOf substitute), charAt.
  * Rationale: locale-sensitive folding breaks tr-TR (I->i with dot); UTF-16
  * unit access splits surrogates; substring search must use scalar ===.
  * `codePointAt` / `fromCodePoint` are the approved replacements.
  *
- * Legacy-quarantined files (cpu-engine.ts, buffer.ts, webgpu-engine.ts) use
- * banned helpers behind the legacy byte path on purpose; they are reported
- * as info, not failures. Comments and string literals are stripped before
- * matching to avoid false positives (e.g. docs mentioning the words).
+ * M3 promotion: buffer.ts + webgpu-engine.ts moved from info-only to strict —
+ * the M3 representation swap makes them parity code (u32 scalars, pure `==`
+ * shaders, `normalizeText` queries). Legacy `sanitizeStringForSlot` /
+ * `packStringsToGPUBuffer` stay exported behind a `@deprecated` shim (M6
+ * migration, removal v0.3) and were rewritten to use `codePointAt` so the
+ * strict gate holds without deleting them.
+ *
+ * Legacy-quarantined files (cpu-engine.ts) use banned helpers behind the
+ * legacy uFuzzy/native path on purpose; reported as info, not failures.
+ * Comments and string literals are stripped before matching to avoid false
+ * positives (e.g. docs mentioning the words).
  *
  * Portable: node:fs only (runs on Bun and Node).
  * Run: bun scripts/check-parity-lint.ts (or: node scripts/check-parity-lint.ts)
@@ -25,11 +32,11 @@ const strictTargets = [
   '../packages/webgpu-search/src/cpu-reference.ts',
   '../packages/webgpu-search/src/runtime-guards.ts',
   '../packages/webgpu-search/src/fold-table.ts',
+  '../packages/webgpu-search/src/buffer.ts',
+  '../packages/webgpu-search/src/webgpu-engine.ts',
 ];
 const legacyInfoTargets = [
   '../packages/webgpu-search/src/cpu-engine.ts',
-  '../packages/webgpu-search/src/buffer.ts',
-  '../packages/webgpu-search/src/webgpu-engine.ts',
 ];
 // charCodeAt is allowed only in these vetted ASCII-only fast paths.
 const charCodeAtAllowlist: Record<string, number[]> = {
