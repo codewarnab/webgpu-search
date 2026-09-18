@@ -12,6 +12,7 @@
     "build": "turbo build",
     "test": "turbo test",
     "test:mock": "bun scripts/test-vgpu-mock.ts",
+    "test:parity": "bun scripts/test-m4-parity.ts",
     "test:preprocess": "bun scripts/test-m2-preprocess.ts",
     "test:preprocess:tr": "LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun scripts/test-m2-preprocess.ts",
     "lint:parity": "bun scripts/check-parity-lint.ts",

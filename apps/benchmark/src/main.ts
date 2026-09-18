@@ -13,6 +13,11 @@ let benchmarkRunner: BenchmarkRunner;
 let searchWorker: Worker | null = null;
 let workerReady = false;
 let activeQuerySeq = 0;
+// Dataset epoch: incremented on every switchDataset (synchronous with
+// currentDataset swap). Sent with LOAD_DATASET/SEARCH; worker echoes it so
+// stale-dataset hits (in-flight SEARCH racing a dataset switch) are dropped
+// instead of enriching old indices against new strings.
+let activeDatasetGeneration = 0;
 
 let substringBenchmarkResults: BenchmarkRowResult[] = [];
 let fuzzyBenchmarkResults: BenchmarkRowResult[] = [];
@@ -114,9 +119,82 @@ async function init() {
             const { type, payload } = e.data;
             if (type === 'INIT_DONE') {
                 workerReady = true;
+            } else if (type === 'DATASET_LOADED') {
+                if (payload?.error) {
+                    console.error('[main] Worker LOAD_DATASET failed:', payload.error);
+                    // Surface worker load failures (previously console-only,
+                    // badge kept claiming success).
+                    activeDatasetSize.textContent = `Worker dataset error: ${String(payload.error).slice(0, 160)}`;
+                }
             } else if (type === 'SEARCH_RESULTS') {
                 if (payload.queryId !== activeQuerySeq) return;
-                handleSearchResults(payload.gpuResult, payload.ufuzzyResult, payload.nativeResult, payload.query);
+                // Drop stale-dataset hits: request was sent for an older
+                // dataset epoch, or the worker had not yet committed the
+                // current epoch when it searched. Without this, old indices
+                // enrich against new strings (wrong text / Record # placeholders).
+                if (
+                    typeof payload?.requestGeneration === 'number' &&
+                    payload.requestGeneration !== activeDatasetGeneration
+                ) {
+                    return;
+                }
+                if (
+                    typeof payload?.datasetGeneration === 'number' &&
+                    typeof payload?.requestGeneration === 'number' &&
+                    payload.datasetGeneration !== payload.requestGeneration
+                ) {
+                    return;
+                }
+                // M4 string-isolated enrichment: the worker returns compact
+                // `{index,score}[]` + meta (no text clone); re-attach display
+                // strings by index from our own copy (same contract as
+                // SearchIndex enrichment over token-only engine results).
+                let gpuResult = payload.gpuResult;
+                if (!gpuResult && payload.gpuCompact && payload.gpuMeta && currentDataset) {
+                    const hits = payload.gpuCompact as Array<{ index: number; score: number }>;
+                    const strings = currentDataset.strings;
+                    // Defensive: worker validates bounds, but filter OOB here
+                    // too (never render a placeholder for a corrupt index
+                    // without a warning).
+                    const validHits = hits.filter((h) => Number.isInteger(h.index) && h.index >= 0 && h.index < strings.length);
+                    if (validHits.length !== hits.length) {
+                        console.warn(`[main] dropped ${hits.length - validHits.length} out-of-bounds compact hits (size ${strings.length}).`);
+                    }
+                    gpuResult = {
+                        ...payload.gpuMeta,
+                        results: validHits.map((h) => ({ index: h.index, score: h.score, text: strings[h.index] ?? '' }))
+                    };
+                    // One-time payload-size note for the before/after record:
+                    // compact ~= hits*8 B vs full ~= compact + text UTF-16 units.
+                    // Per-object structured-clone overhead means this is
+                    // order-of-magnitude, not exact bytes.
+                    if (!(window as any).__compactLogged) {
+                        (window as any).__compactLogged = true;
+                        let textChars = 0;
+                        for (const h of validHits) textChars += (strings[h.index] ?? '').length;
+                        console.info(
+                            `[main] string-isolated SEARCH return: ${validHits.length} hits, ` +
+                            `compact ~${validHits.length * 8} B vs full ~${validHits.length * 8 + textChars} B ` +
+                            `(~${(textChars / Math.max(1, validHits.length * 8)).toFixed(1)}x smaller clone; approximate)`
+                        );
+                    }
+                }
+                handleSearchResults(gpuResult, payload.ufuzzyResult, payload.nativeResult, payload.query);
+            } else if (type === 'SEARCH_ERROR') {
+                // Worker-side search failures (invalid mode, QueryTooLong,
+                // GPU loss) previously only console.error'd in the worker and
+                // left stale results on screen. Surface instead of going stale.
+                if (payload?.queryId !== activeQuerySeq) return;
+                if (
+                    typeof payload?.requestGeneration === 'number' &&
+                    payload.requestGeneration !== activeDatasetGeneration
+                ) {
+                    return;
+                }
+                console.error('[main] Worker SEARCH failed:', payload?.error);
+                resultsCountSummary.textContent = `Search error: ${String(payload?.error ?? 'unknown').slice(0, 200)}`;
+                meterGpuVal.textContent = 'Error';
+                meterGpuSub.textContent = String(payload?.error ?? 'worker search failed').slice(0, 160);
             }
         };
     } catch (workerErr) {
@@ -341,6 +419,8 @@ async function switchDataset(size: number) {
     await new Promise(r => setTimeout(r, 20));
 
     const t0 = performance.now();
+    activeDatasetGeneration += 1;
+    const thisGeneration = activeDatasetGeneration;
     currentDataset = generateDataset(size);
     const genTime = performance.now() - t0;
 
@@ -349,18 +429,27 @@ async function switchDataset(size: number) {
         : `Preparing ${size.toLocaleString()} items in RAM...`;
     await new Promise(r => setTimeout(r, 20));
 
-    const { uploadTimeMs } = await gpuEngine.loadDataset(currentDataset);
+    const { uploadTimeMs } = await gpuEngine.loadDataset(currentDataset.strings);
 
-    // Sync dataset with background Web Worker (zero-copy memory transfer)
+    // Sync dataset with background Web Worker (M4 unicode path). The U2F2
+    // serialized buffer is transferable: the `.slice(0)` copy is moved with
+    // a transfer list (copy-then-move, not zero-copy, since the original is
+    // retained for reuse; neutered on arrival is a worker-side error, never
+    // silent). `strings` still structured-clones in full -- that clone cost
+    // is real and reported by the worker (`stringsChars`); it is irreducible
+    // while the worker runs CPU comparison. Legacy v0.1 byte buffers are
+    // gone (the M3 engine ignored them whenever `strings` was present --
+    // pure clone waste).
     if (searchWorker && currentDataset) {
+        const serializedCopy = currentDataset.serializedU2F2.slice(0);
         searchWorker.postMessage({
             type: 'LOAD_DATASET',
             payload: {
                 strings: currentDataset.strings,
-                recordsBufferData: currentDataset.recordsBufferData.slice(0),
-                offsetsBufferData: currentDataset.offsetsBufferData.slice(0)
+                serialized: serializedCopy,
+                datasetGeneration: thisGeneration
             }
-        });
+        }, [serializedCopy]);
     }
 
     activeDatasetSize.textContent = gpuEngine.isReady
@@ -450,6 +539,7 @@ async function executeLiveSearch() {
     }
 
     const queryId = ++activeQuerySeq;
+    const requestGeneration = activeDatasetGeneration;
 
     // 1. Offload to Web Worker if worker mode selected and worker is ready
     if (threadMode === 'worker' && searchWorker && workerReady) {
@@ -460,7 +550,8 @@ async function executeLiveSearch() {
                 query,
                 mode,
                 limit: 1000,
-                runCpuComparison: true
+                runCpuComparison: true,
+                datasetGeneration: requestGeneration
             }
         });
         return;

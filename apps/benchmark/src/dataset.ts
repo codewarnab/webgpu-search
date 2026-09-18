@@ -1,17 +1,30 @@
 /**
- * Dataset generation and GPU buffer packing for search benchmarks.
+ * Dataset generation and U2F2 unicode packing for search benchmarks.
+ *
+ * M4 (Issue #7): the legacy v0.1 ASCII-mangling byte packer
+ * (`packStringsToGPUBuffer`, NFKD + `?` replacement) is deleted from this
+ * flow. Datasets are packed with the code-point-safe unicode pipeline
+ * (`packUnicodeToGPUBuffer` -> `serializeUnicodeDataset`); the serialized
+ * U2F2 buffer is what crosses the worker boundary (transferable,
+ * copy-then-move with a transfer list -- unlike `strings`, which always
+ * structured-clones).
  */
-import { packStringsToGPUBuffer } from 'webgpu-search';
+import {
+  packUnicodeToGPUBuffer,
+  serializeUnicodeDataset,
+} from 'webgpu-search';
 
 export interface Dataset {
   size: number;
   strings: string[];
-  recordsBufferData: ArrayBuffer;
-  recordsByteLength: number;
-  offsetsBufferData: ArrayBuffer;
-  offsetsByteLength: number;
-  gpuBufferData: ArrayBuffer;
-  byteLength: number;
+  /** U2F2 serialized unicode dataset (header + u32 records + u32 offsets). */
+  serializedU2F2: ArrayBuffer;
+  serializedByteLength: number;
+  /** Post-fold code-point total (exact, from the unicode packer). */
+  tokenCount: number;
+  /** records + offsets bytes actually allocated (no 64 B fiction). */
+  packedBytes: number;
+  folded: boolean;
 }
 
 const PREFIXES = [
@@ -41,7 +54,9 @@ const SUFFIXES = [
 const EXTENSIONS = ['.ts', '.tsx', '.rs', '.go', '.py', '.js', '.jsx', '.json', '.wgsl', '.css'];
 
 /**
- * Generate N synthetic code paths/symbols and pack into JS strings & GPU byte layout
+ * Generate N synthetic code paths/symbols plus the U2F2 transfer buffer.
+ * Pack mode is folded (`caseSensitive:false`), matching the benchmark
+ * engine default -- per-query mismatch would throw ProfileMismatchError.
  */
 export function generateDataset(count: number, onProgress?: (percent: number) => void): Dataset {
   const strings = new Array<string>(count);
@@ -69,16 +84,17 @@ export function generateDataset(count: number, onProgress?: (percent: number) =>
     }
   }
 
-  const packed = packStringsToGPUBuffer(strings);
+  const folded = true;
+  const packed = packUnicodeToGPUBuffer(strings, { folded });
+  const serializedU2F2 = serializeUnicodeDataset(packed);
 
   return {
     size: count,
     strings,
-    recordsBufferData: packed.recordsBufferData,
-    recordsByteLength: packed.recordsByteLength,
-    offsetsBufferData: packed.offsetsBufferData,
-    offsetsByteLength: packed.offsetsByteLength,
-    gpuBufferData: packed.bufferData,
-    byteLength: packed.byteLength
+    serializedU2F2,
+    serializedByteLength: serializedU2F2.byteLength,
+    tokenCount: packed.tokenCount,
+    packedBytes: packed.combinedByteLength,
+    folded
   };
 }
