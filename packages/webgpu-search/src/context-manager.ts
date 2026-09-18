@@ -189,7 +189,7 @@ export class WebGPUContextManager {
             console.error('Error in device lost listener:', e);
           }
         }
-      });
+      }, () => {});
 
       return {
         device: this.sharedDevice,

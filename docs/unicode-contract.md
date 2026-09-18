@@ -1,9 +1,10 @@
-# Unicode Contract — v0.2 Code-Point-Safe Matching (M2: CPU parity landed)
+# Unicode Contract — v0.2 Code-Point-Safe Matching (M3: GPU swap landed)
 
-> Source of truth for Issue #7. Frozen values in this file gate M2/M3.
+> Source of truth for Issue #7. Frozen values in this file gate M3/M4.
 > Plan: `ISSUE-7-PLAN.md`. Status: M0 spikes recorded (HW latency A/B deferred
 > to M5 — see §3), M1 contract shape landed, M2 CPU parity landed (post-fold
-> sizing + `cpu-reference.ts` + fold table). GPU engine swap stays M3.
+> sizing + `cpu-reference.ts` + fold table), M3 WebGPU representation swap
+> landed (u32 scalar packing + pure-`==` WGSL + 32 B uniform / 512 B query).
 
 ## 1. Pipeline (byte-exact order)
 
@@ -23,7 +24,7 @@ raw JS string
 ```
 
 Single function `normalizeText()` serves records and queries. `sanitizeStringForSlot`
-is deleted from the parity path (kept behind the M2 legacy GPU path only;
+is deleted from the parity path (kept behind the deprecated legacy export only;
 removal in v0.3). Limit/empty checks apply to **post-fold token count**;
 whitespace-only (incl. U+3000) / empty queries return unified empty results
 (`query: ''`). Lone-mark / VS-only / ZWJ-only / tatweel-only inputs survive
@@ -33,11 +34,16 @@ spans, `str_len − query_len` are in **post-fold code points**. Highlighting
 caveat: `"Straße"` → `"strasse"` (6→7 tokens); folded coordinates must NOT
 slice the original string.
 
-M2 GPU limitation (honest scaffolding, engine swap is M3): the GPU packer is
-still legacy sanitized bytes (NFKD strip + `?`, 59-char query truncation) while
-CPU is folded tokens. `SearchIndex` routes non-ASCII or >59-token queries to
-CPU; ASCII-only short queries may serve GPU. GPU fallback can re-score vs
-legacy GPU. Differential parity is asserted on CPU only until M3.
+M3 representation swap (landed): GPU packs the same post-fold u32 scalars via
+`packUnicodeToGPUBuffer` (pre-tokenized fast path, no second normalization)
+and searches with a pure-`==` scalar WGSL comparator (32 B uniform header +
+512 B persistent storage query buffer, 5 bindings). `flagsAndProfile` (word 3)
+is reserved wire format for the M4 harness/debug — shaders do not read it;
+profile enforcement lives host-side (`ProfileMismatchError`). All valid
+queries up to 128 post-fold tokens route to WebGPU when available; failures
+fall back to the parity CPU scorer with identical semantics. GPU/CPU
+differential parity is asserted by the M4 harness (mock suite pins layout,
+limits, and routing).
 
 ## 2. Frozen versions and caps
 
@@ -53,15 +59,15 @@ legacy GPU. Differential parity is asserted on CPU only until M3.
 | `CpuAlgorithm` | `'parity' \| 'ufuzzy'`, default `'parity'` | uFuzzy explicit opt-in only (CPU-only, explicitly non-conforming scores, skips GPU, excluded from parity matrix); default and GPU-failure fallback serve parity `cpu-reference.ts`. `preferGpu:true + cpuAlgorithm:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
 | `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. M2: enforced on the exact post-fold token count (`normalizeText(query, folded)` vs `QUERY_TOKENS_MAX`), with a cheap raw-length pre-gate before NFC+fold. `'cpu-fallback'` forces the CPU path for that query. |
 
-**M2 status (CPU parity landed, GPU legacy):** comparator, parity scorer, and
-post-fold sizing are enforced on the CPU path. GPU stays on the legacy
-sanitized-byte packer + 59-char truncation until M3, so GPU/CPU differential
-parity is NOT asserted in M2 (see limitation note in §1).
+**M3 status (parity on both paths, harness in M4):** comparator, parity scorer,
+post-fold sizing, u32 packing, and scalar WGSL are enforced on both paths.
+GPU/CPU differential parity is asserted by the M4 harness (see limitation note
+in §1).
 
 Comparator both paths: score desc, index asc (wrap-free comparisons;
 `Math.imul`/`|0` retained for the score formulas only). M2 CPU
-(`cpu-reference.ts`) and M2 GPU readback sort share it; full WGSL scalar
-rewrite stays M3. `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
+(`cpu-reference.ts`) and M2 GPU readback sort share it; the WGSL scalar
+rewrite landed in M3 (pure-`==`, i32-arithmetic form). `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
 in v0.2 (breaking; see `unicode-preprocess.ts` JSDoc). Determinism guaranteed iff
 `hasOverflow === false`; above cap assert `totalMatches + hasOverflow + score
 multiset` only (M1 doc-only; CPU `hasOverflow` fix lands in M3/M4).
@@ -126,9 +132,14 @@ filename/mtime bytes — do not compare across methods; re-baseline with the
 gate method before enforcing byte-tight deltas. `tsup` with `minify:false` —
 i.e. gzip of the current unminified build, not a shipped min+gzip). Headroom
 to the 20 KB gzip budget ≈ 10 KB at M1. Pre-PR baseline was 40,428 B / ~9,125 B;
-the delta is the M1 contract code itself. M2 asserts the fold-table delta
-against the ≤8 KB **gzip** cap (M2 measured +7,922 B deterministic — 270 B
-headroom; do not grow the table further without the lazy-chunk plan).
+the delta is the M1 contract code itself. M2 asserted the fold-table delta
+against the ≤8 KB **gzip** cap (M2 measured +8,137 B deterministic over the
+post-M1 baseline). M3 re-baselined to the post-M2 tree (`dist/index.js`
+70,455 B raw / 18,343 B gzip, gate method): M3 base +1,841 B, review hardening
+(fail-closed trust boundaries) +~1.2 KB → ~21.4 KB gzip vs the 22 KB budget
+(delta cap 4 KB) — see `scripts/check-m2-bundle.ts` (re-baseline + bump
+rationale inline, not exemption). M4 needs a budget re-plan before adding
+harness weight.
 
 ## 4. Buffers and bindings
 
@@ -160,7 +171,10 @@ optimization; `loadDataset` guards neutered buffers (`byteLength===0`).
 `CaseFolding-<V>.txt` URL + revision + license in generator provenance header.
 Host `normalize('NFC')` ≠ pinned version: M1 conformance probe runs pinned
 `NormalizationTest.txt` excerpts at `create()`; mismatch warns + records
-`nfcProbedVersion`, never reports pinned as fact. `toLowerCase/toUpperCase/
+`nfcProbedVersion`, never reports pinned as fact. NOTE: `nfcProbedVersion` is
+currently always `null` (probe deferred — pack/deserialize hardcode null);
+the warn+record behavior above is the contracted M4/M5 target, not today's
+runtime. `toLowerCase/toUpperCase/
 indexOf/charCodeAt` banned in parity path (lint) + `tr-TR` locale CI run.
 
 Match matrix (each × folded true/false): `I/i/İ/ı` (I→i via C, never ı;

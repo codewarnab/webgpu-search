@@ -1,7 +1,7 @@
 /**
  * v0.2 Unicode text profile: version constants, profile types, error classes.
- * Frozen values mirror docs/unicode-contract.md (M2: CPU post-fold enforced;
- * GPU stays legacy until the M3 engine swap). Portable: no DOM refs.
+ * Frozen values mirror docs/unicode-contract.md (M3: u32 representation swap
+ * landed on both paths; M4 owns the differential harness). Portable: no DOM refs.
  */
 
 export const UNICODE_VERSION = '16.0.0' as const;
@@ -12,6 +12,14 @@ export const QUERY_TOKENS_MAX = 128 as const;
 export const RESULT_LIMIT_MAX = 8192 as const;
 
 export type TextProfileId = 'unicode-default';
+
+/** Enum maps for the v0.2 binary header (U2F2). Unknown enum → IncompatibleIndexError. */
+export const PROFILE_TO_ENUM: Record<TextProfileId, number> = { 'unicode-default': 1 };
+export const ENUM_TO_PROFILE: Record<number, TextProfileId> = { 1: 'unicode-default' };
+export const UNICODE_VERSION_TO_ENUM: Record<string, number> = { '16.0.0': 1 };
+export const ENUM_TO_UNICODE_VERSION: Record<number, string> = { 1: '16.0.0' };
+export const SCORING_TO_ENUM: Record<string, number> = { 'parity-v1': 1 };
+export const ENUM_TO_SCORING: Record<number, string> = { 1: 'parity-v1' };
 
 /**
  * Which CPU scorer the caller wants.
@@ -41,7 +49,7 @@ export class QueryTooLongError extends RangeError {
   actual: number;
   profileId: string;
   constructor(limit: number, actual: number, profileId: string) {
-    super(`Query of ${actual} tokens exceeds limit of ${limit} (${profileId})`);
+    super(`Query ${actual} tokens exceeds limit ${limit} (${profileId})`);
     this.name = 'QueryTooLongError';
     this.limit = limit;
     this.actual = actual;
@@ -58,7 +66,7 @@ export class IncompatibleIndexError extends Error {
   actual: unknown;
   constructor(expected: unknown, actual: unknown) {
     super(
-      `Incompatible index (expected ${String(expected)}, got ${String(actual)}). Rebuild required.`
+      `Incompatible index (expected ${String(expected)}, got ${String(actual)}). Rebuild.`
     );
     this.name = 'IncompatibleIndexError';
     this.expected = expected;
@@ -72,10 +80,8 @@ export class ProfileMismatchError extends Error {
   property: string;
   constructor(expected: unknown, actual: unknown, property: string = 'caseSensitive') {
     super(
-      `Profile mismatch (expected ${property}=${String(expected)}, got ${String(actual)}). ` +
-        `${property} is fixed at index-construction time: recreate the index with ` +
-        `IndexOptions.${property}=${String(expected)} or retry the query with ` +
-        `${property}=${String(expected)}.`
+      `Profile mismatch (${property}: expected ${String(expected)}, got ${String(actual)}). ` +
+        `Rebuild the index or retry with ${property}=${String(expected)}.`
     );
     this.name = 'ProfileMismatchError';
     this.expected = expected;

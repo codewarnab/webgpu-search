@@ -1,12 +1,11 @@
 import { WebGPUEngine } from './webgpu-engine';
 import { CPUEngine } from './cpu-engine';
 import { WebGPUContextManager } from './context-manager';
-import { packStringsToGPUBuffer, checkMemoryBudget } from './buffer';
+import { packUnicodeToGPUBuffer, checkMemoryBudget } from './buffer';
 import { normalizeText } from './unicode-preprocess';
 import { searchCpuReference } from './cpu-reference';
 import {
   clampLimit,
-  isPrintableAsciiTokens,
   throwIfAborted,
 } from './runtime-guards';
 import {
@@ -43,20 +42,17 @@ export class SearchIndex {
   private readonly preferGpu: boolean;
   private tokenCount: number = 0;
   private recordTokens: Uint32Array[] = [];
-  private corpusAsciiOnly: boolean = true;
 
   private constructor(
     items: string[],
     folded: boolean,
     preferGpu: boolean,
     recordTokens: Uint32Array[] = [],
-    corpusAsciiOnly: boolean = true,
   ) {
     this.items = items;
     this.folded = folded;
     this.preferGpu = preferGpu;
     this.recordTokens = recordTokens;
-    this.corpusAsciiOnly = corpusAsciiOnly;
     this.cpuEngine = new CPUEngine();
   }
 
@@ -72,7 +68,7 @@ export class SearchIndex {
     if (options.slotBytes !== undefined) {
       throw new IncompatibleOptionError(
         'slotBytes',
-        '[webgpu-search] IndexOptions.slotBytes is throw-on-use in v0.2 (dynamic variable-length indexing replaced fixed slots; removal in v0.3). Remove it and rebuild the index.'
+        '[webgpu-search] slotBytes throw-on-use in v0.2 (fixed slots removed; removal in v0.3).'
       );
     }
     if (options.textProfile !== undefined && options.textProfile !== 'unicode-default') {
@@ -87,7 +83,6 @@ export class SearchIndex {
     const ownedItems: string[] = items.slice();
     const recordTokens: Uint32Array[] = new Array(ownedItems.length);
     let corpusTokens = 0;
-    let corpusAsciiOnly = true;
     for (let i = 0; i < ownedItems.length; i++) {
       const el: unknown = ownedItems[i];
       if (typeof el !== 'string') {
@@ -98,9 +93,8 @@ export class SearchIndex {
       const norm = normalizeText(el as string, folded);
       recordTokens[i] = norm.tokens;
       corpusTokens += norm.tokenCount;
-      if (corpusAsciiOnly && !isPrintableAsciiTokens(norm.tokens)) corpusAsciiOnly = false;
     }
-    const index = new SearchIndex(ownedItems, folded, preferGpu, recordTokens, corpusAsciiOnly);
+    const index = new SearchIndex(ownedItems, folded, preferGpu, recordTokens);
     index.tokenCount = corpusTokens;
 
     // Empty dataset fast path: zero allocation, route immediately to CPU
@@ -118,15 +112,14 @@ export class SearchIndex {
         : preferGpu || ownedItems.length >= threshold;
 
     if (shouldAttemptGpu) {
-      // Measured estimate from the exact post-fold token total instead of
-      // the legacy 64 B/record fiction (70k-char corpora must fail fast).
-      const measuredAvgBytes: number =
-        ownedItems.length === 0 ? 64 : corpusTokens / ownedItems.length;
+      // Phase 1 (fail-fast pre-init): exact post-fold tokenCount, no 64-B
+      // fiction. Device usually undefined here (128 MB fiction stands), but
+      // absurd corpora fail fast without churning a GPU context (rejected:
+      // acquire-always). Phase 2 re-checks post-init vs real limits (engine).
+      const measuredAvgBytes: number = (corpusTokens * 4) / ownedItems.length;
       const budget = checkMemoryBudget(ownedItems.length, measuredAvgBytes, options.device);
       if (!budget.allowed) {
-        console.warn(
-          `[webgpu-search] ${budget.reason} Gracefully falling back to CPU engine.`
-        );
+        console.warn(`[webgpu-search] ${budget.reason} Falling back to CPU.`);
         index.engineType = 'cpu';
         return index;
       }
@@ -136,31 +129,20 @@ export class SearchIndex {
         const initialized = await gpu.init(options.device);
 
         if (initialized && gpu.isReady) {
-          // M2 limitation (honest scaffolding, engine swap is M3): the GPU
-          // packer is the legacy sanitized-byte path (NFKD strip + `?`),
-          // NOT the folded-token stream. CPU parity only; GPU stays legacy
-          // until packUnicodeToGPUBuffer + scalar WGSL land.
-          const packed = packStringsToGPUBuffer(ownedItems);
-          await gpu.loadDataset({
-            size: ownedItems.length,
-            strings: ownedItems,
-            recordsBufferData: packed.recordsBufferData,
-            recordsByteLength: packed.recordsByteLength,
-            offsetsBufferData: packed.offsetsBufferData,
-            offsetsByteLength: packed.offsetsByteLength,
-            gpuBufferData: packed.bufferData,
-            byteLength: packed.byteLength
-          });
+          // M3: pack the cached pre-tokenized streams directly — zero
+          // second normalizeText pass. Token-only upload (no strings
+          // duplication); the engine resolves `text` to `''` and search()
+          // enriches from `items` below.
+          const packed = packUnicodeToGPUBuffer(recordTokens, { folded, totalTokens: corpusTokens });
+          await gpu.loadDataset(packed);
 
           index.gpuEngine = gpu;
           index.engineType = 'webgpu';
-          index.vramAllocatedBytes = packed.byteLength;
-          // tokenCount is the M2 post-fold total computed at construction;
-          // packed.totalChars is legacy sanitized length (ignored for stats).
+          index.vramAllocatedBytes = packed.recordsByteLength + packed.offsetsByteLength;
 
           // Subscribe to device loss for automatic graceful fallback
           index.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
-            console.warn('[webgpu-search] GPU device lost during runtime. Falling back to CPU engine.');
+            console.warn('[webgpu-search] GPU device lost, falling back to CPU.');
             index.engineType = 'cpu';
           });
 
@@ -213,7 +195,7 @@ export class SearchIndex {
     if (this.preferGpu && cpuAlgorithm === 'ufuzzy') {
       throw new IncompatibleOptionError(
         'cpuAlgorithm',
-        "cpuAlgorithm:'ufuzzy' is explicit CPU-only and cannot be combined with preferGpu:true. Use preferGpu:false or cpuAlgorithm:'parity'."
+        "cpuAlgorithm:'ufuzzy' is CPU-only; use preferGpu:false or cpuAlgorithm:'parity'."
       );
     }
     // Cheap pre-gate before the expensive NFC+fold pipeline: fold expands
@@ -228,6 +210,10 @@ export class SearchIndex {
       if (rawTrimmed.length > 1_000_000) {
         let cpCount = 0;
         for (const _ch of rawTrimmed) cpCount++;
+        // Upper-bound estimate (fold expands at most 1->3): `actual` on this
+        // gigantic-query path is an estimate, not the exact post-fold count
+        // (exact gate below covers all normal sizes). cpu-fallback here still
+        // forces an exhaustive CPU scan — callers opt into the cost.
         const est: number = cpCount * 3;
         if (est > QUERY_TOKENS_MAX) {
           if (onQueryTooLong !== 'cpu-fallback') {
@@ -255,77 +241,32 @@ export class SearchIndex {
 
     // Degenerate post-processing queries that normalize to zero post-fold
     // tokens (whitespace-only, U+3000-only, empty) return unified empty
-    // results with query:'' on both paths (resolves '' vs original echo
-    // divergence). Note: lone-mark / VS / ZWJ / tatweel-only inputs survive
-    // NFC+C+F as single tokens per the survival rule (acceptance checklist),
-    // so they are NOT empty here — they search normally (usually 0 hits,
-    // echoing the original query). The contract parenthetical listing them
-    // as "become empty" is inaccurate for the frozen pipeline (no stripping
-    // step); this behavior is pinned by test-m2-preprocess §8b.
+    // results with query:'' on both paths. Lone-mark / VS / ZWJ /
+    // tatweel-only inputs survive NFC+C+F as single tokens (pinned §8b), so
+    // they are NOT empty here — they search normally echoing the original.
+    const noHits = (q: string): SearchResponse => ({
+      results: [], totalMatches: 0, query: q, mode, engine: 'cpu',
+      candidateCount: 0, hasOverflow: false,
+      timings: { queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null, readbackMs: 0, totalMs: 0, gpuDispatchMs: 0 },
+      profileId: this.profileId, scoringVersion: SCORING_VERSION, cpuAlgorithm,
+    });
     if (normalizedQuery.isEmpty) {
-      const timings: SearchTimings = {
-        queryUploadMs: 0,
-        encodeSubmitMs: 0,
-        gpuExecutionMs: null,
-        readbackMs: 0,
-        totalMs: 0,
-        gpuDispatchMs: 0
-      };
-      return {
-        results: [],
-        totalMatches: 0,
-        query: '',
-        mode,
-        engine: 'cpu',
-        candidateCount: 0,
-        hasOverflow: false,
-        timings,
-        profileId: this.profileId,
-        scoringVersion: SCORING_VERSION,
-        cpuAlgorithm
-      };
+      return noHits('');
     }
 
     // Empty dataset edge case: 0 items (non-empty query echoes original).
     if (this.items.length === 0) {
-      const timings: SearchTimings = {
-        queryUploadMs: 0,
-        encodeSubmitMs: 0,
-        gpuExecutionMs: null,
-        readbackMs: 0,
-        totalMs: 0,
-        gpuDispatchMs: 0
-      };
-      return {
-        results: [],
-        totalMatches: 0,
-        query,
-        mode,
-        engine: 'cpu',
-        candidateCount: 0,
-        hasOverflow: false,
-        timings,
-        profileId: this.profileId,
-        scoringVersion: SCORING_VERSION,
-        cpuAlgorithm
-      };
+      return noHits(query);
     }
 
-    // 1. WebGPU execution path — M2 LEGACY (not parity): the GPU packer maps
-    // everything outside printable ASCII (0x20..0x7E) to '?' and truncates
-    // queries to 59 chars, while CPU is folded tokens. Route to GPU only when
-    // it cannot diverge: printable-ASCII corpus + query and post-fold query
-    // <=59 tokens. Otherwise stay on CPU parity. Explicit ufuzzy and
-    // over-limit cpu-fallback also force CPU.
-    const gpuAsciiSafe: boolean =
-      this.corpusAsciiOnly && isPrintableAsciiTokens(normalizedQuery.tokens);
-    const gpuLengthSafe: boolean = queryTokenCount <= 59;
+    // 1. WebGPU execution path (M3 parity): all valid queries
+    // (queryTokenCount <= 128, enforced above) route to WebGPU when
+    // available and ready. Explicit ufuzzy and over-limit cpu-fallback
+    // force CPU. Failures fall through to the parity CPU scorer below.
     const gpuHandle = this.gpuEngine;
     const useGpu: boolean =
       !forceCpu &&
       cpuAlgorithm !== 'ufuzzy' &&
-      gpuAsciiSafe &&
-      gpuLengthSafe &&
       this.engineType === 'webgpu' &&
       gpuHandle !== null &&
       gpuHandle.isReady;
@@ -364,7 +305,7 @@ export class SearchIndex {
         if (err.name === 'AbortError') {
           throw err;
         }
-        console.warn('[webgpu-search] GPU search failed, falling back to CPU for this query:', err);
+        console.warn('[webgpu-search] GPU search failed, CPU fallback:', err);
         // Fallthrough to CPU
       }
     }
@@ -373,8 +314,7 @@ export class SearchIndex {
     // uFuzzy is quarantined to explicit cpuAlgorithm:'ufuzzy' (CPU-only,
     // never in the differential matrix; explicitly non-conforming scores).
     // Default 'parity' serves the shared-pipeline reference scorer; GPU
-    // failures and GPU-unsafe (non-ASCII/long) queries also land here —
-    // note fallback can re-score vs legacy GPU (documented M2 limitation).
+    // failures also land here with identical parity semantics.
     throwIfAborted(signal);
 
     if (cpuAlgorithm === 'ufuzzy') {
