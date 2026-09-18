@@ -116,8 +116,7 @@ export class SearchIndex {
       // fiction. Device usually undefined here (128 MB fiction stands), but
       // absurd corpora fail fast without churning a GPU context (rejected:
       // acquire-always). Phase 2 re-checks post-init vs real limits (engine).
-      const measuredAvgBytes: number =
-        ownedItems.length === 0 ? 64 : (corpusTokens * 4) / ownedItems.length;
+      const measuredAvgBytes: number = (corpusTokens * 4) / ownedItems.length;
       const budget = checkMemoryBudget(ownedItems.length, measuredAvgBytes, options.device);
       if (!budget.allowed) {
         console.warn(`[webgpu-search] ${budget.reason} Falling back to CPU.`);
@@ -211,6 +210,10 @@ export class SearchIndex {
       if (rawTrimmed.length > 1_000_000) {
         let cpCount = 0;
         for (const _ch of rawTrimmed) cpCount++;
+        // Upper-bound estimate (fold expands at most 1->3): `actual` on this
+        // gigantic-query path is an estimate, not the exact post-fold count
+        // (exact gate below covers all normal sizes). cpu-fallback here still
+        // forces an exhaustive CPU scan — callers opt into the cost.
         const est: number = cpCount * 3;
         if (est > QUERY_TOKENS_MAX) {
           if (onQueryTooLong !== 'cpu-fallback') {

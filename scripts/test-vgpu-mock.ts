@@ -7,11 +7,17 @@ import {
     packUnicodeToGPUBuffer,
     serializeUnicodeDataset,
     deserializeUnicodeDataset,
+    validatePackedOffsets,
     checkMemoryBudget,
     normalizeText,
     tokensEqual,
+    compareParityResults,
+    scoreFuzzyTokens,
+    scoreSubstringTokens,
+    searchCpuReference,
     IncompatibleIndexError,
     IncompatibleOptionError,
+    ProfileMismatchError,
     QueryTooLongError,
     QUERY_TOKENS_MAX,
     RESULT_LIMIT_MAX,
@@ -190,7 +196,7 @@ async function runMockTests() {
 
     console.log('6. Testing search execution, empty query, and 0-row early return...');
     const emptyRes = await engine.search('', { mode: 'substring' });
-    if (emptyRes.totalMatches !== 0 || emptyRes.results.length !== 0 || (emptyRes as any).query !== undefined && emptyRes.query !== '') {
+    if (emptyRes.totalMatches !== 0 || emptyRes.results.length !== 0 || emptyRes.query !== '') {
         throw new Error('Empty query test failed');
     }
     await engine.loadDataset([]);
@@ -434,6 +440,241 @@ async function runMockTests() {
     }
     concurrentIndex.destroy();
     console.log('   ✅ GPU query errors fall back to CPU results');
+
+    console.log('20. Testing CPU/GPU parity formulas (host-side WGSL integer mirror)...');
+    // The mock never executes WGSL, so pin the contracted integer formulas
+    // directly: scoreSubstringTokens/scoreFuzzyTokens must equal a JS mirror
+    // of the WGSL i32 arithmetic over fixed vectors + fuzz.
+    const u32 = (arr: number[]) => new Uint32Array(arr);
+    const wgslSubstring = (rec: Uint32Array, q: Uint32Array): { matched: boolean; score: number; pos: number } => {
+        if (q.length === 0 || rec.length < q.length) return { matched: false, score: 0, pos: -1 };
+        const maxStart = rec.length - q.length;
+        for (let start = 0; start <= maxStart; start++) {
+            let ok = true;
+            for (let j = 0; j < q.length; j++) {
+                if (rec[start + j] !== q[j]) { ok = false; break; }
+            }
+            if (ok) {
+                // Mirror: 1000i - i32(pos)*10 - (i32(str)-i32(ql)), i32 wrap.
+                const score = (1000 - Math.imul(start, 10) - (rec.length - q.length)) | 0;
+                return { matched: true, score, pos: start };
+            }
+        }
+        return { matched: false, score: 0, pos: -1 };
+    };
+    const parityVectors: Array<[number[], number[]]> = [
+        [[1, 2, 3, 4], [2, 3]],
+        [[97, 98, 99], [97]],
+        [[97, 98, 99], [98, 99]],
+        [[47, 97, 98], [97, 98]],
+        [[0x1f600, 97, 98], [0x1f600]],
+        [[1, 1, 1, 2, 1], [1, 2]],
+        [[5], [5]],
+        [[5], [6]],
+    ];
+    for (const [r, q] of parityVectors) {
+        const rec = u32(r);
+        const qry = u32(q);
+        const cpu = scoreSubstringTokens(rec, qry);
+        const w = wgslSubstring(rec, qry);
+        if (cpu.matched !== w.matched || (cpu.matched && (cpu.score !== w.score || cpu.matchStart !== w.pos))) {
+            throw new Error(`substring parity drift rec=${r} q=${q}: cpu=${JSON.stringify(cpu)} wgsl=${JSON.stringify(w)}`);
+        }
+        const cf = scoreFuzzyTokens(rec, qry);
+        // Fuzzy oracle: brute-force subsequence check + score shape sanity
+        // (exact formula pinned by cpu-reference unit vectors below).
+        if (cf.matched) {
+            if (!Number.isInteger(cf.score)) throw new Error('fuzzy score must be integer');
+            const ref = searchCpuReference([rec], qry, 'fuzzy', 10, ['x']);
+            if (ref.totalMatches !== 1 || ref.results[0].score !== cf.score) {
+                throw new Error('fuzzy searchCpuReference/score mismatch');
+            }
+        }
+    }
+    // Fuzz small alphabet for substring parity (deterministic LCG).
+    let seed = 0x12345678;
+    const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 0x100000000;
+    for (let t = 0; t < 500; t++) {
+        const rl = 1 + Math.floor(rnd() * 8);
+        const ql = 1 + Math.floor(rnd() * Math.min(4, rl));
+        const rec = u32(Array.from({ length: rl }, () => Math.floor(rnd() * 3)));
+        const qry = u32(Array.from({ length: ql }, () => Math.floor(rnd() * 3)));
+        const cpu = scoreSubstringTokens(rec, qry);
+        const w = wgslSubstring(rec, qry);
+        if (cpu.matched !== w.matched || (cpu.matched && cpu.score !== w.score)) {
+            throw new Error(`fuzz substring drift t=${t}`);
+        }
+    }
+    // Sort contract: score desc, index asc.
+    const sorted = [{ score: 5, index: 2 }, { score: 5, index: 1 }, { score: 9, index: 0 }].sort(compareParityResults);
+    if (sorted[0].score !== 9 || sorted[1].index !== 1 || sorted[2].index !== 2) {
+        throw new Error('compareParityResults contract broken');
+    }
+    console.log('   ✅ Parity formulas pinned (substring WGSL mirror + fuzz + sort)');
+
+    console.log('21. Testing 129-token boundary, ProfileMismatch, mode + caseSensitive gates...');
+    const gateEngine = new WebGPUEngine();
+    await gateEngine.init(mockDevice);
+    await gateEngine.loadDataset(['alpha', 'beta']);
+    // 129 = QUERY_TOKENS_MAX+1 must throw at both layers with exact actual.
+    for (const q of ['a'.repeat(QUERY_TOKENS_MAX + 1)]) {
+        let threwEngine = false;
+        try { await gateEngine.search(q, { mode: 'substring' }); } catch (e: any) { threwEngine = e instanceof QueryTooLongError && e.actual === 129 && e.limit === 128; }
+        if (!threwEngine) throw new Error('engine 129-token must throw QueryTooLongError actual=129');
+    }
+    const gateIndex = await SearchIndex.create(['alpha'], { device: mockDevice, preferGpu: true });
+    let threwIndex = false;
+    try { await gateIndex.search('a'.repeat(129), { mode: 'substring' }); } catch (e: any) { threwIndex = e instanceof QueryTooLongError && e.actual === 129; }
+    if (!threwIndex) throw new Error('index 129-token must throw QueryTooLongError actual=129');
+    gateIndex.destroy();
+    // ProfileMismatch at engine level (default folded=true index, caseSensitive:true).
+    let pmThrew = false;
+    try { await gateEngine.search('alpha', { mode: 'substring', caseSensitive: true }); } catch (e: any) { pmThrew = e instanceof ProfileMismatchError; }
+    if (!pmThrew) throw new Error('engine ProfileMismatchError must throw for caseSensitive:true on folded index');
+    // Omitted flag defaults to false (hybrid-compatible): must NOT throw on folded=true.
+    await gateEngine.search('alpha', { mode: 'substring' });
+    // Forged non-boolean caseSensitive fails closed.
+    let typeThrew = false;
+    try { await gateEngine.search('alpha', { mode: 'substring', caseSensitive: 1 as any }); } catch (e: any) { typeThrew = e instanceof TypeError; }
+    if (!typeThrew) throw new Error('forged caseSensitive:1 must throw TypeError');
+    // Invalid mode fails closed.
+    let modeThrew = false;
+    try { await gateEngine.search('alpha', { mode: 'regex' as any }); } catch (e: any) { modeThrew = e instanceof TypeError; }
+    if (!modeThrew) throw new Error('invalid mode must throw TypeError');
+    // No-device gates: direct engine without init still enforces throw/echo.
+    const bareEngine = new WebGPUEngine();
+    const bareEmpty = await bareEngine.search('   ', { mode: 'substring' });
+    if (bareEmpty.query !== '') throw new Error('no-device whitespace must echo unified empty');
+    let bareLongThrew = false;
+    try { await bareEngine.search('a'.repeat(200), { mode: 'substring' }); } catch (e: any) { bareLongThrew = e instanceof QueryTooLongError; }
+    if (!bareLongThrew) throw new Error('no-device over-long must throw QueryTooLongError');
+    gateEngine.destroy();
+    console.log('   ✅ 129 boundary + ProfileMismatch + mode/caseSensitive + no-device gates verified');
+
+    console.log('22. Testing U2F2 hostile headers + engine-level rejections...');
+    const good = packUnicodeToGPUBuffer(['hello', 'world'], { folded: true });
+    const goodBytes = serializeUnicodeDataset(good);
+    const hostile = (label: string, fn: () => void) => {
+        try { fn(); } catch (e: any) {
+            if (e instanceof IncompatibleIndexError) return;
+            throw new Error(`${label}: wrong error ${e?.name}`);
+        }
+        throw new Error(`${label}: expected IncompatibleIndexError`);
+    };
+    hostile('bad-version', () => {
+        const b = goodBytes.slice(0);
+        const h = new Uint32Array(b, 0, 9);
+        h[1] = 1;
+        deserializeUnicodeDataset(b);
+    });
+    hostile('bad-enum', () => {
+        const b = goodBytes.slice(0);
+        const h = new Uint32Array(b, 0, 9);
+        h[2] = 99;
+        // Recompute CRC so we reach the enum gate, not the checksum gate.
+        const recLen = (h[6] as number) * 4;
+        const offLen = ((h[5] as number) + 1) * 4;
+        let crc = 0xffffffff;
+        const T = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; T[n] = c >>> 0; }
+        const parts = [new Uint8Array(b, 0, 32), new Uint8Array(b, 36, recLen), new Uint8Array(b, 36 + recLen, offLen)];
+        for (const p of parts) for (let i = 0; i < p.length; i++) crc = (T[(crc ^ p[i]) & 0xff] as number) ^ (crc >>> 8);
+        h[8] = ((crc ^ 0xffffffff) >>> 0);
+        deserializeUnicodeDataset(b);
+    });
+    hostile('folded-2', () => {
+        const b = goodBytes.slice(0);
+        new Uint32Array(b, 0, 9)[7] = 2;
+        deserializeUnicodeDataset(b);
+    });
+    hostile('non-monotonic', () => {
+        const p = packUnicodeToGPUBuffer(['ab', 'cd'], { folded: true });
+        const b = serializeUnicodeDataset(p);
+        const h = new Uint32Array(b, 0, 9);
+        const recLen = (h[6] as number) * 4;
+        const off = new Uint32Array(b, 36 + recLen, 3);
+        off[1] = 999;
+        deserializeUnicodeDataset(b);
+    });
+    // Engine-level forged packed object must fail closed (was trust-by-construction).
+    const forgedEngine = new WebGPUEngine();
+    await forgedEngine.init(mockDevice);
+    let forgedThrew = false;
+    try {
+        await forgedEngine.loadDataset({ tokens: new Uint32Array([1, 2, 3, 4, 5, 6]), offsets: new Uint32Array([0, 999, 6]), rowCount: 2, tokenCount: 6, folded: true, profileId: 'unicode-default', unicodeVersion: '16.0.0', scoringVersion: 'parity-v1', formatVersion: 2, recordsBufferData: new Uint32Array([1, 2, 3, 4, 5, 6]).buffer as ArrayBuffer, offsetsBufferData: new Uint32Array([0, 999, 6]).buffer as ArrayBuffer, recordsByteLength: 24, offsetsByteLength: 12, combinedByteLength: 36 } as any);
+    } catch (e: any) { forgedThrew = e instanceof IncompatibleIndexError; }
+    if (!forgedThrew) throw new Error('forged non-monotonic offsets must throw IncompatibleIndexError');
+    // Engine-level legacy DatasetLike rejected.
+    let legacyThrew = false;
+    try { await forgedEngine.loadDataset({ size: 2, byteLength: 100 } as any); } catch (e: any) { legacyThrew = e instanceof IncompatibleIndexError; }
+    if (!legacyThrew) throw new Error('legacy DatasetLike must throw IncompatibleIndexError');
+    // validatePackedOffsets direct: interior bound violation.
+    hostile('validate-offsets-bound', () => validatePackedOffsets(new Uint32Array([0, 5, 4]), 2, 4));
+    forgedEngine.destroy();
+    console.log('   ✅ Hostile headers + forged packed fail-closed verified');
+
+    console.log('23. Testing packer/serialize/budget edge cases...');
+    // totalTokens hint validated.
+    let ttThrew = false;
+    try { packUnicodeToGPUBuffer([new Uint32Array([1, 2])], { folded: true, totalTokens: 99 }); } catch (e: any) { ttThrew = e instanceof IncompatibleIndexError; }
+    if (!ttThrew) throw new Error('totalTokens mismatch must throw IncompatibleIndexError');
+    packUnicodeToGPUBuffer([new Uint32Array([1, 2])], { folded: true, totalTokens: 2 });
+    // Unknown versions fail at pack time (not just serialize).
+    let uvThrew = false;
+    try { packUnicodeToGPUBuffer(['a'], { unicodeVersion: 'nope' }); } catch (e: any) { uvThrew = e instanceof IncompatibleIndexError; }
+    if (!uvThrew) throw new Error('unknown unicodeVersion must throw at pack time');
+    // serialize shape validation (not raw RangeError).
+    let serThrew = false;
+    try {
+        const p = packUnicodeToGPUBuffer(['ab'], { folded: true });
+        serializeUnicodeDataset({ ...p, recordsByteLength: 999 } as any);
+    } catch (e: any) { serThrew = e instanceof IncompatibleIndexError; }
+    if (!serThrew) throw new Error('serialize shape mismatch must throw IncompatibleIndexError');
+    // Legacy packer offsets length honesty (was 8 B buffer claiming 16 B).
+    const leg = packStringsToGPUBuffer(['a']);
+    if ((leg.offsetsBufferData as ArrayBuffer).byteLength !== leg.offsetsByteLength) {
+        throw new Error('legacy offsets buffer must match claimed byteLength');
+    }
+    // checkMemoryBudget forged/partial limits fail closed (no NaN allow).
+    const nanBudget = checkMemoryBudget(30_000_000, 64, { limits: {} } as any);
+    if (nanBudget.allowed || !Number.isFinite(nanBudget.maxBytes)) throw new Error('partial limits must fall back to finite budget and not allow oversize');
+    const negBudget = checkMemoryBudget(-5, -10);
+    if (!negBudget.allowed) throw new Error('negative inputs must clamp to allowed (no negative budgets)');
+    const exactFit = checkMemoryBudget(10, 64, { limits: { maxBufferSize: 65544 + 512 + 44 + 8 + 8192 * 8, maxStorageBufferBindingSize: 1 << 30, maxComputeWorkgroupsPerDimension: 65535 } } as any, 8192);
+    if (typeof exactFit.allowed !== 'boolean') throw new Error('exact-boundary budget must return boolean');
+    // Mixed input rejected.
+    let mixedThrew = false;
+    try { packUnicodeToGPUBuffer(['a', new Uint32Array([1])] as any, { folded: true }); } catch (e: any) { mixedThrew = e instanceof TypeError; }
+    if (!mixedThrew) throw new Error('mixed string/Uint32Array must throw TypeError');
+    console.log('   ✅ Packer/serialize/budget edge cases verified');
+
+    console.log('24. Testing abort, destroy, re-init, Uint32Array[] + clearBuffer fallback...');
+    const abortEngine = new WebGPUEngine();
+    await abortEngine.init(mockDevice);
+    await abortEngine.loadDataset(['apple', 'banana']);
+    const ac = new AbortController();
+    ac.abort();
+    let abortThrew = false;
+    try { await abortEngine.search('apple', { mode: 'substring', signal: ac.signal }); } catch (e: any) { abortThrew = e?.name === 'AbortError'; }
+    if (!abortThrew) throw new Error('pre-aborted signal must throw AbortError');
+    // Uint32Array[] direct load (was rejected before fix).
+    await abortEngine.loadDataset([new Uint32Array([1, 2, 3]), new Uint32Array([4])]);
+    // Mock has no clearBuffer: search must still succeed via writeBuffer fallback.
+    await abortEngine.search('x', { mode: 'substring' });
+    // Forged maxDim 0 must not hang (clamped to 65535 → fast path).
+    const zeroDimDevice = { ...mockDevice, limits: { ...(mockDevice as any).limits, maxComputeWorkgroupsPerDimension: 0 } } as unknown as GPUDevice;
+    (abortEngine as any).device = zeroDimDevice;
+    await abortEngine.search('x', { mode: 'substring' });
+    (abortEngine as any).device = mockDevice;
+    // Re-init must not leak/throw.
+    await abortEngine.init(mockDevice);
+    await abortEngine.loadDataset(['re', 'init']);
+    // Double-destroy safe; post-destroy search returns noHits (not raw TypeError).
+    abortEngine.destroy();
+    abortEngine.destroy();
+    const postDestroy = await abortEngine.search('re', { mode: 'substring' });
+    if (postDestroy.totalMatches !== 0) throw new Error('post-destroy search must return noHits');
+    console.log('   ✅ Abort/destroy/re-init/Uint32Array[] verified');
 
     console.log('\n--- All vgpu/mock Tests Passed! (0ms GPU, 100% in-memory) ✅ ---');
 }

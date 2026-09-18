@@ -44,7 +44,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (ok) {
     let oi = atomicAdd(&out.count, 1u);
     if (oi < uni.max_candidates) {
-      let score = 1000i - i32(pos * 10u) - i32(str_len - ql);
+      let score = 1000i - i32(pos) * 10 - (i32(str_len) - i32(ql));
       out.results[oi] = Match(rid, score);
     }
   }

@@ -5,6 +5,7 @@ import {
   checkMemoryBudget,
   deserializeUnicodeDataset,
   packUnicodeToGPUBuffer,
+  validatePackedOffsets,
   type PackedUnicodeBufferV2,
 } from './buffer';
 import { normalizeText } from './unicode-preprocess';
@@ -49,11 +50,17 @@ export interface DatasetLike {
   // routes via `normalizeText` — single code path, no legacy sanitizer.
   size: number;
   strings?: string[];
+  /** @deprecated v0.2: ignored when `strings` is present, rejected otherwise. Use PackedUnicodeBufferV2. Removal in v0.3. */
   recordsBufferData?: ArrayBuffer;
+  /** @deprecated v0.2: see recordsBufferData. */
   recordsByteLength?: number;
+  /** @deprecated v0.2: see recordsBufferData. */
   offsetsBufferData?: ArrayBuffer;
+  /** @deprecated v0.2: see recordsBufferData. */
   offsetsByteLength?: number;
+  /** @deprecated v0.2: legacy v0.1 shape, always rejected. */
   gpuBufferData?: ArrayBuffer;
+  /** @deprecated v0.2: legacy v0.1 shape, always rejected. */
   byteLength?: number;
 }
 
@@ -118,6 +125,11 @@ export class WebGPUEngine {
   }
 
   async init(customDevice?: GPUDevice): Promise<boolean> {
+    // Guard re-entry: dispose existing GPU buffers before re-creating so
+    // init() twice does not leak the first set (benchmark/power users).
+    if (this.device) {
+      this.disposeGpuBuffers();
+    }
     if (customDevice) {
       this.device = customDevice;
       this.isSharedDevice = false;
@@ -154,7 +166,11 @@ export class WebGPUEngine {
   private attachLostHandler(): void {
     const dev = this.device as unknown as { lost?: Promise<any> } | null;
     if (!dev?.lost?.then) return;
+    // Capture identity: re-init() attaches a new handler per device; a stale
+    // handler for a previous device must not tear down the live engine.
+    const mine = this.device;
     dev.lost.then(() => {
+      if (this.device !== mine) return;
       // Device loss: null handles, mark unready. Shared refCount decremented
       // once (deviceReleased guard) so live siblings keep the device.
       this.substringPipeline = this.fuzzyPipeline = null;
@@ -169,7 +185,21 @@ export class WebGPUEngine {
       }
       this.device = null;
       this.generation++;
-    });
+    }, () => {});
+  }
+
+  private disposeGpuBuffers(): void {
+    for (const b of [this.offsetsBuffer, this.recordsBuffer, this.uniformBuffer, this.queryBuffer, this.outputBuffer, this.stagingBuffer, this.queryResolveBuffer, this.queryStagingBuffer]) {
+      try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
+      try { (b as GPUBuffer | null)?.destroy(); } catch {}
+    }
+    this.offsetsBuffer = this.recordsBuffer = this.uniformBuffer = this.queryBuffer = null;
+    this.outputBuffer = this.stagingBuffer = this.queryResolveBuffer = this.queryStagingBuffer = null;
+    if (this.querySet) {
+      try { this.querySet.destroy(); } catch {}
+      this.querySet = null;
+    }
+    this.substringPipeline = this.fuzzyPipeline = null;
   }
 
   private async setupPipelinesAndBuffers(): Promise<boolean> {
@@ -261,6 +291,11 @@ export class WebGPUEngine {
     this.candidateCapacity = Math.max(candidateCapacity, 8192);
     this.outputByteLength = 8 + this.candidateCapacity * 8;
 
+    // Unmap-before-destroy (symmetric with destroy()): destroying a mapped
+    // buffer throws / leavesFdtorn state on some implementations.
+    for (const b of [this.outputBuffer, this.stagingBuffer]) {
+      try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
+    }
     if (this.outputBuffer) this.outputBuffer.destroy();
     if (this.stagingBuffer) this.stagingBuffer.destroy();
 
@@ -294,25 +329,47 @@ export class WebGPUEngine {
         const packed = packUnicodeToGPUBuffer(arr as string[], { folded: this.folded });
         return { packed, strings: (arr as string[]).slice() };
       }
-      throw new TypeError('[webgpu-search] loadDataset expects string[].');
+      // Symmetric with packUnicodeToGPUBuffer: pre-tokenized Uint32Array[]
+      // takes the zero-renorm path (previously rejected here).
+      if (arr[0] instanceof Uint32Array || (typeof (arr[0] as any)?.length === 'number' && typeof (arr[0] as any)?.set === 'function')) {
+        const packed = packUnicodeToGPUBuffer(arr as unknown as Uint32Array[], { folded: this.folded });
+        return { packed, strings: null };
+      }
+      throw new TypeError('[webgpu-search] loadDataset expects string[] or Uint32Array[].');
     }
-    if (dataset instanceof ArrayBuffer) {
-      const packed = deserializeUnicodeDataset(dataset);
+    // Duck-type ArrayBuffer for cross-realm buffers (iframe/worker) and
+    // Node Buffer-backed views: accept byteLength+slice instead of instanceof.
+    const asBuf = dataset as unknown as { byteLength?: unknown; slice?: unknown };
+    if (typeof asBuf?.byteLength === 'number' && typeof asBuf?.slice === 'function' && !(dataset as any).tokens) {
+      const packed = deserializeUnicodeDataset(dataset as unknown as ArrayBuffer);
       return { packed, strings: null };
     }
     const d = dataset as unknown as Record<string, unknown>;
-    if (d['tokens'] instanceof Uint32Array && d['offsets'] instanceof Uint32Array && typeof d['rowCount'] === 'number') {
-      // Trust boundary note: objects straight from our packer are monotonic
-      // by construction, so only lengths + endpoints are re-checked here.
-      // Untrusted bytes get the full loop in deserializeUnicodeDataset.
+    const tokensLike = d['tokens'] as unknown;
+    const offsetsLike = d['offsets'] as unknown;
+    const isU32View = (v: unknown): v is Uint32Array =>
+      v instanceof Uint32Array || (typeof (v as any)?.length === 'number' && (v as any)?.constructor?.name === 'Uint32Array');
+    if (isU32View(tokensLike) && isU32View(offsetsLike) && typeof d['rowCount'] === 'number') {
+      // Fail-closed: run the same monotonicity + terminal + bounds loop as
+      // deserializeUnicodeDataset. Interior entries are NOT trusted — a
+      // crafted offsets array would otherwise underflow (t1-t0 wraps u32)
+      // and hang the dispatch / OOB-read in WGSL.
       const packed = d as unknown as PackedUnicodeBufferV2;
       const rc = packed.rowCount;
       const tc = packed.tokenCount;
-      if (!(packed.offsets.length === rc + 1) || !(packed.tokens.length === tc)) {
+      if (!Number.isInteger(rc) || !Number.isInteger(tc) || rc < 0 || tc < 0) {
         throw new IncompatibleIndexError('packed-shape', `${rc}/${tc}`);
       }
-      if ((packed.offsets[0]) !== 0 || (packed.offsets[rc]) !== tc) {
-        throw new IncompatibleIndexError(tc, packed.offsets[rc]);
+      validatePackedOffsets(packed.offsets, rc, tc);
+      if (packed.tokens.length !== tc) {
+        throw new IncompatibleIndexError('packed-shape', `${rc}/${tc}`);
+      }
+      // Derive byte lengths from the views (don't trust caller fields, which
+      // would otherwise cause short upload or writeBuffer RangeError).
+      const wantRecords = tc * 4;
+      const wantOffsets = (rc + 1) * 4;
+      if (packed.recordsByteLength !== wantRecords || packed.offsetsByteLength !== wantOffsets) {
+        throw new IncompatibleIndexError(`${wantRecords}/${wantOffsets}`, `${packed.recordsByteLength}/${packed.offsetsByteLength}`);
       }
       const strings = Array.isArray(d['strings']) ? (d['strings'] as string[]) : null;
       return { packed, strings };
@@ -336,6 +393,18 @@ export class WebGPUEngine {
     const { packed, strings } = this.resolvePacked(dataset);
     const count = packed.rowCount;
 
+    // Snapshot CPU metadata so budget/OOM throws restore instead of leaving
+    // phantom sizes with null buffers (half-state).
+    const prev = {
+      size: this.currentDatasetSize,
+      strings: this.currentStrings,
+      tokens: this.currentTokens,
+      offsets: this.currentOffsets,
+      folded: this.folded,
+      profileId: this.profileId,
+      unicodeVersion: this.unicodeVersion,
+      scoringVersion: this.scoringVersion,
+    };
     this.currentDatasetSize = count;
     this.currentStrings = strings;
     this.currentTokens = packed.tokens;
@@ -344,9 +413,6 @@ export class WebGPUEngine {
     this.profileId = packed.profileId;
     this.unicodeVersion = packed.unicodeVersion;
     this.scoringVersion = packed.scoringVersion;
-    // Retained CPU-side for re-upload after device loss + graceful fallback.
-    void this.currentTokens;
-    void this.currentOffsets;
 
     if (!this.device) {
       return { uploadTimeMs: 0 };
@@ -360,33 +426,62 @@ export class WebGPUEngine {
     const avgBytes = count === 0 ? 0 : packed.recordsByteLength / count;
     const budget = checkMemoryBudget(count, avgBytes, this.device, this.candidateCapacity);
     if (!budget.allowed) {
+      Object.assign(this, {
+        currentDatasetSize: prev.size,
+        currentStrings: prev.strings,
+        currentTokens: prev.tokens,
+        currentOffsets: prev.offsets,
+        folded: prev.folded,
+        profileId: prev.profileId,
+        unicodeVersion: prev.unicodeVersion,
+        scoringVersion: prev.scoringVersion,
+      });
       throw new Error(`[webgpu-search] ${budget.reason} Falling back to CPU.`);
     }
 
     for (const b of [this.offsetsBuffer, this.recordsBuffer]) {
+      try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
       try { b?.destroy(); } catch {}
     }
     this.offsetsBuffer = this.recordsBuffer = null;
 
     const t0 = nowMs();
 
-    this.offsetsBuffer = this.device.createBuffer({
-      label: `Offsets (${count})`,
-      size: Math.max(packed.offsetsByteLength, 16),
-      usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
-    });
+    try {
+      this.offsetsBuffer = this.device.createBuffer({
+        label: `Offsets (${count})`,
+        size: Math.max(packed.offsetsByteLength, 16),
+        usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
+      });
 
-    this.recordsBuffer = this.device.createBuffer({
-      label: `Records (${count})`,
-      size: Math.max(packed.recordsByteLength, 16),
-      usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
-    });
+      this.recordsBuffer = this.device.createBuffer({
+        label: `Records (${count})`,
+        size: Math.max(packed.recordsByteLength, 16),
+        usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
+      });
 
-    this.device.queue.writeBuffer(this.offsetsBuffer, 0, packed.offsetsBufferData);
-    if (packed.recordsByteLength > 0) {
-      this.device.queue.writeBuffer(this.recordsBuffer, 0, packed.recordsBufferData);
+      this.device.queue.writeBuffer(this.offsetsBuffer, 0, packed.offsetsBufferData);
+      if (packed.recordsByteLength > 0) {
+        this.device.queue.writeBuffer(this.recordsBuffer, 0, packed.recordsBufferData);
+      }
+      await this.device.queue.onSubmittedWorkDone();
+    } catch (allocErr) {
+      // Restore previous CPU metadata so stats don't lie after OOM.
+      Object.assign(this, {
+        currentDatasetSize: prev.size,
+        currentStrings: prev.strings,
+        currentTokens: prev.tokens,
+        currentOffsets: prev.offsets,
+        folded: prev.folded,
+        profileId: prev.profileId,
+        unicodeVersion: prev.unicodeVersion,
+        scoringVersion: prev.scoringVersion,
+      });
+      try { this.offsetsBuffer?.destroy(); } catch {}
+      try { this.recordsBuffer?.destroy(); } catch {}
+      this.offsetsBuffer = this.recordsBuffer = null;
+      throw allocErr;
     }
-    await this.device.queue.onSubmittedWorkDone();
 
     const uploadTimeMs = nowMs() - t0;
 
@@ -398,22 +493,30 @@ export class WebGPUEngine {
   }
 
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
-    const mode = options.mode ?? 'fuzzy';
+    const rawMode = options.mode ?? 'fuzzy';
+    if (rawMode !== 'fuzzy' && rawMode !== 'substring') {
+      throw new TypeError(`[webgpu-search] search mode must be 'fuzzy'|'substring', got ${String(rawMode)}.`);
+    }
+    const mode = rawMode;
     const limit = clampLimit(options.limit ?? options.maxResults ?? 50);
+    // Strict boolean gate (matches hybrid-index default caseSensitive=false):
+    // forged truthy (1, 'true') fails closed instead of bypassing then
+    // dispatching as the opposite polarity.
+    if (options.caseSensitive !== undefined && typeof options.caseSensitive !== 'boolean') {
+      throw new TypeError(`[webgpu-search] search caseSensitive must be boolean, got ${typeof options.caseSensitive}.`);
+    }
 
     const noHits = (q: string): WebGPUSearchResult => ({
       query: q, mode, totalMatches: 0, candidateCount: 0, hasOverflow: false,
       results: [], timings: { queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null, readbackMs: 0, totalMs: 0, gpuDispatchMs: 0 },
     });
 
-    if (!this.device || !this.recordsBuffer || !this.offsetsBuffer || !this.uniformBuffer || !this.queryBuffer || !this.outputBuffer || !this.stagingBuffer) {
-      return noHits(query);
-    }
-
     throwIfAborted(options.signal);
 
-    // Defensive post-fold gate (hybrid owns the exact gate + cpu-fallback;
-    // engine never silently falls back — it throws).
+    // Defensive post-fold gates run BEFORE the no-device early return so
+    // direct-engine callers get identical throw/echo semantics with or
+    // without a device (hybrid already gates, but engine must not diverge).
+    // Engine never silently falls back — it throws.
     const nq = normalizeText(query, this.folded);
     if (nq.isEmpty) {
       return noHits('');
@@ -421,20 +524,26 @@ export class WebGPUEngine {
     if (nq.tokenCount > QUERY_TOKENS_MAX) {
       throw new QueryTooLongError(QUERY_TOKENS_MAX, nq.tokenCount, this.profileId);
     }
-    if (options.caseSensitive !== undefined && (options.caseSensitive === this.folded)) {
+    // Default omitted flag to false (same as hybrid-index) so direct-engine
+    // callers get identical ProfileMismatch semantics (folded=false index +
+    // omitted flag throws, instead of silently running case-sensitive).
+    const qcs = options.caseSensitive ?? false;
+    if (qcs === this.folded) {
       throw new ProfileMismatchError(!this.folded, options.caseSensitive);
     }
 
+    if (!this.device || !this.recordsBuffer || !this.offsetsBuffer || !this.uniformBuffer || !this.queryBuffer || !this.outputBuffer || !this.stagingBuffer || !this.substringPipeline || !this.fuzzyPipeline) {
+      return noHits(query);
+    }
+
     // Zero-dispatch fast path: no rows means no compute work to submit.
+    // Note: empty already returned above with unified echo ''.
     if (this.currentDatasetSize === 0) {
       return noHits(query);
     }
 
-    if (limit > this.candidateCapacity) {
-      this.allocateOutputBuffers(limit);
-    }
     const pipeline = mode === 'fuzzy' ? this.fuzzyPipeline! : this.substringPipeline!;
-    const caseSensitive = !!options.caseSensitive;
+    const caseSensitive = qcs;
     const queryLen = nq.tokens.length;
 
     const totalStart = nowMs();
@@ -446,7 +555,9 @@ export class WebGPUEngine {
     U32[0] = this.currentDatasetSize;
     U32[1] = queryLen;
     U32[2] = this.candidateCapacity;
-    // flagsAndProfile: caseSensitive:1b + folded:1b + profile:6b + unicode:8b + scoring:8b (§2.5).
+    // flagsAndProfile: caseSensitive:1b + folded:1b + profile:6b + unicode:8b
+    // + scoring:8b. Reserved for M4 harness/debug — shaders are pure-`==` by
+    // construction and do not read it (host enforces ProfileMismatchError).
     const pEnum = (PROFILE_TO_ENUM as Record<string, number>)[this.profileId] ?? 0;
     const uEnum = (UNICODE_VERSION_TO_ENUM as Record<string, number>)[this.unicodeVersion] ?? 0;
     const sEnum = (SCORING_TO_ENUM as Record<string, number>)[this.scoringVersion] ?? 0;
@@ -478,11 +589,20 @@ export class WebGPUEngine {
     // Chunked dispatch: when ceil(rows/128) exceeds the device dimension
     // limit, each chunk re-writes the uniform (_pad.x = base row) and submits
     // its own pass; the shared atomic counter accumulates. Fast path keeps
-    // timestamps.
+    // timestamps. Queue-ordering dependency: WebGPU guarantees serial
+    // queue execution, so each dispatch samples only prior uniform writes
+    // (chunk counts are tiny in practice: step ≈ 8.4M rows/chunk).
     const md = (this.device.limits as unknown as Record<string, unknown>).maxComputeWorkgroupsPerDimension;
-    const maxDim = typeof md === 'number' ? md : 65535;
+    const maxDim = typeof md === 'number' && Number.isFinite(md) && md >= 1 ? Math.floor(md) : 65535;
     const workgroupSize = 128;
     const totalWorkgroups = Math.ceil(this.currentDatasetSize / workgroupSize);
+
+    // Zero the atomic counter. clearBuffer may not exist on older Safari —
+    // fall back to an 8-byte zero write (count + _pad0), queue-ordered
+    // before the dispatch. Never skip the reset (stale count corruption).
+    const zeroCounterFallback = () => {
+      this.device!.queue.writeBuffer(this.outputBuffer!, 0, new Uint8Array(8));
+    };
 
     if (totalWorkgroups <= maxDim) {
       const passDesc: GPUComputePassDescriptor = {
@@ -499,6 +619,10 @@ export class WebGPUEngine {
 
       if (typeof (enc as any).clearBuffer === 'function') {
         enc.clearBuffer(this.outputBuffer, 0, this.outputByteLength);
+      } else {
+        // No clearBuffer: encode the zero via copy path — submit the
+        // queue write before the compute submit (serial ordering).
+        zeroCounterFallback();
       }
 
       const pass = enc.beginComputePass(passDesc);
@@ -520,6 +644,8 @@ export class WebGPUEngine {
       if (typeof (clr as any).clearBuffer === 'function') {
         (clr as any).clearBuffer(this.outputBuffer, 0, this.outputByteLength);
         this.device.queue.submit([clr.finish()]);
+      } else {
+        zeroCounterFallback();
       }
       let base = 0;
       let left = this.currentDatasetSize;
@@ -574,11 +700,26 @@ export class WebGPUEngine {
     // abort is cooperative discard). Capture before await; on mismatch unmap
     // and discard (stale dataset / torn-down engine). Rejected: bare
     // Promise.race — abandons the mapping, later destroy-while-mapped error.
+    // mapAsync rejection itself (e.g. destroy raced it via unmap) also maps
+    // to AbortError when the epoch moved, so hybrid doesn't misclassify it
+    // as fallback-eligible GPU failure.
     const gen = this.generation;
-    await this.stagingBuffer.mapAsync(MapMode.READ);
+    try {
+      await this.stagingBuffer.mapAsync(MapMode.READ);
+    } catch (mapErr) {
+      if (gen !== this.generation) {
+        try { this.stagingBuffer.unmap(); } catch {}
+        throw abortError();
+      }
+      throw mapErr;
+    }
     try {
       if (gen !== this.generation) {
         try { this.stagingBuffer.unmap(); } catch {}
+        throw abortError();
+      }
+      // Re-check liveness after the await: destroy() nulls device/buffers.
+      if (!this.device || !this.stagingBuffer) {
         throw abortError();
       }
       throwIfAborted(options.signal);

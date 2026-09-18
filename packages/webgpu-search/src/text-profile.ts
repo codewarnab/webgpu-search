@@ -13,7 +13,7 @@ export const RESULT_LIMIT_MAX = 8192 as const;
 
 export type TextProfileId = 'unicode-default';
 
-/** Enum maps for the v0.2 binary header (§2.2/§2.5). Unknown enum → IncompatibleIndexError. */
+/** Enum maps for the v0.2 binary header (U2F2). Unknown enum → IncompatibleIndexError. */
 export const PROFILE_TO_ENUM: Record<TextProfileId, number> = { 'unicode-default': 1 };
 export const ENUM_TO_PROFILE: Record<number, TextProfileId> = { 1: 'unicode-default' };
 export const UNICODE_VERSION_TO_ENUM: Record<string, number> = { '16.0.0': 1 };

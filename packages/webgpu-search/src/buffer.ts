@@ -124,7 +124,10 @@ export function packStringsToGPUBuffer(
   }
 
   const offsetsByteLength = Math.max(16, (count + 1) * 4);
-  const offsetsBufferData = offsets.buffer as ArrayBuffer;
+  // Allocate the claimed size and copy: aliasing offsets.buffer would expose
+  // only (count+1)*4 bytes while claiming 16 B (OOB on writeBuffer).
+  const offsetsBufferData = new ArrayBuffer(offsetsByteLength);
+  new Uint32Array(offsetsBufferData).set(offsets.subarray(0, Math.min(offsets.length, offsetsByteLength / 4)));
   const combinedByteLength = recordsByteLength + offsetsByteLength;
 
   return {
@@ -159,6 +162,16 @@ export function packUnicodeToGPUBuffer(
   const profileId: TextProfileId = options.profileId ?? 'unicode-default';
   const unicodeVersion: string = options.unicodeVersion ?? UNICODE_VERSION;
   const scoringVersion: string = options.scoringVersion ?? SCORING_VERSION;
+  // Fail-fast on unknown versions (previously only serialize() rejected).
+  if (PROFILE_TO_ENUM[profileId] === undefined) {
+    throw new IncompatibleIndexError(1, profileId);
+  }
+  if (UNICODE_VERSION_TO_ENUM[unicodeVersion] === undefined) {
+    throw new IncompatibleIndexError(1, unicodeVersion);
+  }
+  if (SCORING_TO_ENUM[scoringVersion] === undefined) {
+    throw new IncompatibleIndexError(1, scoringVersion);
+  }
   const rowCount = input.length;
   if (rowCount === 0) {
     const offsets = new Uint32Array(1);
@@ -191,13 +204,23 @@ export function packUnicodeToGPUBuffer(
     const arrs = input as readonly Uint32Array[];
     for (let i = 0; i < rowCount; i++) {
       const el: unknown = arrs[i];
-      if (!(el instanceof Uint32Array)) {
+      // Duck-type for cross-realm Uint32Array (iframe/worker): instanceof
+      // fails across realms, so accept any view with the right tag.
+      const isU32 = el instanceof Uint32Array ||
+        (typeof ArrayBuffer !== 'undefined' && typeof (ArrayBuffer as any).isView === 'function' &&
+          (ArrayBuffer as any).isView(el) && (el as any).constructor?.name === 'Uint32Array');
+      if (!isU32) {
         throw new TypeError(`[webgpu-search] packUnicode: bad item ${i}.`);
       }
       const t = el as Uint32Array;
       tokenRows[i] = t;
       tokenCount += t.length;
     }
+  }
+  // totalTokens is a pre-size hint from SearchIndex.create(); validate when
+  // supplied so callers get fail-fast instead of a silent no-op.
+  if (options.totalTokens !== undefined && options.totalTokens !== tokenCount) {
+    throw new IncompatibleIndexError(options.totalTokens, tokenCount);
   }
   const tokens = new Uint32Array(tokenCount);
   const offsets = new Uint32Array(rowCount + 1);
@@ -255,6 +278,23 @@ export function serializeUnicodeDataset(packed: PackedUnicodeBufferV2): ArrayBuf
   if (pe === undefined || ue === undefined || se === undefined) {
     throw new IncompatibleIndexError(1, 'unknown-version');
   }
+  // Validate caller-supplied shape up front so hand-built objects throw
+  // IncompatibleIndexError (not raw RangeError from the Uint8Array views).
+  const wantRecords = packed.tokenCount * 4;
+  const wantOffsets = (packed.rowCount + 1) * 4;
+  if (packed.recordsByteLength !== wantRecords || packed.offsetsByteLength !== wantOffsets) {
+    throw new IncompatibleIndexError(`${wantRecords}/${wantOffsets}`, `${packed.recordsByteLength}/${packed.offsetsByteLength}`);
+  }
+  if (!(packed.tokens instanceof Uint32Array || (typeof (packed.tokens as any)?.length === 'number')) ||
+      !(packed.offsets instanceof Uint32Array || (typeof (packed.offsets as any)?.length === 'number'))) {
+    throw new IncompatibleIndexError('packed-shape', 'tokens/offsets');
+  }
+  const recBuf = packed.recordsBufferData as ArrayBuffer;
+  const offBuf = packed.offsetsBufferData as ArrayBuffer;
+  if (!recBuf || (recBuf as ArrayBuffer).byteLength < packed.recordsByteLength ||
+      !offBuf || (offBuf as ArrayBuffer).byteLength < packed.offsetsByteLength) {
+    throw new IncompatibleIndexError('packed-buffers', 'short backing buffer');
+  }
   const total = 36 + packed.recordsByteLength + packed.offsetsByteLength;
   const out = new ArrayBuffer(total);
   const h = new Uint32Array(out, 0, 9);
@@ -270,15 +310,39 @@ export function serializeUnicodeDataset(packed: PackedUnicodeBufferV2): ArrayBuf
   return out;
 }
 
+/** Shared offsets validation: monotonic + bounded + terminal. Fail-closed. */
+export function validatePackedOffsets(offsets: Uint32Array, rowCount: number, tokenCount: number): void {
+  if (offsets.length !== rowCount + 1) {
+    throw new IncompatibleIndexError(rowCount + 1, offsets.length);
+  }
+  if ((offsets[0]) !== 0) throw new IncompatibleIndexError(0, offsets[0]);
+  for (let i = 0; i < rowCount; i++) {
+    const cur = offsets[i] as number;
+    const nxt = offsets[i + 1] as number;
+    if (nxt < cur || nxt > tokenCount) {
+      throw new IncompatibleIndexError('monotonic-offsets', `${i}`);
+    }
+  }
+  if ((offsets[rowCount]) !== tokenCount) {
+    throw new IncompatibleIndexError(tokenCount, offsets[rowCount]);
+  }
+}
+
 /** Deserialize + validate (magic, versions, sizes, monotonicity, checksum). */
 export function deserializeUnicodeDataset(buffer: ArrayBuffer): PackedUnicodeBufferV2 {
-  if (!(buffer instanceof ArrayBuffer) || buffer.byteLength === 0) {
+  // Duck-type for cross-realm ArrayBuffer (iframe/worker): instanceof fails
+  // across realms, so accept any object with byteLength + slice.
+  const buf = buffer as unknown as { byteLength?: unknown; slice?: unknown };
+  const byteLen = typeof buf?.byteLength === 'number' ? (buf.byteLength as number) : NaN;
+  const canSlice = typeof (buf as any)?.slice === 'function';
+  if (!Number.isFinite(byteLen) || byteLen === 0 || !canSlice) {
     throw new IncompatibleIndexError(SERIALIZED_MAGIC, 'neutered/empty');
   }
-  if (buffer.byteLength < 36 || buffer.byteLength % 4 !== 0) {
+  const ab = buffer as ArrayBuffer;
+  if (byteLen < 36 || byteLen % 4 !== 0) {
     throw new IncompatibleIndexError(SERIALIZED_MAGIC, 'bad-length');
   }
-  const h = new Uint32Array(buffer, 0, 9);
+  const h = new Uint32Array(ab, 0, 9);
   const magic = h[0];
   if (magic !== SERIALIZED_MAGIC) throw new IncompatibleIndexError(SERIALIZED_MAGIC, magic);
   if ((h[1]) !== FORMAT_VERSION) throw new IncompatibleIndexError(FORMAT_VERSION, h[1]);
@@ -286,30 +350,26 @@ export function deserializeUnicodeDataset(buffer: ArrayBuffer): PackedUnicodeBuf
   const unicodeVersion = ENUM_TO_UNICODE_VERSION[h[3]];
   const scoringVersion = ENUM_TO_SCORING[h[4]];
   if (profileId === undefined || unicodeVersion === undefined || scoringVersion === undefined) {
-    throw new IncompatibleIndexError(1, h[2]);
+    const badWord = profileId === undefined ? h[2] : unicodeVersion === undefined ? h[3] : h[4];
+    throw new IncompatibleIndexError(1, badWord);
   }
   const rowCount = h[5];
   const tokenCount = h[6];
+  if ((h[7]) !== 0 && (h[7]) !== 1) {
+    throw new IncompatibleIndexError('folded 0|1', h[7]);
+  }
   const folded = (h[7]) === 1;
   const want = 36 + tokenCount * 4 + (rowCount + 1) * 4;
-  if (buffer.byteLength !== want) throw new IncompatibleIndexError(want, buffer.byteLength);
+  if (byteLen !== want) throw new IncompatibleIndexError(want, byteLen);
   const crc = crc32Parts([
-    new Uint8Array(buffer, 0, 32),
-    new Uint8Array(buffer, 36, tokenCount * 4),
-    new Uint8Array(buffer, 36 + tokenCount * 4, (rowCount + 1) * 4),
+    new Uint8Array(ab, 0, 32),
+    new Uint8Array(ab, 36, tokenCount * 4),
+    new Uint8Array(ab, 36 + tokenCount * 4, (rowCount + 1) * 4),
   ]);
   if (crc !== (h[8])) throw new IncompatibleIndexError(h[8], crc);
-  const tokens = new Uint32Array(buffer.slice(36, 36 + tokenCount * 4));
-  const offsets = new Uint32Array(buffer.slice(36 + tokenCount * 4));
-  if ((offsets[0]) !== 0) throw new IncompatibleIndexError(0, offsets[0]);
-  for (let i = 0; i < rowCount; i++) {
-    if ((offsets[i + 1]) < (offsets[i])) {
-      throw new IncompatibleIndexError('monotonic-offsets', `${i}`);
-    }
-  }
-  if ((offsets[rowCount]) !== tokenCount) {
-    throw new IncompatibleIndexError(tokenCount, offsets[rowCount]);
-  }
+  const tokens = new Uint32Array((ab as ArrayBuffer).slice(36, 36 + tokenCount * 4));
+  const offsets = new Uint32Array((ab as ArrayBuffer).slice(36 + tokenCount * 4));
+  validatePackedOffsets(offsets, rowCount, tokenCount);
   const recordsByteLength = tokenCount * 4;
   const offsetsByteLength = (rowCount + 1) * 4;
   return {
@@ -326,6 +386,8 @@ export function deserializeUnicodeDataset(buffer: ArrayBuffer): PackedUnicodeBuf
 /**
  * Per-buffer limit check vs `min(maxBufferSize, maxStorageBufferBindingSize)`.
  * Each of records / offsets / query (512 B) / output (`8+cap*8`) must fit.
+ * `requiredBytes` is informational only (summed footprint); gating is
+ * per-buffer (WebGPU limits are per-buffer, not total-heap).
  */
 export function checkMemoryBudget(
   itemCount: number,
@@ -333,12 +395,24 @@ export function checkMemoryBudget(
   device?: GPUDevice | null,
   cap: number = RESULT_LIMIT_MAX
 ): MemoryBudgetCheck {
-  const l = device?.limits;
-  const maxBytes = l === undefined ? 134217728 : Math.min(l.maxBufferSize, l.maxStorageBufferBindingSize);
-  const recordsBytes = itemCount * estimatedAvgBytes;
-  const offsetsBytes = (itemCount + 1) * 4;
+  // Clamp non-finite/negative inputs fail-closed-safe (no negative budgets).
+  const safeCount = Number.isFinite(itemCount) && itemCount > 0 ? Math.floor(itemCount) : 0;
+  const safeAvg = Number.isFinite(estimatedAvgBytes) && estimatedAvgBytes > 0 ? estimatedAvgBytes : 0;
+  const safeCap = Number.isFinite(cap) && cap > 0 ? Math.floor(cap) : RESULT_LIMIT_MAX;
+  const l = device?.limits as unknown as { maxBufferSize?: unknown; maxStorageBufferBindingSize?: unknown } | undefined;
+  let maxBytes = 134217728;
+  if (l !== undefined) {
+    const a = typeof l.maxBufferSize === 'number' ? l.maxBufferSize : NaN;
+    const b = typeof l.maxStorageBufferBindingSize === 'number' ? l.maxStorageBufferBindingSize : NaN;
+    if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0) {
+      maxBytes = Math.min(a as number, b as number);
+    }
+    // Else: forged/partial limits → keep the 128 MB fiction (fail-closed).
+  }
+  const recordsBytes = safeCount * safeAvg;
+  const offsetsBytes = (safeCount + 1) * 4;
   const queryBytes = QUERY_TOKENS_MAX * 4;
-  const outputBytes = 8 + (cap > 0 ? cap : RESULT_LIMIT_MAX) * 8;
+  const outputBytes = 8 + safeCap * 8;
   const requiredBytes = recordsBytes + offsetsBytes + queryBytes + outputBytes;
   const over =
     recordsBytes > maxBytes ? 'records' :

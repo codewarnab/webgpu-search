@@ -61,7 +61,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (q == ql) {
     let span = last - first + 1i;
     score -= (span - i32(ql)) * 2;
-    score -= i32(str_len - ql);
+    score -= i32(str_len) - i32(ql);
     let oi = atomicAdd(&out.count, 1u);
     if (oi < uni.max_candidates) {
       out.results[oi] = Match(rid, score);

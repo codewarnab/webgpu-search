@@ -37,10 +37,13 @@ slice the original string.
 M3 representation swap (landed): GPU packs the same post-fold u32 scalars via
 `packUnicodeToGPUBuffer` (pre-tokenized fast path, no second normalization)
 and searches with a pure-`==` scalar WGSL comparator (32 B uniform header +
-512 B persistent storage query buffer, 5 bindings). All valid queries up to
-128 post-fold tokens route to WebGPU when available; failures fall back to the
-parity CPU scorer with identical semantics. GPU/CPU differential parity is
-asserted by the M4 harness (mock suite pins layout, limits, and routing).
+512 B persistent storage query buffer, 5 bindings). `flagsAndProfile` (word 3)
+is reserved wire format for the M4 harness/debug — shaders do not read it;
+profile enforcement lives host-side (`ProfileMismatchError`). All valid
+queries up to 128 post-fold tokens route to WebGPU when available; failures
+fall back to the parity CPU scorer with identical semantics. GPU/CPU
+differential parity is asserted by the M4 harness (mock suite pins layout,
+limits, and routing).
 
 ## 2. Frozen versions and caps
 
@@ -63,8 +66,8 @@ in §1).
 
 Comparator both paths: score desc, index asc (wrap-free comparisons;
 `Math.imul`/`|0` retained for the score formulas only). M2 CPU
-(`cpu-reference.ts`) and M2 GPU readback sort share it; full WGSL scalar
-rewrite stays M3. `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
+(`cpu-reference.ts`) and M2 GPU readback sort share it; the WGSL scalar
+rewrite landed in M3 (pure-`==`, i32-arithmetic form). `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
 in v0.2 (breaking; see `unicode-preprocess.ts` JSDoc). Determinism guaranteed iff
 `hasOverflow === false`; above cap assert `totalMatches + hasOverflow + score
 multiset` only (M1 doc-only; CPU `hasOverflow` fix lands in M3/M4).
@@ -132,9 +135,11 @@ to the 20 KB gzip budget ≈ 10 KB at M1. Pre-PR baseline was 40,428 B / ~9,125 
 the delta is the M1 contract code itself. M2 asserted the fold-table delta
 against the ≤8 KB **gzip** cap (M2 measured +8,137 B deterministic over the
 post-M1 baseline). M3 re-baselined to the post-M2 tree (`dist/index.js`
-70,455 B raw / 18,343 B gzip, gate method): M3 work is gated as delta over M2
-(+1,841 B vs the +8,192 B cap) plus the unchanged 20 KB gzip total budget —
-see `scripts/check-m2-bundle.ts` (re-baseline rationale inline, not exemption).
+70,455 B raw / 18,343 B gzip, gate method): M3 base +1,841 B, review hardening
+(fail-closed trust boundaries) +~1.2 KB → ~21.4 KB gzip vs the 22 KB budget
+(delta cap 4 KB) — see `scripts/check-m2-bundle.ts` (re-baseline + bump
+rationale inline, not exemption). M4 needs a budget re-plan before adding
+harness weight.
 
 ## 4. Buffers and bindings
 
@@ -166,7 +171,10 @@ optimization; `loadDataset` guards neutered buffers (`byteLength===0`).
 `CaseFolding-<V>.txt` URL + revision + license in generator provenance header.
 Host `normalize('NFC')` ≠ pinned version: M1 conformance probe runs pinned
 `NormalizationTest.txt` excerpts at `create()`; mismatch warns + records
-`nfcProbedVersion`, never reports pinned as fact. `toLowerCase/toUpperCase/
+`nfcProbedVersion`, never reports pinned as fact. NOTE: `nfcProbedVersion` is
+currently always `null` (probe deferred — pack/deserialize hardcode null);
+the warn+record behavior above is the contracted M4/M5 target, not today's
+runtime. `toLowerCase/toUpperCase/
 indexOf/charCodeAt` banned in parity path (lint) + `tr-TR` locale CI run.
 
 Match matrix (each × folded true/false): `I/i/İ/ı` (I→i via C, never ı;

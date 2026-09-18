@@ -11,6 +11,7 @@ export {
   packUnicodeToGPUBuffer,
   serializeUnicodeDataset,
   deserializeUnicodeDataset,
+  validatePackedOffsets,
   checkMemoryBudget,
   type PackedGPUBuffer,
   type PackedUnicodeBufferV2,

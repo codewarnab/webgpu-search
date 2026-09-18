@@ -74,9 +74,9 @@ export function isAsciiTokens(tokens: Uint32Array): boolean {
 }
 
 /**
- * True when every scalar is printable ASCII (0x20..0x7E). The M2 legacy GPU
- * packer maps everything outside this range to '?' (controls, DEL, and all
- * non-ASCII), so GPU routing is only divergence-free on this subset.
+ * True when every scalar is printable ASCII (0x20..0x7E). Legacy helper kept
+ * for compat; M3 routes all valid queries to WebGPU regardless of script
+ * (the M2 ASCII-only GPU gate is deleted). Not used in the parity path.
  */
 export function isPrintableAsciiTokens(tokens: Uint32Array): boolean {
   for (let i = 0; i < tokens.length; i++) {
