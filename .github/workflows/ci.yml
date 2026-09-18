@@ -50,6 +50,9 @@ jobs:
       - name: Run Headless WebGPU Mock Tests (vgpu/mock)
         run: bun run test:mock
 
+      - name: Run M4 Parity Harness (differential + fallback + worker)
+        run: bun run test:parity
+
       - name: Setup Chrome (browser regression gate)
         id: setup-chrome
         uses: browser-actions/setup-chrome@v1

@@ -114,9 +114,38 @@ async function init() {
             const { type, payload } = e.data;
             if (type === 'INIT_DONE') {
                 workerReady = true;
+            } else if (type === 'DATASET_LOADED') {
+                if (payload?.error) {
+                    console.error('[main] Worker LOAD_DATASET failed:', payload.error);
+                }
             } else if (type === 'SEARCH_RESULTS') {
                 if (payload.queryId !== activeQuerySeq) return;
-                handleSearchResults(payload.gpuResult, payload.ufuzzyResult, payload.nativeResult, payload.query);
+                // M4 string-isolated enrichment: the worker returns compact
+                // `{index,score}[]` + meta (no text clone); re-attach display
+                // strings by index from our own copy (same contract as
+                // SearchIndex enrichment over token-only engine results).
+                let gpuResult = payload.gpuResult;
+                if (!gpuResult && payload.gpuCompact && payload.gpuMeta && currentDataset) {
+                    const hits = payload.gpuCompact as Array<{ index: number; score: number }>;
+                    const strings = currentDataset.strings;
+                    gpuResult = {
+                        ...payload.gpuMeta,
+                        results: hits.map((h) => ({ index: h.index, score: h.score, text: strings[h.index] ?? '' }))
+                    };
+                    // One-time payload-size note for the before/after record:
+                    // compact = hits*8 B vs full ≈ compact + text chars.
+                    if (!(window as any).__compactLogged) {
+                        (window as any).__compactLogged = true;
+                        let textChars = 0;
+                        for (const h of hits) textChars += (strings[h.index] ?? '').length;
+                        console.info(
+                            `[main] string-isolated SEARCH return: ${hits.length} hits, ` +
+                            `compact ~${hits.length * 8} B vs full ~${hits.length * 8 + textChars} B ` +
+                            `(~${(textChars / Math.max(1, hits.length * 8)).toFixed(1)}x smaller clone)`
+                        );
+                    }
+                }
+                handleSearchResults(gpuResult, payload.ufuzzyResult, payload.nativeResult, payload.query);
             }
         };
     } catch (workerErr) {
@@ -349,18 +378,25 @@ async function switchDataset(size: number) {
         : `Preparing ${size.toLocaleString()} items in RAM...`;
     await new Promise(r => setTimeout(r, 20));
 
-    const { uploadTimeMs } = await gpuEngine.loadDataset(currentDataset);
+    const { uploadTimeMs } = await gpuEngine.loadDataset(currentDataset.strings);
 
-    // Sync dataset with background Web Worker (zero-copy memory transfer)
+    // Sync dataset with background Web Worker (M4 unicode path). The U2F2
+    // serialized buffer is transferable: the `.slice(0)` copy is moved with
+    // a transfer list (zero-copy, neutered on arrival is a worker-side
+    // error, never silent). `strings` still structured-clones in full — that
+    // clone cost is real and reported by the worker (`stringsChars`); it is
+    // irreducible while the worker runs CPU comparison. Legacy v0.1 byte
+    // buffers are gone (the M3 engine ignored them whenever `strings` was
+    // present — pure clone waste).
     if (searchWorker && currentDataset) {
+        const serializedCopy = currentDataset.serializedU2F2.slice(0);
         searchWorker.postMessage({
             type: 'LOAD_DATASET',
             payload: {
                 strings: currentDataset.strings,
-                recordsBufferData: currentDataset.recordsBufferData.slice(0),
-                offsetsBufferData: currentDataset.offsetsBufferData.slice(0)
+                serialized: serializedCopy
             }
-        });
+        }, [serializedCopy]);
     }
 
     activeDatasetSize.textContent = gpuEngine.isReady

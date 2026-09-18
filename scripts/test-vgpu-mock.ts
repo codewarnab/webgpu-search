@@ -676,6 +676,45 @@ async function runMockTests() {
     if (postDestroy.totalMatches !== 0) throw new Error('post-destroy search must return noHits');
     console.log('   ✅ Abort/destroy/re-init/Uint32Array[] verified');
 
+    console.log('25. Testing M4 contract sentinels (harness scripts-only, ufuzzy conflict, worker unicode path)...');
+    const fsSentinel = await import('node:fs/promises');
+    // Harness must stay scripts-only: shipped src/index.ts must never import
+    // it (bundle gate), while the harness itself must exist for CI.
+    const srcIndex = await fsSentinel.readFile(new URL('../packages/webgpu-search/src/index.ts', import.meta.url), 'utf8');
+    if (srcIndex.includes('test-m4-parity')) {
+        throw new Error('src/index.ts must not import scripts/test-m4-parity (bundle gate)');
+    }
+    await fsSentinel.stat(new URL('./test-m4-parity.ts', import.meta.url));
+    // preferGpu:true + cpuAlgorithm:'ufuzzy' is a hard conflict (CPU-only scorer).
+    const conflictIndex = await SearchIndex.create(['hello'], { device: mockDevice, preferGpu: true });
+    let conflictThrew = false;
+    try {
+        await conflictIndex.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'ufuzzy' });
+    } catch (e: any) {
+        conflictThrew = e instanceof IncompatibleOptionError;
+    }
+    if (!conflictThrew) throw new Error("preferGpu:true + cpuAlgorithm:'ufuzzy' must throw IncompatibleOptionError");
+    conflictIndex.destroy();
+    // Worker blocker: LOAD_DATASET/SEARCH must not use the legacy ASCII packer
+    // (code-only match: comments may name it for migration context).
+    const workerSrc = await fsSentinel.readFile(new URL('../apps/benchmark/src/search.worker.ts', import.meta.url), 'utf8');
+    const workerCode = workerSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
+    if (/packStringsToGPUBuffer\s*\(/.test(workerCode) || /import[^;]*packStringsToGPUBuffer/.test(workerCode)) {
+        throw new Error('search.worker.ts must not use legacy packStringsToGPUBuffer (M4 blocker)');
+    }
+    for (const token of ['packUnicodeToGPUBuffer', 'deserializeUnicodeDataset', 'STRING_ISOLATED_ENRICHMENT', 'latestQueryId']) {
+        if (!workerSrc.includes(token)) throw new Error(`search.worker.ts missing M4 token: ${token}`);
+    }
+    // Main thread enriches compact hits and transfers the U2F2 buffer.
+    const mainSrc = await fsSentinel.readFile(new URL('../apps/benchmark/src/main.ts', import.meta.url), 'utf8');
+    if (mainSrc.includes('recordsBufferData.slice(0)')) {
+        throw new Error('main.ts must not clone legacy byte buffers to the worker (M4 blocker)');
+    }
+    if (!mainSrc.includes('gpuCompact') || !mainSrc.includes('serializedU2F2.slice(0)')) {
+        throw new Error('main.ts missing string-isolated enrichment / U2F2 transfer (M4 blocker)');
+    }
+    console.log('   ✅ M4 sentinels verified (scripts-only, ufuzzy conflict, worker unicode path)');
+
     console.log('\n--- All vgpu/mock Tests Passed! (0ms GPU, 100% in-memory) ✅ ---');
 }
 

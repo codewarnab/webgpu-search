@@ -1,6 +1,7 @@
 import puppeteer from 'puppeteer-core';
 import path from 'path';
 import fs from 'fs';
+import { normalizeText, searchCpuReference } from '../packages/webgpu-search/src/index';
 
 function getChromeExecutablePath(): string {
     if (process.env.CHROME_BIN && fs.existsSync(process.env.CHROME_BIN)) {
@@ -202,6 +203,78 @@ async function main() {
 
             return { success: true, results };
         });
+
+        // 5. Test: M4 CPU/GPU differential parity on real hardware (release gate).
+        // Node computes the parity reference over the same post-fold tokens;
+        // the page executes WGSL. Exact ordered (index,score) + text parity
+        // asserted (small corpora, never overflow). Same-host/ICU only.
+        const FCP = String.fromCodePoint;
+        const parityStrings: string[] = [];
+        for (let i = 0; i < 200; i++) {
+            parityStrings.push(`src/services/Auth${i % 7 === 0 ? 'ß' : 's'}Controller_${i}.ts`);
+        }
+        parityStrings.push(
+            'strasse', 'STRASSE', 'stra' + FCP(0xdf) + 'e',
+            FCP(0x5317) + FCP(0x4eac) + 'city',
+            FCP(0x1f600) + 'smile',
+            'caf' + FCP(0xe9),
+            'plain'
+        );
+        const parityCells = [
+            { query: 'auth', mode: 'substring', limit: 50 },
+            { query: 'auth', mode: 'fuzzy', limit: 50 },
+            { query: 'Controller_3', mode: 'substring', limit: 50 },
+            { query: 'strasse', mode: 'substring', limit: 50 },
+            { query: 'strasse', mode: 'fuzzy', limit: 50 },
+            { query: 'SS', mode: 'substring', limit: 50 },
+            { query: FCP(0x5317), mode: 'substring', limit: 10 },
+            { query: FCP(0x1f600), mode: 'substring', limit: 10 },
+            { query: 'zzz-no-match', mode: 'substring', limit: 50 },
+            { query: 'zzz-no-match', mode: 'fuzzy', limit: 50 },
+        ] as Array<{ query: string; mode: 'substring' | 'fuzzy'; limit: number }>;
+        const recordTokens = parityStrings.map((s) => normalizeText(s, true).tokens);
+        const gpuParityOut = await page.evaluate(async (args: { strings: string[]; cells: Array<{ query: string; mode: string; limit: number }> }) => {
+            const engine = (window as any).gpuEngine;
+            await engine.loadDataset({ size: args.strings.length, strings: args.strings });
+            const out: Array<{ totalMatches: number; candidateCount: number; hasOverflow: boolean; results: Array<{ index: number; score: number; text: string }> }> = [];
+            for (const c of args.cells) {
+                const r = await engine.search(c.query, { mode: c.mode, maxResults: c.limit });
+                out.push({
+                    totalMatches: r.totalMatches,
+                    candidateCount: r.candidateCount,
+                    hasOverflow: r.hasOverflow,
+                    results: r.results.map((x: any) => ({ index: x.index, score: x.score, text: x.text }))
+                });
+            }
+            return out;
+        }, { strings: parityStrings, cells: parityCells });
+        if ((testResults as any).success && Array.isArray((testResults as any).results)) {
+            parityCells.forEach((cell, ci) => {
+                const qT = normalizeText(cell.query, true).tokens;
+                const expected = searchCpuReference(recordTokens, qT, cell.mode, cell.limit, parityStrings);
+                const got = (gpuParityOut as any[])[ci];
+                let pass = got.totalMatches === expected.totalMatches && got.hasOverflow === false;
+                if (pass) {
+                    if (got.results.length !== expected.results.length) {
+                        pass = false;
+                    } else {
+                        for (let k = 0; k < got.results.length; k++) {
+                            const g = got.results[k];
+                            const e = expected.results[k];
+                            if (g.index !== e.index || g.score !== e.score || g.text !== e.text) {
+                                pass = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                (testResults as any).results.push({
+                    name: `M4 parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
+                    passed: pass,
+                    details: { totalMatches: got.totalMatches, expected: expected.totalMatches }
+                });
+            });
+        }
 
         console.log('\n--- Test Suite Summary ---');
         console.dir(testResults, { depth: null });
