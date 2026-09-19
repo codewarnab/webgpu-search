@@ -95,3 +95,172 @@ export interface AdapterInfo {
   hasTimestampQuery: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// v0.3 Document, Mutation, Highlighting, Worker, and Telemetry Types
+// ---------------------------------------------------------------------------
+
+export type DocumentId = string | number;
+export type DocumentRecord = Record<string, unknown>;
+
+export interface FieldDefinition<TDoc = Record<string, unknown>> {
+  /** Field identifier / key in TDoc */
+  name: (keyof TDoc & string) | string;
+  /** Custom property extractor; defaults to (doc) => doc[name] */
+  getter?: (doc: TDoc) => string | string[] | undefined | null;
+  /** Weight multiplier applied to raw match score (default: 1.0, must be > 0 and finite) */
+  weight?: number;
+}
+
+export type DocumentField<TDoc> = (keyof TDoc & string) | FieldDefinition<TDoc>;
+
+export interface DocumentIndexOptions<TDoc = Record<string, unknown>> extends IndexOptions {
+  /** Property containing unique document identifier (default: 'id') */
+  idField?: (keyof TDoc & string) | ((doc: TDoc) => DocumentId);
+  /** Configured search fields and weights */
+  fields: Array<DocumentField<TDoc>>;
+  /** Pre-allocated row capacity for dynamic mutations (default: records.length * 1.5) */
+  initialCapacity?: number;
+  /** Buffer expansion factor during headroom overflow (default: 1.5) */
+  growthFactor?: number;
+  /** Candidate pool capacity for multi-field search (default: 8192, up to 32768) */
+  candidateCapacity?: number;
+}
+
+export interface HighlightRange {
+  /** Start index in UTF-16 code units in the original JS string */
+  start: number;
+  /** End index (exclusive) in UTF-16 code units in the original JS string */
+  end: number;
+}
+
+export interface HighlightOptions {
+  /** Whether to compute highlight ranges (default: true) */
+  highlight?: boolean;
+  /** HTML/markdown tag for formatting (e.g. 'mark', 'b') */
+  tag?: string;
+  /** Fields to highlight ('matched-field' | 'all-matched' | 'all-fields' | string[]) */
+  fields?: 'matched-field' | 'all-matched' | 'all-fields' | string[];
+}
+
+export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
+  /** Restrict search to specific configured fields */
+  fields?: string[];
+  /** Whether to compute highlight ranges (default: true) */
+  highlight?: boolean;
+  /** HTML/formatting tag for snippets (e.g. 'mark', 'b') */
+  tag?: string;
+  /** Predicate filter applied post-match */
+  filter?: (doc: TDoc) => boolean;
+}
+
+export interface DocumentSearchResultItem<TDoc = any> {
+  id: DocumentId;
+  doc: TDoc;
+  score: number;
+  matchedField: string;
+  /** Highlight ranges per field in UTF-16 code units of the original string */
+  highlights?: Record<string, HighlightRange[]>;
+  /** Formatted HTML strings with injected tags (when options.tag is set) */
+  highlightedText?: Record<string, string>;
+  /** Auxiliary matches across other indexed fields */
+  matches?: Array<{ field: string; score: number; highlights?: HighlightRange[] }>;
+}
+
+export type FallbackReason =
+  | 'webgpu-unsupported'
+  | 'device-request-failed'
+  | 'memory-budget-exceeded'
+  | 'device-lost'
+  | 'below-threshold'
+  | 'prefer-cpu'
+  | 'query-too-long'
+  | 'cpu-algorithm-requested'
+  | 'gpu-execution-error';
+
+export interface DocumentSearchResponse<TDoc = any> {
+  query: string;
+  mode: SearchMode;
+  engine: EngineType;
+  totalMatches: number;
+  candidateCount: number;
+  hasOverflow: boolean;
+  results: DocumentSearchResultItem<TDoc>[];
+  timings: SearchTimings;
+  profileId: TextProfileId;
+  scoringVersion: typeof SCORING_VERSION;
+  cpuAlgorithm: CpuAlgorithm;
+  fallbackReason?: FallbackReason;
+}
+
+export interface AddOptions {
+  upsert?: boolean;
+}
+
+export interface MutationBatch<TDoc = any> {
+  add?: TDoc[];
+  update?: TDoc[];
+  remove?: DocumentId[];
+}
+
+export interface MutationResult {
+  added: number;
+  updated: number;
+  removed: number;
+  mutationEpoch: number;
+  compacted: boolean;
+  durationMs: number;
+}
+
+export interface DocumentIndexStats extends IndexStats {
+  docCount: number;
+  rowCount: number;
+  tombstoneCount: number;
+  tombstoneRatio: number;
+  buildTimeMs: number;
+  restoreTimeMs?: number;
+  lastMutationTimeMs?: number;
+  mutationEpoch: number;
+  memory: {
+    vramBytes: number;
+    ramBytes: number;
+    totalBytes: number;
+  };
+  fallbackReason?: FallbackReason;
+}
+
+export interface WorkerClientOptions {
+  /** Optional custom worker instance or factory */
+  worker?: Worker | (() => Worker);
+  /** Whether to strip document text across thread boundary (default: true) */
+  stringIsolated?: boolean;
+}
+
+export type WorkerMessageType =
+  | 'INIT'
+  | 'SEARCH'
+  | 'MUTATE'
+  | 'SERIALIZE'
+  | 'RESTORE'
+  | 'STATS'
+  | 'DESTROY'
+  | 'ABORT';
+
+export interface WorkerRequest {
+  id: number;
+  type: WorkerMessageType;
+  payload?: any;
+}
+
+export interface WorkerResponse {
+  id: number;
+  success: boolean;
+  result?: any;
+  error?: {
+    name: string;
+    message: string;
+    stack?: string;
+    details?: Record<string, unknown>;
+  };
+}
+
+

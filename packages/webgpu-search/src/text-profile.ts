@@ -11,6 +11,12 @@ export const SERIALIZED_MAGIC = 0x55324632 as const; // 'U2F2'
 export const QUERY_TOKENS_MAX = 128 as const;
 export const RESULT_LIMIT_MAX = 8192 as const;
 
+// v0.3 Document persistence constants (U2D3)
+export const DOC_FORMAT_VERSION = 3 as const;
+export const SERIALIZED_DOC_MAGIC = 0x55324433 as const; // 'U2D3'
+export const SERIALIZED_DOC_HEADER_BYTES = 48 as const;
+
+
 export type TextProfileId = 'unicode-default';
 
 /** Enum maps for the v0.2 binary header (U2F2). Unknown enum → IncompatibleIndexError. */
@@ -100,3 +106,22 @@ export class IncompatibleOptionError extends Error {
     this.reason = reason;
   }
 }
+
+export class DuplicateIdError extends Error {
+  id: string | number;
+  constructor(id: string | number, message?: string) {
+    super(message ?? `Duplicate document ID: ${String(id)}`);
+    this.name = 'DuplicateIdError';
+    this.id = id;
+  }
+}
+
+export class DocumentNotFoundError extends Error {
+  id: string | number;
+  constructor(id: string | number, message?: string) {
+    super(message ?? `Document not found: ${String(id)}`);
+    this.name = 'DocumentNotFoundError';
+    this.id = id;
+  }
+}
+
