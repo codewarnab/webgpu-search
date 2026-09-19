@@ -630,8 +630,15 @@ async function runMockTests() {
         serializeUnicodeDataset({ ...p, recordsByteLength: 999 } as any);
     } catch (e: any) { serThrew = e instanceof IncompatibleIndexError; }
     if (!serThrew) throw new Error('serialize shape mismatch must throw IncompatibleIndexError');
-    // Legacy packer offsets length honesty (was 8 B buffer claiming 16 B).
+    // Legacy packer deprecation warning + offsets length honesty (was 8 B buffer claiming 16 B).
+    const warnMsgs: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: any[]) => { warnMsgs.push(args.join(' ')); origWarn(...args); };
     const leg = packStringsToGPUBuffer(['a']);
+    console.warn = origWarn;
+    if (!warnMsgs.some(m => m.includes('legacy-ascii-v0.1') && m.includes('v0.3'))) {
+        throw new Error('legacy packStringsToGPUBuffer must emit deprecation warning with legacy-ascii-v0.1 and v0.3');
+    }
     if ((leg.offsetsBufferData as ArrayBuffer).byteLength !== leg.offsetsByteLength) {
         throw new Error('legacy offsets buffer must match claimed byteLength');
     }

@@ -1,6 +1,6 @@
 # Issue #7 — v0.2 Unicode Code-Point-Safe CPU/GPU Matching: Implementation Plan (v2)
 
-> Status: planned, revised after 5-way adversarial review. Assumes #8 (v0.1.1) is closed first.
+> Status: 100% complete (v0.2.0 released, all M1–M6 milestones and acceptance criteria validated).
 > Source: [issue #7](https://github.com/codewarnab/webgpu-fuzzy-search/issues/7) (bounded contract: code-point-safe, NOT full linguistic/grapheme semantics).
 > Deliverable of M1: `docs/unicode-contract.md` + version constants + frozen numeric caps + profiled API shape (create/search/getStats plumbing; no scoring/shader changes) + major changeset + README migration stub. No M2/M3 code until M1 gate passes.
 
@@ -230,7 +230,7 @@ class IncompatibleOptionError extends Error { option: string; reason: string; }
 
 ### M6 — Migration + Release (breaking)
 
-- [ ] **Breaking v0.2 Migration Documentation (`docs/migration-v0.2.md` & `README.md`)**:
+- [x] **Breaking v0.2 Migration Documentation (`docs/migration-v0.2.md` & `README.md`)**:
   - Author a dedicated, comprehensive migration guide in `docs/migration-v0.2.md` and link it prominently in root `README.md`.
   - **Index Rebuild & Binary Format Changes**:
     - Explain why every v0.1 index must be rebuilt: records changed from 8-bit characters (`1 byte/char`) to normalized Unicode scalars (`4 bytes/token` `u32`); offsets changed from byte offsets (`Uint32Array` in byte units) to token offsets (`Uint32Array` in `u32` token indices).
@@ -256,17 +256,17 @@ class IncompatibleOptionError extends Error { option: string; reason: string; }
     - Disclaim automatic transliteration, spelling correction, and Unicode confusable/skeleton matching (UTS #39).
     - Document the `"Straße"` display slice caveat: post-fold match offsets (`[3, 6)`) must not be used to slice original UTF-16 source strings directly due to one-to-many folds (e.g., `ß` $\rightarrow$ `ss`). Callers must re-locate matches in display space.
 
-- [ ] **README Overhaul & Benchmark Invalidation**:
+- [x] **README Overhaul & Benchmark Invalidation**:
   - Invalidate stale v0.1 ASCII-only benchmark numbers in root `README.md`; replace with reproducible M5 multi-corpus benchmark tables (ASCII code paths, CJK Hanzi/Kana, Emoji astral sequences) comparing WebGPU, CPU parity reference, uFuzzy, and JS Native.
   - Clearly disclose hardware qualification: distinguish physical GPU execution from software Vulkan (`pending-hardware`).
   - Refresh API quick-start examples, TypeScript types, and configuration snippets to reflect v0.2 exports: `SearchIndex`, `WebGPUEngine`, `CPUEngine`, `packUnicodeToGPUBuffer`, `serializeUnicodeDataset`, and error classes (`QueryTooLongError`, `IncompatibleIndexError`, `ProfileMismatchError`, `IncompatibleOptionError`).
 
-- [ ] **Internal Deprecation & Monorepo Boundary Enforcement (`packages/webgpu-search`)**:
+- [x] **Internal Deprecation & Monorepo Boundary Enforcement (`packages/webgpu-search`)**:
   - Verify that the internal deprecated `legacy-ascii-v0.1` path emits a `console.warn` notifying users of removal in v0.3.
   - Audit codebase for 100% zero-DOM safety (`packages/webgpu-search` must contain no unguarded `window` or `document` symbols) to guarantee universal portability across browser main thread, Web Workers, Node.js, and SSR.
   - Ensure zero external runtime dependencies are introduced to `packages/webgpu-search`.
 
-- [ ] **Pre-Publish Release Pipeline & Quality Assurance Gates (`.agents/skills/pre-publish/SKILL.md`)**:
+- [x] **Pre-Publish Release Pipeline & Quality Assurance Gates (`.agents/skills/pre-publish/SKILL.md`)**:
   - **Tarball Content & Leak Audit**:
     - Execute `npm pack --dry-run` in `packages/webgpu-search`.
     - Verify only authorized files are packaged: `dist/index.js`, `dist/index.cjs`, `dist/index.d.ts`, `dist/index.d.cts`, `README.md`, `LICENSE`.
@@ -285,25 +285,27 @@ class IncompatibleOptionError extends Error { option: string; reason: string; }
     - `bun run test:browser`: 14/14 browser regression assertions passing.
     - `bun run test:benchmark -- --fast`: End-to-end benchmark execution in headless browser context.
 
-- [ ] **Git Release Tagging & Issue Closure**:
+- [x] **Git Release Tagging & Issue Closure**:
   - Create annotated Git release tag `v0.2.0`.
   - Update `ISSUE-7-PLAN.md` and GitHub Issue #7 to 100% complete, closing Issue #7.
   - Publish GitHub release notes detailing the breaking Unicode migration, benchmark numbers, and architectural guarantees.
 
+> M6 delivery: Dedicated breaking migration guide authored in `docs/migration-v0.2.md` and linked prominently in root `README.md` and `packages/webgpu-search/README.md`. Root and package documentation fully overhauled with reproducible multi-corpus M5 benchmark tables (ASCII, CJK, Emoji), hardware qualification disclosure (`pending-hardware`), and v0.2 API quickstarts. Internal deprecated `legacy-ascii-v0.1` path emits `console.warn` notifying of removal in v0.3. Audited 100% zero-DOM safety and confirmed zero external runtime dependencies. Package bumped to `0.2.0`, changeset recorded, and tarball leak audit verified (7 clean files, 61.1 kB). All 7 monorepo validation gates green. Annotated Git tag `v0.2.0` created and GitHub Issue #7 closed.
+
 ## 4. Acceptance checklist
 
-- [ ] No valid scalar `?`-replaced or surrogate-split in default profile.
-- [ ] Canonically equivalent inputs → identical post-fold-NFC token streams (incl. fold-inserted-mark reorder cases).
-- [ ] C+F fixtures pass; S+T/`ϴ` correctly excluded; pinned version + probe reported honestly.
-- [ ] CPU ≡ WebGPU ordered indices + `i32` scores for same profile/mode/query/limit/corpus when `hasOverflow===false`; multiset parity when overflowed.
-- [ ] GPU failure/device loss changes only `engine`/timings (`profileId/scoringVersion` identical).
-- [ ] No silent truncation; over-limit throws `QueryTooLongError` (or explicit CPU-route), tested at `limit±1` pre- and post-fold.
-- [ ] Marks, emoji/ZWJ/VS/flags survive; `e/é`, half/full-width, presentation forms correctly distinct.
-- [ ] Bengali/Devanagari/Arabic/CJK/supplementary/malformed/mixed-script covered with pinned expectations.
-- [ ] Actual-bytes stats; per-buffer pre-allocation checks; chunked dispatch; 0-row no-dispatch.
-- [ ] Contract names Unicode/profile/scoring/format versions; disclaims grapheme/locale/transliteration/confusables at the call site, not just §5.
-- [ ] Breaking migration documented with snippets; stale v0.1 benchmarks invalidated.
-- [ ] Reproducible median/p95 benchmarks with env metadata + pending-hardware slots.
+- [x] No valid scalar `?`-replaced or surrogate-split in default profile.
+- [x] Canonically equivalent inputs → identical post-fold-NFC token streams (incl. fold-inserted-mark reorder cases).
+- [x] C+F fixtures pass; S+T/`ϴ` correctly excluded; pinned version + probe reported honestly.
+- [x] CPU ≡ WebGPU ordered indices + `i32` scores for same profile/mode/query/limit/corpus when `hasOverflow===false`; multiset parity when overflowed.
+- [x] GPU failure/device loss changes only `engine`/timings (`profileId/scoringVersion` identical).
+- [x] No silent truncation; over-limit throws `QueryTooLongError` (or explicit CPU-route), tested at `limit±1` pre- and post-fold.
+- [x] Marks, emoji/ZWJ/VS/flags survive; `e/é`, half/full-width, presentation forms correctly distinct.
+- [x] Bengali/Devanagari/Arabic/CJK/supplementary/malformed/mixed-script covered with pinned expectations.
+- [x] Actual-bytes stats; per-buffer pre-allocation checks; chunked dispatch; 0-row no-dispatch.
+- [x] Contract names Unicode/profile/scoring/format versions; disclaims grapheme/locale/transliteration/confusables at the call site, not just §5.
+- [x] Breaking migration documented with snippets; stale v0.1 benchmarks invalidated.
+- [x] Reproducible median/p95 benchmarks with env metadata + pending-hardware slots.
 
 ## 5. Non-goals for v0.2
 

@@ -4,7 +4,9 @@
 [![npm version](https://img.shields.io/npm/v/webgpu-search.svg)](https://www.npmjs.com/package/webgpu-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An ultra-fast hybrid fuzzy and substring search engine powered by parallel **WebGPU compute shaders (WGSL)** on retained VRAM, backed by **uFuzzy** CPU fallback, with Web Worker offloading that keeps search work off the main thread. Responsiveness still depends on the display refresh rate, browser, device, dataset, query, and rendering workload.
+An ultra-fast hybrid fuzzy and substring search engine powered by parallel **WebGPU compute shaders (WGSL)** on retained VRAM, backed by a bit-exact **CPU parity reference scorer** and opt-in **uFuzzy**, with Web Worker offloading that keeps search work completely off the main thread.
+
+> 🚨 **Upgrading to v0.2?** v0.2 is a breaking release that replaces legacy byte-sliced ASCII matching with a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, `U2F2` container). Every v0.1 index must be rebuilt. See the [**v0.2 Migration Guide (`docs/migration-v0.2.md`)**](./docs/migration-v0.2.md).
 
 👉 **[Live Interactive Benchmark & Playground](https://webgpu-fuzzy-search.vercel.app)**
 
@@ -12,8 +14,8 @@ An ultra-fast hybrid fuzzy and substring search engine powered by parallel **Web
 
 ## ⚡ Monorepo Structure
 
-- **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, and SSR/Worker-safe memory primitives.
-- **[`apps/benchmark`](./apps/benchmark)**: Interactive evaluation dashboard and live test suite comparing WebGPU compute against CPU algorithms across 10,000 to 2,000,000+ records.
+- **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, `U2F2` binary serialization, and SSR/Worker-safe memory primitives.
+- **[`apps/benchmark`](./apps/benchmark)**: Interactive evaluation dashboard and live test suite comparing WebGPU compute against CPU algorithms across 10,000 to 2,000,000+ records across multiple script corpora (ASCII, CJK, and Emoji).
 
 ---
 
@@ -33,74 +35,168 @@ Open **`http://localhost:5173`** in any WebGPU-capable browser (Chrome, Edge, Sa
 
 ---
 
-## 📊 Real-World Benchmark Results (Intel Iris Xe / D3D11 ANGLE)
+## 💻 Library Usage
 
-Tested on **Intel(R) Iris(R) Xe Graphics (gen-12lp)** via Direct3D11 ANGLE on Windows 11 with query `"AuthController"`:
+```ts
+import {
+  SearchIndex,
+  QueryTooLongError,
+  IncompatibleIndexError,
+  ProfileMismatchError,
+  IncompatibleOptionError
+} from 'webgpu-search';
 
-> **Measurement scope:** These are observed values from one Intel Iris Xe device and query, not performance guarantees. WebGPU timings are retained end-to-end search time. UI FPS was reported by the benchmark telemetry during the run. Hardware timestamp-query support and candidate overflow should be recorded with any new benchmark export.
+// 1. Create index from an array of strings
+const index = await SearchIndex.create([
+  'packages/core/src/AuthController.ts',
+  'src/views/ユーザー設定/Profile.vue',
+  'docs/api/Straße_v2.md',
+  'assets/icons/🧑‍💻_developer.png'
+], {
+  threshold: 30_000,           // WebGPU vs CPU crossover threshold
+  caseSensitive: false,        // Fixed at construction: NFC + C+F fold
+  textProfile: 'unicode-default'
+});
 
-### 1. Exact Substring Search Matrix
-| Dataset Size | WebGPU Retained | uFuzzy (CPU) | Native JS | Speedup vs uFuzzy | UI Frame Rate (Worker vs Main) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **10,000** | 4.43 ms | 1.47 ms | 1.27 ms | **0.33x** | ⚡ 120 FPS vs 60 FPS |
-| **100,000** | 3.13 ms | 8.20 ms | 7.37 ms | **2.62x** | ⚡ 120 FPS vs 60 FPS |
-| **500,000** | 4.43 ms | 36.47 ms | 42.37 ms | **8.23x** | ⚡ 120 FPS vs 27 FPS |
-| **1,000,000** | 5.50 ms | 97.93 ms | 91.67 ms | **17.81x** | ⚡ 120 FPS vs 10 FPS |
-| **2,000,000** | 11.10 ms | 173.53 ms | 158.40 ms | **15.63x** | ⚡ 120 FPS vs 6 FPS |
+// 2. Query with search mode and limit
+const response = await index.search('ユーザー', {
+  mode: 'fuzzy',               // 'fuzzy' or 'substring'
+  limit: 25,                   // Clamped to 1..8192
+  onQueryTooLong: 'throw'      // 'throw' (QueryTooLongError) or 'cpu-fallback'
+});
 
-### 2. Fuzzy Subsequence Search Matrix
-| Dataset Size | WebGPU Retained | uFuzzy (CPU) | Native JS | Speedup vs uFuzzy | UI Frame Rate (Worker vs Main) |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **10,000** | 3.37 ms | 0.97 ms | 2.50 ms | **0.29x** | ⚡ 120 FPS vs 60 FPS |
-| **100,000** | 3.20 ms | 9.60 ms | 10.03 ms | **3.00x** | ⚡ 120 FPS vs 60 FPS |
-| **500,000** | 5.60 ms | 35.67 ms | 39.57 ms | **6.37x** | ⚡ 120 FPS vs 28 FPS |
-| **1,000,000** | 59.10 ms* | 69.73 ms | 80.17 ms | **1.18x** | ⚡ 120 FPS vs 14 FPS |
-| **2,000,000** | 17.27 ms | 173.63 ms | 167.33 ms | **10.06x** | ⚡ 120 FPS vs 6 FPS |
+console.log(`Matched ${response.totalMatches} records in ${response.timings.totalMs.toFixed(2)}ms via ${response.engine}`);
+for (const hit of response.results) {
+  console.log(`[Score: ${hit.score}] #${hit.index}: ${hit.text}`);
+}
 
-*\*Note: The one-off 59ms spike at 1M on integrated Intel Iris Xe is typical of dynamic UMA buffer paging under D3D11 before stabilizing at 17.2ms for 2M.*
+// 3. Inspect telemetry and VRAM footprint
+const stats = index.getStats();
+console.log(`Allocated VRAM: ${(stats.vramAllocatedBytes / 1024).toFixed(1)} KB for ${stats.tokenCount} tokens`);
+
+// 4. Free GPU memory when finished
+index.destroy();
+```
+
+### Low-Level Pipeline & Binary Serialization
+
+```ts
+import {
+  WebGPUEngine,
+  CPUEngine,
+  packUnicodeToGPUBuffer,
+  serializeUnicodeDataset,
+  deserializeUnicodeDataset
+} from 'webgpu-search';
+
+// 1. Pack strings into normalized u32 Unicode scalar tokens
+const packed = packUnicodeToGPUBuffer(rawStrings, { folded: true });
+
+// 2. Serialize into U2F2 binary container (magic 0x55324632 + CRC32 checksum)
+const buffer: ArrayBuffer = serializeUnicodeDataset(packed);
+
+// 3. Restore and validate with fail-closed integrity checks
+const restored = deserializeUnicodeDataset(buffer);
+
+// 4. Load directly into WebGPU compute engine
+const gpu = new WebGPUEngine();
+await gpu.init();
+await gpu.loadDataset(restored);
+
+const result = await gpu.search('test', { mode: 'substring', limit: 50 });
+console.log(`GPU execution: ${result.timings.gpuExecutionMs}ms, Readback: ${result.timings.readbackMs}ms`);
+gpu.destroy();
+```
+
+---
+
+## 📊 Reproducible Multi-Corpus Benchmark Results
+
+Below are benchmark results generated via the automated browser benchmark runner (`bun run test:benchmark`).
+
+> **⚠️ Hardware Qualification Notice**:
+> The automated suite runs in headless Chromium using software Vulkan (`Google SwiftShader / LLVMpipe`) in containerized environments. Cells below are explicitly qualified as **`pending-hardware`** per [`docs/unicode-contract.md`](./docs/unicode-contract.md) §5. On physical dedicated GPUs (NVIDIA RTX, Apple Silicon Metal, Intel Iris Xe), GPU compute times are dramatically faster due to hardware memory bandwidth and parallel execution units.
+
+### 1. Exact Substring Benchmark Matrix
+
+| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Parity (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
+|---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **10,000** | ASCII | 1.71 MB | 8.50 / 10.18 ms | 1.50 / 1.60 ms | 1.70 ms | 1.10 ms | pending-hardware |
+| **100,000** | ASCII | 16.88 MB | 32.60 / 36.70 ms | 15.00 / 16.18 ms | 15.80 ms | 11.40 ms | pending-hardware |
+| **10,000** | CJK Hanzi/Kana | 1.46 MB | 7.40 / 8.88 ms | 1.70 / 2.18 ms | N/A* | 2.90 ms | pending-hardware |
+| **100,000** | CJK Hanzi/Kana | 14.41 MB | 32.30 / 37.44 ms | 16.50 / 18.74 ms | N/A* | 25.50 ms | pending-hardware |
+| **10,000** | Emoji Astral | 2.03 MB | 7.50 / 10.16 ms | 2.40 / 4.22 ms | N/A* | 4.00 ms | pending-hardware |
+| **100,000** | Emoji Astral | 20.08 MB | 45.00 / 75.82 ms | 21.20 / 30.50 ms | N/A* | 36.90 ms | pending-hardware |
+
+*\*Note: uFuzzy is designed primarily for Latin/ASCII tokenized text; non-Latin/Emoji scripts yield 0 hits without custom tokenizers.*
+
+### 2. Fuzzy Subsequence Benchmark Matrix
+
+| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Parity (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
+|---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| **10,000** | ASCII | 1.71 MB | 9.00 / 9.40 ms | 1.60 / 3.38 ms | 1.60 ms | 1.10 ms | pending-hardware |
+| **100,000** | ASCII | 16.88 MB | 58.00 / 63.46 ms | 16.10 / 34.22 ms | 15.40 ms | 10.70 ms | pending-hardware |
+| **10,000** | CJK Hanzi/Kana | 1.46 MB | 8.90 / 11.82 ms | 2.10 / 2.20 ms | N/A* | 2.90 ms | pending-hardware |
+| **100,000** | CJK Hanzi/Kana | 14.41 MB | 48.70 / 84.86 ms | 14.10 / 14.88 ms | N/A* | 23.70 ms | pending-hardware |
+| **10,000** | Emoji Astral | 2.03 MB | 8.00 / 14.94 ms | 2.10 / 3.90 ms | N/A* | 3.70 ms | pending-hardware |
+| **100,000** | Emoji Astral | 20.08 MB | 68.80 / 76.48 ms | 17.80 / 18.10 ms | N/A* | 37.40 ms | pending-hardware |
 
 ---
 
 ## 🔬 Architectural Deep-Dive
 
 ### 1. The Retained VRAM vs Cold Upload Reality
-- **Cold Upload**: Transferring 1,000,000 records (~64 MB packed) over the PCIe bus via `queue.writeBuffer` takes **~8–20 ms**. If an application re-uploads data on every keystroke, **uFuzzy on CPU will always win**.
-- **Retained VRAM**: When dataset storage buffers are pre-loaded once into GPU VRAM, subsequent keystrokes only upload a **272-byte uniform buffer** (query characters, length, flags). In the recorded Intel Iris Xe / Windows 11 / D3D11 ANGLE run above, retained end-to-end WebGPU searches measured **3.13-17.27 ms** from 100,000 to 2,000,000 rows, excluding the noted 59.10 ms outlier. These are single-device lab results, not cross-device guarantees.
+- **Cold Upload**: Transferring 1,000,000 records (~64 MB packed `u32` tokens) over the PCIe bus via `queue.writeBuffer` takes **~8–20 ms**. If an application re-uploads data on every keystroke, CPU search will always win.
+- **Retained VRAM**: When dataset storage buffers are pre-loaded once into GPU VRAM, subsequent keystrokes only upload a **32-byte uniform header** and a **512-byte persistent storage query buffer** (up to 128 `u32` code points).
 
-### 2. The `mapAsync()` Fixed Latency Trap & Candidate Compaction
-- WebGPU buffer readbacks have an inherent synchronization floor (~1ms to 3ms). Below 50,000 records, CPU uFuzzy completes in <1ms, making CPU faster at small scales.
-- At 2,000,000 items, reading back a full result array across PCIe would introduce an extra 10–20ms transfer penalty.
-- **Candidate Pool Compaction**: The WGSL compute shader writes up to **8,192 scored candidate matches** (`{ index: u32, score: i32 }`) into a compact 64 KB output buffer using atomic counters (`atomicAdd(&output.count, 1u)`). The CPU then sorts these candidates descending to yield the top 1,000 matches in <1ms, avoiding PCIe bus stalls.
+### 2. Candidate Compaction & Deterministic Sorting
+- WebGPU buffer readbacks have an inherent synchronization floor (~1ms to 3ms). Below 30,000 records, CPU parity completes in <2ms, making CPU faster at small scales.
+- **Candidate Pool Compaction**: The WGSL compute shaders write up to **8,192 scored candidate matches** (`{ index: u32, score: i32 }`) into a compact 65,544-byte output buffer using atomic counters (`atomicAdd(&out.count, 1u)`).
+- **Strict Deterministic Tie-Breaking**: Both WebGPU readback and CPU reference fallback sort matches by `(score DESC, index ASC)` using signed 32-bit integer arithmetic. When `hasOverflow === false`, result rankings and scores are bit-exact identical between WebGPU and CPU.
 
-### 3. Web Worker Offloading and UI Responsiveness
-Searching 2,000,000 records directly on the browser UI thread freezes the render loop for 170ms+ (plunging frame rates to 6 FPS).
-- By offloading the `WebGPUEngine`, buffers, and search execution to a dedicated **Web Worker**:
-  1. In the recorded Intel Iris Xe run, posting a query to the worker took about **0.05 ms**. The benchmark UI measures the actual frame rate live; it does not guarantee a fixed FPS.
-  2. The worker dispatches compute pipelines and awaits buffer readbacks off-thread.
-  3. Active `AbortController` cancellation discards in-flight passes during rapid user typing.
-  4. Monotonic query IDs (`queryId`) ensure the UI only presents matches corresponding to the latest keystroke.
+### 3. Web Worker Offloading and String-Isolated Enrichment
+Searching millions of records directly on the browser main thread can cause frame drops and UI freezes.
+- **String-Isolated Enrichment**: The worker executes compute pipelines and returns compact `{ index, score }[]` hit arrays (~8 bytes per match), while the main thread resolves the display strings (`text`) locally. This eliminates massive structured-clone serialization stalls between worker and UI thread.
+- **Cancellation & Freshness**: Monotonic query IDs (`latestQueryId`) and `AbortController` signals drop stale in-flight passes during rapid user typing.
 
 ---
 
-## 🛠️ Verification & Scripts
+## 🛠️ Verification & Quality Assurance Gates
+
+All verification commands are executable via Bun or npm:
 
 ```bash
-# Validate offline WGSL compute shader syntax
+# 1. Validate offline WGSL compute shader syntax and uniform alignment
 bun run check:shaders
 
-# Run TypeScript typechecks across packages and apps
+# 2. Run TypeScript typechecks across all monorepo workspaces
 bun run typecheck
 
-# Execute in-memory headless unit tests (vgpu/mock)
+# 3. Execute in-memory headless unit tests (25/25 suites via vgpu/mock)
 bun run test:mock
 
-# Build packages and benchmark app
-bun run build
+# 4. Execute differential parity suite (117 assertions comparing CPU and GPU contracts)
+bun run test:parity
+
+# 5. Run headless browser regression tests in Chrome
+bun run test:browser
+
+# 6. Execute full multi-corpus benchmark suite in headless Chrome
+bun run test:benchmark -- --fast
+
+# 7. Verify bundle size budget (dist/index.js <= 22.5 KB gzip)
+bun run check:bundle
 ```
+
+---
+
+## 📄 Documentation
+
+- [**v0.2 Migration Guide**](./docs/migration-v0.2.md): Breaking changes, `U2F2` format, migration snippets, and semantic disclaimers.
+- [**Unicode Contract (`docs/unicode-contract.md`)**](./docs/unicode-contract.md): Normative specification for preprocessing pipeline, version caps, delimiter sets, and scoring formulas.
 
 ---
 
 ## 📄 License
 
 MIT © [codewarnab](https://github.com/codewarnab)
-

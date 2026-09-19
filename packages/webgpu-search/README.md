@@ -101,23 +101,24 @@ self.onmessage = async (e: MessageEvent) => {
 For custom benchmarks, fine-grained buffer manipulation, or custom GPU pipelines:
 
 ```ts
-import { WebGPUEngine, CPUEngine, packStringsToGPUBuffer } from 'webgpu-search';
+import {
+  WebGPUEngine,
+  CPUEngine,
+  packUnicodeToGPUBuffer,
+  serializeUnicodeDataset,
+  deserializeUnicodeDataset
+} from 'webgpu-search';
 
-// 1. Pack arbitrary strings into GPU variable-length byte layout (dynamic, no fixed slots)
-const packed = packStringsToGPUBuffer(myStrings);
+// 1. Pack arbitrary strings into normalized u32 Unicode scalar tokens
+const packed = packUnicodeToGPUBuffer(myStrings, { folded: true });
 
-// 2. Direct WebGPU compute pipeline
+// 2. Direct WebGPU compute pipeline with packed or deserialized dataset
 const gpu = new WebGPUEngine();
 await gpu.init();
-await gpu.loadDataset({
-  size: myStrings.length,
-  strings: myStrings,
-  gpuBufferData: packed.bufferData,
-  byteLength: packed.byteLength
-});
+await gpu.loadDataset(packed);
 
 const gpuRes = await gpu.search('searchQuery', { mode: 'fuzzy', limit: 100 });
-console.log(gpuRes.timings); // Detailed breakdown: upload, submit, gpuExecution, readback
+console.log(gpuRes.timings); // Detailed breakdown: queryUpload, encodeSubmit, gpuExecution, readback
 gpu.destroy();
 ```
 
@@ -140,16 +141,16 @@ gpu.destroy();
 - `options.limit`: Maximum results to return. Defaults to `50` and is clamped to the inclusive range `1..8192` (`RESULT_LIMIT_MAX`) on both CPU and WebGPU.
 - `options.maxResults`: Backwards-compatible alias for `limit`; `limit` takes precedence when both are provided.
 - `options.caseSensitive`: Must match the index packed mode (default: `false`). Mismatch throws `ProfileMismatchError` — build one index per mode instead of varying per query (breaking v0.2 change).
-- `options.cpuAlgorithm`: `'parity'` (default, v0.2 contract) or `'ufuzzy'` (explicit opt-in CPU-only, skips GPU). M1 shape-only note: the parity scorer lands in M2; the M1 CPU path still serves legacy uFuzzy/native while echoing the request.
-- `options.onQueryTooLong`: `'throw'` (default, throws `QueryTooLongError` over `QUERY_TOKENS_MAX=128` tokens) or `'cpu-fallback'` (forces CPU for that query). M1 counts pre-fold code points; exact post-fold enforcement lands in M2.
+- `options.cpuAlgorithm`: `'parity'` (default, v0.2 contract) or `'ufuzzy'` (explicit opt-in CPU-only, skips GPU).
+- `options.onQueryTooLong`: `'throw'` (default, throws `QueryTooLongError` over `QUERY_TOKENS_MAX=128` tokens) or `'cpu-fallback'` (forces CPU for that query).
 - `options.signal`: `AbortSignal` to cancel stale query readback during fast typing.
 - Returns `SearchResponse` with `profileId`/`scoringVersion`/`cpuAlgorithm` echo.
 
 ### `index.getStats()`
-Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer, profileId, unicodeVersion, scoringVersion, tokenCount, folded, formatVersion }`. `tokenCount` is the M1 pre-fold code-point total (exact post-fold count lands in M2).
+Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer, profileId, unicodeVersion, scoringVersion, tokenCount, folded, formatVersion }`. `tokenCount` is the post-fold Unicode scalar count.
 
-### v0.2 migration stub (full guide in M6)
-Rebuild required: byte offsets → token offsets; `ß/ss` + canonical merges; astral/mark fixes; two-key tie-break; `mode:'fuzzy'` becomes parity-subsequence; `slotBytes` throws; per-query `caseSensitive` must match the index. Check `getStats().profileId/unicodeVersion/scoringVersion/formatVersion` after rebuild. See `docs/unicode-contract.md`.
+### 🚨 Breaking v0.2 Migration Guide
+Every v0.1 index must be rebuilt: records changed from 8-bit bytes to `u32` scalar tokens; offsets changed from byte offsets to token offsets; binary format is now `U2F2` (magic `0x55324632`). See the full [**v0.2 Migration Guide (`docs/migration-v0.2.md`)**](../../docs/migration-v0.2.md).
 
 ### `index.destroy()`
 Releases GPU buffers and releases reference from the shared context manager.

@@ -74,11 +74,19 @@ export interface MemoryBudgetCheck {
   reason?: string;
 }
 
+let warnedLegacySanitizer = false;
+
 /**
  * Legacy v0.1 sanitizer for the GPU byte path (NOT parity).
  * @deprecated Parity uses `normalizeText()` folded tokens. Kept for M6 migration only. Removal in v0.3.
  */
 export function sanitizeStringForSlot(str: string, maxChars?: number): string {
+  if (!warnedLegacySanitizer) {
+    warnedLegacySanitizer = true;
+    console.warn(
+      '[webgpu-search] sanitizeStringForSlot (legacy-ascii-v0.1) is deprecated and will be removed in v0.3. Use normalizeText instead.'
+    );
+  }
   if (!str) return '';
   const normalized = str.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
   const asciiOnly = normalized.replace(/[^\x20-\x7E]/g, '?');
@@ -92,6 +100,10 @@ export function packStringsToGPUBuffer(
   strings: string[],
   _legacySlotBytes?: number
 ): PackedGPUBuffer {
+  console.warn(
+    '[webgpu-search] packStringsToGPUBuffer (legacy-ascii-v0.1) is deprecated and will be removed in v0.3. Use packUnicodeToGPUBuffer instead.'
+  );
+  warnedLegacySanitizer = true;
   const count = strings.length;
   const offsets = new Uint32Array(count + 1);
   offsets[0] = 0;
