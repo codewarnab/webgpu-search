@@ -77,8 +77,13 @@ export {
   scoreFuzzyTokens,
   scoreSubstringTokens,
   searchCpuReference,
+  searchMultiFieldCpuReference,
   WORD_BOUNDARY_PREV,
   type CpuReferenceOutput,
+  type MultiFieldHit,
+  type MultiFieldMatch,
+  type MultiFieldCpuReferenceOutput,
+  type FieldScoreDefinition,
 } from './cpu-reference';
 export {
   FOLD_EXPANSIONS,

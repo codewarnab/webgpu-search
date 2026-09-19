@@ -285,11 +285,42 @@ export class WebGPUEngine {
     return true;
   }
 
-  private allocateOutputBuffers(candidateCapacity: number = 8192) {
+  /**
+   * Current candidate capacity allocated for the output buffer.
+   */
+  get currentCandidateCapacity(): number {
+    return this.candidateCapacity;
+  }
+
+  /**
+   * Ensure candidate capacity is scaled to at least the requested capacity
+   * (clamped between 8,192 and 32,768).
+   */
+  ensureCandidateCapacity(capacity: number): void {
+    const safeCap = typeof capacity === 'number' && Number.isFinite(capacity) && capacity > 0
+      ? Math.floor(capacity)
+      : 8192;
+    const clamped = Math.min(32768, Math.max(8192, safeCap));
+    if (clamped !== this.candidateCapacity || !this.outputBuffer) {
+      this.candidateCapacity = clamped;
+      if (this.device) {
+        this.allocateOutputBuffers(clamped);
+      }
+    }
+  }
+
+  allocateOutputBuffers(candidateCapacity: number = 8192): void {
     if (!this.device) return;
-    if (this.outputBuffer && candidateCapacity <= this.candidateCapacity) return;
-    this.candidateCapacity = Math.max(candidateCapacity, 8192);
+    const safeCap = typeof candidateCapacity === 'number' && Number.isFinite(candidateCapacity) && candidateCapacity > 0
+      ? Math.floor(candidateCapacity)
+      : 8192;
+    const clampedCap = Math.min(32768, Math.max(safeCap, 8192));
+    if (this.outputBuffer && clampedCap <= this.candidateCapacity && this.outputByteLength >= 8 + clampedCap * 8) return;
+    this.candidateCapacity = clampedCap;
     this.outputByteLength = 8 + this.candidateCapacity * 8;
+
+    // Advance generation to discard any in-flight reads against old staging buffers
+    this.generation++;
 
     // Unmap-before-destroy (symmetric with destroy()): destroying a mapped
     // buffer throws / leaves torn state on some implementations.

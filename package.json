@@ -13,6 +13,7 @@
     "test": "turbo test",
     "test:mock": "bun scripts/test-vgpu-mock.ts",
     "test:m1": "bun scripts/test-m1-contracts.ts",
+    "test:m2": "bun scripts/test-m2-records.ts",
     "test:parity": "bun scripts/test-m4-parity.ts",
     "test:preprocess": "bun scripts/test-m2-preprocess.ts",
     "test:preprocess:tr": "LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun scripts/test-m2-preprocess.ts",

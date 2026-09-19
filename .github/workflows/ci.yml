@@ -50,6 +50,12 @@ jobs:
       - name: Run Headless WebGPU Mock Tests (vgpu/mock)
         run: bun run test:mock
 
+      - name: Run Milestone 1 Public Contract Tests
+        run: bun run test:m1
+
+      - name: Run Milestone 2 Document Record Engine Tests
+        run: bun run test:m2
+
       - name: Run M4 Parity Harness (differential + fallback + worker)
         timeout-minutes: 10
         # Single-shard in CI; M4_SHARD_* sharding is local-only (validated
