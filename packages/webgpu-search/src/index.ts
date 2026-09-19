@@ -93,3 +93,15 @@ export {
   FOLD_UNICODE_VERSION,
   foldCodePoint,
 } from './fold-table';
+
+// v0.3 Unicode-safe highlighting engine (M3)
+export {
+  alignHighlights,
+  normalizeWithSourceMap,
+  guardClusterBoundary,
+  mergeHighlightRanges,
+  renderHighlightedText,
+  type SourceMappedText,
+  type AlignHighlightOptions,
+} from './highlight';
+

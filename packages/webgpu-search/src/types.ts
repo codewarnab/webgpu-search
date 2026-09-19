@@ -150,6 +150,10 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   highlight?: boolean;
   /** HTML/formatting tag for snippets (e.g. 'mark', 'b') */
   tag?: string;
+  /** Optional highlight configuration options */
+  highlightOptions?: HighlightOptions;
+  /** Fields to highlight ('matched-field' | 'all-matched' | 'all-fields' | string[]) */
+  highlightFields?: 'matched-field' | 'all-matched' | 'all-fields' | string[];
   /** Predicate filter applied post-match */
   filter?: (doc: TDoc) => boolean;
 }
