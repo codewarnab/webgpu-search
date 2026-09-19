@@ -10,7 +10,9 @@ export default defineConfig({
   clean: true,
   sourcemap: true,
   minify: false,
+  splitting: false,
   treeshake: true,
+
   loader: {
     '.wgsl': 'text'
   },

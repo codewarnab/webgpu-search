@@ -16,7 +16,9 @@
     "test:m2": "bun scripts/test-m2-records.ts",
     "test:m3": "bun scripts/test-m3-highlight.ts",
     "test:m4": "bun scripts/test-m4-mutations.ts",
+    "test:m5": "bun scripts/test-m5-worker.ts",
     "test:parity": "bun scripts/test-m4-parity.ts",
+
     "test:preprocess": "bun scripts/test-m2-preprocess.ts",
     "test:preprocess:tr": "LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun scripts/test-m2-preprocess.ts",
     "lint:parity": "bun scripts/check-parity-lint.ts",

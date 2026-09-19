@@ -126,16 +126,17 @@ async function runM1Tests() {
   const workerClient = new SearchWorkerClient<TestDoc>(workerClientOptions);
   if (workerClient.options?.stringIsolated !== true) throw new Error('stringIsolated option not preserved');
 
-  let workerInitThrew = false;
-  try {
-    await workerClient.init(indexOptions);
-  } catch (err: any) {
-    workerInitThrew = err.message.includes('M5');
+  await workerClient.init(indexOptions);
+  const workerAddRes = await workerClient.add({ id: '1', title: 'Worker Document', content: 'Testing worker client' });
+  if (workerAddRes.added !== 1) throw new Error('SearchWorkerClient.add should return valid MutationResult');
+  const workerSearchRes = await workerClient.search('Worker');
+  if (workerSearchRes.totalMatches !== 1 || workerSearchRes.results[0]?.id !== '1') {
+    throw new Error('SearchWorkerClient.search should return matching result');
   }
-  if (!workerInitThrew) throw new Error('SearchWorkerClient.init should throw descriptive M5 scheduled error');
 
   await workerClient.destroy();
   console.log('   ✅ SearchWorkerClient public methods and options verified');
+
 
   // 5. Worker SSR guard
   console.log('5. Verifying Worker SSR safety...');

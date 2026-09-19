@@ -62,6 +62,10 @@ jobs:
       - name: Run Milestone 4 Dynamic Mutations & Memory Management Tests
         run: bun run test:m4
 
+      - name: Run Milestone 5 Worker Client & Protocol Tests
+        run: bun run test:m5
+
+
       - name: Run M4 Parity Harness (differential + fallback + worker)
         timeout-minutes: 10
         # Single-shard in CI; M4_SHARD_* sharding is local-only (validated

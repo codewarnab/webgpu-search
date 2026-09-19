@@ -108,3 +108,20 @@ export {
   type RenderHighlightOptions,
 } from './highlight';
 
+// v0.3 First-party worker client & dedicated worker (M5)
+export {
+  startSearchWorker,
+  isDedicatedWorker,
+} from './worker/search-worker';
+export {
+  serializeError,
+  deserializeError,
+  type SerializedWorkerError,
+  type WorkerInitPayload,
+  type WorkerSearchPayload,
+  type WorkerMutatePayload,
+  type WorkerRestorePayload,
+  type WorkerAbortPayload,
+} from './worker/protocol';
+
+
