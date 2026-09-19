@@ -186,3 +186,151 @@ export function searchCpuReference(
   const durationMs: number = nowMs() - t0;
   return { totalMatches, results, durationMs };
 }
+
+export interface MultiFieldMatch {
+  field: string;
+  score: number;
+}
+
+export interface MultiFieldHit {
+  docIndex: number;
+  score: number;
+  matchedField: string;
+  matches?: MultiFieldMatch[];
+}
+
+export interface MultiFieldCpuReferenceOutput {
+  totalMatches: number;
+  candidateCount: number;
+  hasOverflow: boolean;
+  results: MultiFieldHit[];
+  durationMs: number;
+}
+
+export interface FieldScoreDefinition {
+  name: string;
+  weight: number;
+}
+
+/**
+ * Multi-field parity reference scorer.
+ * Evaluates records across multiple fields, applies fixed-point integer weighting,
+ * aggregates matching fields per document, and returns ranked document hits.
+ */
+export function searchMultiFieldCpuReference(
+  docCount: number,
+  fields: readonly FieldScoreDefinition[],
+  rowTokens: readonly Uint32Array[],
+  rowToDocIndex: readonly number[],
+  rowToFieldIndex: readonly number[],
+  queryTokens: Uint32Array,
+  mode: 'fuzzy' | 'substring',
+  limit: number,
+  candidateCapacity: number = 8192,
+  allowedFieldIndices?: ReadonlySet<number>,
+  tombstonedRows?: ReadonlySet<number>,
+  filterDoc?: (docIndex: number) => boolean
+): MultiFieldCpuReferenceOutput {
+  const t0: number = nowMs();
+  if (queryTokens.length === 0 || docCount === 0 || rowTokens.length === 0) {
+    return {
+      totalMatches: 0,
+      candidateCount: 0,
+      hasOverflow: false,
+      results: [],
+      durationMs: nowMs() - t0
+    };
+  }
+
+  // Aggregate field matches per document:
+  // docIndex -> { bestScore, bestFieldIdx, fieldScores: Map<fieldIdx, weightedScore> }
+  const docMatches = new Map<number, {
+    bestScore: number;
+    bestFieldIdx: number;
+    fieldScores: Map<number, number>;
+  }>();
+
+  for (let r = 0; r < rowTokens.length; r++) {
+    if (tombstonedRows && tombstonedRows.has(r)) continue;
+    const fIdx = rowToFieldIndex[r];
+    if (allowedFieldIndices && !allowedFieldIndices.has(fIdx)) continue;
+    const dIdx = rowToDocIndex[r];
+    if (filterDoc && !filterDoc(dIdx)) continue;
+
+    const rec = rowTokens[r];
+    const raw = mode === 'substring'
+      ? scoreSubstringTokens(rec, queryTokens)
+      : scoreFuzzyTokens(rec, queryTokens);
+
+    if (raw.matched) {
+      const fDef = fields[fIdx];
+      const weightedScore = Math.round(raw.score * fDef.weight);
+      let entry = docMatches.get(dIdx);
+      if (!entry) {
+        entry = {
+          bestScore: weightedScore,
+          bestFieldIdx: fIdx,
+          fieldScores: new Map<number, number>()
+        };
+        entry.fieldScores.set(fIdx, weightedScore);
+        docMatches.set(dIdx, entry);
+      } else {
+        entry.fieldScores.set(fIdx, weightedScore);
+        if (
+          weightedScore > entry.bestScore ||
+          (weightedScore === entry.bestScore && fIdx < entry.bestFieldIdx)
+        ) {
+          entry.bestScore = weightedScore;
+          entry.bestFieldIdx = fIdx;
+        }
+      }
+    }
+  }
+
+  const hits: MultiFieldHit[] = [];
+  for (const [dIdx, entry] of docMatches.entries()) {
+    const primaryField = fields[entry.bestFieldIdx];
+    const auxMatches: MultiFieldMatch[] = [];
+    for (const [fIdx, score] of entry.fieldScores.entries()) {
+      if (fIdx !== entry.bestFieldIdx) {
+        auxMatches.push({ field: fields[fIdx].name, score });
+      }
+    }
+    if (auxMatches.length > 1) {
+      auxMatches.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.field.localeCompare(b.field);
+      });
+    }
+
+    hits.push({
+      docIndex: dIdx,
+      score: entry.bestScore,
+      matchedField: primaryField.name,
+      matches: auxMatches.length > 0 ? auxMatches : undefined
+    });
+  }
+
+  const totalMatches = hits.length;
+  // Two-key sort: score descending, docIndex ascending
+  hits.sort((a, b) => {
+    if (b.score !== a.score) return b.score > a.score ? 1 : -1;
+    if (a.docIndex !== b.docIndex) return a.docIndex > b.docIndex ? 1 : -1;
+    return 0;
+  });
+
+  const capped = clampLimit(limit);
+  const results = hits.length > capped ? hits.slice(0, capped) : hits;
+  const durationMs = nowMs() - t0;
+  const candidateCount = Math.min(totalMatches, candidateCapacity);
+  const hasOverflow = totalMatches > candidateCapacity;
+
+  return {
+    totalMatches,
+    candidateCount,
+    hasOverflow,
+    results,
+    durationMs
+  };
+}
+

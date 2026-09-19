@@ -1,5 +1,6 @@
 import type {
   CpuAlgorithm,
+  DOC_FORMAT_VERSION,
   FORMAT_VERSION,
   OnQueryTooLong,
   SCORING_VERSION,
@@ -211,7 +212,8 @@ export interface MutationResult {
   durationMs: number;
 }
 
-export interface DocumentIndexStats extends IndexStats {
+export interface DocumentIndexStats extends Omit<IndexStats, 'formatVersion'> {
+  formatVersion: typeof DOC_FORMAT_VERSION | typeof FORMAT_VERSION;
   docCount: number;
   rowCount: number;
   tombstoneCount: number;

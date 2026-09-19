@@ -103,14 +103,11 @@ async function runM1Tests() {
   const factoryIndex = await DocumentIndex.create<TestDoc>([], indexOptions);
   if (!(factoryIndex instanceof DocumentIndex)) throw new Error('DocumentIndex.create must return DocumentIndex');
 
-  // Verify scheduled method stubs throw expected descriptive errors
-  let searchThrew = false;
-  try {
-    await docIndex.search('test');
-  } catch (err: any) {
-    searchThrew = err.message.includes('M2');
+  // Verify search returns valid response (implemented in M2)
+  const searchRes = await docIndex.search('test');
+  if (searchRes.totalMatches !== 0 || !Array.isArray(searchRes.results)) {
+    throw new Error('DocumentIndex.search should return valid empty response on empty index');
   }
-  if (!searchThrew) throw new Error('DocumentIndex.search should throw descriptive M2 scheduled error');
 
   let addThrew = false;
   try {

@@ -285,9 +285,30 @@ export class WebGPUEngine {
     return true;
   }
 
-  private allocateOutputBuffers(candidateCapacity: number = 8192) {
+  /**
+   * Current candidate capacity allocated for the output buffer.
+   */
+  get currentCandidateCapacity(): number {
+    return this.candidateCapacity;
+  }
+
+  /**
+   * Ensure candidate capacity is scaled to at least the requested capacity
+   * (clamped between 8,192 and 32,768).
+   */
+  ensureCandidateCapacity(capacity: number): void {
+    const clamped = Math.min(32768, Math.max(8192, Math.floor(capacity)));
+    if (clamped !== this.candidateCapacity || !this.outputBuffer) {
+      this.candidateCapacity = clamped;
+      if (this.device) {
+        this.allocateOutputBuffers(clamped);
+      }
+    }
+  }
+
+  allocateOutputBuffers(candidateCapacity: number = 8192): void {
     if (!this.device) return;
-    if (this.outputBuffer && candidateCapacity <= this.candidateCapacity) return;
+    if (this.outputBuffer && candidateCapacity === this.candidateCapacity && this.outputByteLength === 8 + candidateCapacity * 8) return;
     this.candidateCapacity = Math.max(candidateCapacity, 8192);
     this.outputByteLength = 8 + this.candidateCapacity * 8;
 
