@@ -19,6 +19,8 @@
     "check:bundle": "bun scripts/check-m2-bundle.ts",
     "check:fold": "bun scripts/generate-fold-table.ts --check",
     "test:browser": "bun scripts/test-regression.ts",
+    "test:benchmark": "bun scripts/run-all-benchmarks.ts",
+    "test:benchmark:fuzzy": "bun scripts/run-fuzzy-benchmark.ts",
     "check:shaders": "turbo check:shaders",
     "typecheck": "turbo typecheck",
     "lint": "turbo lint",

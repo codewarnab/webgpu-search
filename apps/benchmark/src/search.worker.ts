@@ -1,15 +1,19 @@
 import {
   WebGPUEngine,
   CPUEngine,
+  searchCpuReference,
+  normalizeText,
   packUnicodeToGPUBuffer,
   deserializeUnicodeDataset,
   type SearchResult,
-  type CPUSearchResult
+  type CPUSearchResult,
+  type PackedUnicodeBufferV2
 } from 'webgpu-search';
 
 let gpuEngine: WebGPUEngine | null = null;
 let cpuEngine: CPUEngine | null = null;
 let datasetStrings: string[] = [];
+let datasetRecordTokens: Uint32Array[] = [];
 let datasetSize = 0;
 // Monotonic dataset generation: bumped only on successful LOAD_DATASET
 // commit. SEARCH_RESULTS echoes it so the main thread can drop hits that
@@ -89,6 +93,8 @@ self.onmessage = async (e: MessageEvent) => {
   if (type === 'LOAD_DATASET') {
     const strings: string[] | undefined = payload?.strings;
     const serialized: ArrayBuffer | undefined = payload?.serialized;
+    const sentTimestamp: number | undefined = typeof payload?.sentTimestamp === 'number' ? payload.sentTimestamp : undefined;
+    const transferLatencyMs = sentTimestamp !== undefined ? performance.now() - sentTimestamp : undefined;
     // Adopt the main-thread epoch when provided (stale LOADs with an older
     // epoch are dropped to avoid out-of-order commit going backwards).
     // Harness LOADs omit it, in which case the worker bumps its own counter.
@@ -172,6 +178,10 @@ self.onmessage = async (e: MessageEvent) => {
         const packMs = performance.now() - t0;
         const nextStrings = Array.isArray(strings) ? strings : [];
         const nextSize = packed.rowCount;
+        const nextTokens = new Array<Uint32Array>(packed.rowCount);
+        for (let i = 0; i < packed.rowCount; i++) {
+          nextTokens[i] = packed.tokens.subarray(packed.offsets[i]!, packed.offsets[i + 1]!);
+        }
         let uploadTimeMs = 0;
         if (gpuEngine?.isReady) {
           try {
@@ -205,6 +215,7 @@ self.onmessage = async (e: MessageEvent) => {
         }
         // Commit only after successful deserialize + GPU load.
         datasetStrings = nextStrings;
+        datasetRecordTokens = nextTokens;
         datasetSize = nextSize;
         datasetGeneration =
           incomingGeneration !== undefined ? incomingGeneration : datasetGeneration + 1;
@@ -218,6 +229,7 @@ self.onmessage = async (e: MessageEvent) => {
             stringsChars: countChars(datasetStrings),
             tokenCount: packed.tokenCount,
             folded: packed.folded,
+            transferLatencyMs: transferLatencyMs !== undefined ? Number(transferLatencyMs.toFixed(2)) : undefined,
             datasetGeneration
           }
         });
@@ -262,7 +274,7 @@ self.onmessage = async (e: MessageEvent) => {
     // Always pack for metrics, even when the GPU is not ready (CPU-only
     // worker still reports tokenCount instead of a misleading 0).
     const t0 = performance.now();
-    let packedForMetrics: { tokenCount: number } | null = null;
+    let packedForMetrics: PackedUnicodeBufferV2 | null = null;
     try {
       packedForMetrics = packUnicodeToGPUBuffer(list, { folded: true });
     } catch (packErr) {
@@ -287,7 +299,7 @@ self.onmessage = async (e: MessageEvent) => {
         // SEARCH returns compact hits, main enriches). Legacy path loads
         // `strings` into the engine for full-text returns.
         const loadable = STRING_ISOLATED_ENRICHMENT
-          ? packUnicodeToGPUBuffer(list, { folded: true })
+          ? packedForMetrics
           : { size: list.length, strings: list };
         const res = await gpuEngine.loadDataset(loadable);
         uploadTimeMs = res.uploadTimeMs;
@@ -314,6 +326,13 @@ self.onmessage = async (e: MessageEvent) => {
     // Commit only after successful pack + GPU load.
     datasetStrings = list;
     datasetSize = list.length;
+    if (packedForMetrics) {
+      const nextTokens = new Array<Uint32Array>(packedForMetrics.rowCount);
+      for (let i = 0; i < packedForMetrics.rowCount; i++) {
+        nextTokens[i] = packedForMetrics.tokens.subarray(packedForMetrics.offsets[i]!, packedForMetrics.offsets[i + 1]!);
+      }
+      datasetRecordTokens = nextTokens;
+    }
     datasetGeneration =
       incomingGeneration !== undefined ? incomingGeneration : datasetGeneration + 1;
 
@@ -326,6 +345,7 @@ self.onmessage = async (e: MessageEvent) => {
         stringsChars: countChars(list),
         tokenCount,
         stringIsolated: STRING_ISOLATED_ENRICHMENT,
+        transferLatencyMs: transferLatencyMs !== undefined ? Number(transferLatencyMs.toFixed(2)) : undefined,
         datasetGeneration
       }
     });
@@ -333,7 +353,8 @@ self.onmessage = async (e: MessageEvent) => {
   }
 
   if (type === 'SEARCH') {
-    const { queryId, query, mode, limit = 1000, runCpuComparison = false } = payload ?? {};
+    const { queryId, query, mode, limit = 1000, runCpuComparison = false, stringIsolated } = payload ?? {};
+    const isStringIsolated = typeof stringIsolated === 'boolean' ? stringIsolated : STRING_ISOLATED_ENRICHMENT;
     const requestGeneration: number | undefined =
       typeof payload?.datasetGeneration === 'number' ? payload.datasetGeneration : undefined;
 
@@ -369,6 +390,7 @@ self.onmessage = async (e: MessageEvent) => {
     let gpuMeta: WorkerGpuMeta | null = null;
     let ufuzzyResult: CPUSearchResult | null = null;
     let nativeResult: CPUSearchResult | null = null;
+    let workerSerializationMs = 0;
 
     try {
       // Validate mode upfront (independent of engine readiness) so invalid
@@ -384,7 +406,8 @@ self.onmessage = async (e: MessageEvent) => {
           limit,
           signal
         });
-        if (STRING_ISOLATED_ENRICHMENT) {
+        const tSer0 = performance.now();
+        if (isStringIsolated) {
           // Strip `text` at the boundary: the main thread owns display
           // strings and re-attaches them by index (same contract as
           // SearchIndex enrichment over token-only engine results).
@@ -408,15 +431,29 @@ self.onmessage = async (e: MessageEvent) => {
         } else {
           gpuResult = full;
         }
+        workerSerializationMs = performance.now() - tSer0;
       }
 
       if (signal.aborted || queryId < latestQueryId) {
         return;
       }
 
-      if (runCpuComparison && cpuEngine && query && datasetStrings.length > 0) {
-        ufuzzyResult = cpuEngine.searchUFuzzy(datasetStrings, query, limit);
-        nativeResult = cpuEngine.searchNative(datasetStrings, query, limit);
+      let parityResult: { durationMs: number; totalMatches: number; results: any[] } | null = null;
+      if (runCpuComparison && query) {
+        if (datasetRecordTokens.length > 0) {
+          const norm = normalizeText(query, true);
+          parityResult = searchCpuReference(
+            datasetRecordTokens,
+            norm.tokens,
+            mode,
+            limit,
+            datasetStrings
+          );
+        }
+        if (cpuEngine && datasetStrings.length > 0) {
+          ufuzzyResult = cpuEngine.searchUFuzzy(datasetStrings, query, limit);
+          nativeResult = cpuEngine.searchNative(datasetStrings, query, limit);
+        }
       }
 
       if (signal.aborted || queryId < latestQueryId) {
@@ -433,8 +470,12 @@ self.onmessage = async (e: MessageEvent) => {
           gpuResult,
           gpuCompact,
           gpuMeta,
+          parityResult,
           ufuzzyResult,
-          nativeResult
+          nativeResult,
+          workerPostTimestamp: performance.now(),
+          workerSerializationMs: Number(workerSerializationMs.toFixed(2)),
+          stringIsolated: isStringIsolated
         }
       });
     } catch (err: unknown) {

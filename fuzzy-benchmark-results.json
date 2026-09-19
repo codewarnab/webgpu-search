@@ -1,152 +1,250 @@
-[
-  {
-    "datasetSize": 10000,
-    "query": "AuthController",
-    "mode": "fuzzy",
-    "gpuRetained": {
-      "totalMs": 3.23,
-      "queryUploadMs": 0,
-      "gpuDispatchMs": 0.1,
-      "readbackMs": 3.13
+{
+  "substring": [],
+  "fuzzy": [
+    {
+      "datasetSize": 10000,
+      "corpusType": "ascii",
+      "query": "AuthController",
+      "mode": "fuzzy",
+      "utf16Units": 420820,
+      "codePoints": 420820,
+      "vramAllocation": {
+        "recordsBytes": 1683280,
+        "offsetsBytes": 40004,
+        "queryBytes": 512,
+        "outputBytes": 65544,
+        "totalBytes": 1789340
+      },
+      "packing": {
+        "normalizeMs": 67.3,
+        "packMs": 39.3,
+        "uploadMs": 97.3,
+        "totalPipelineMs": 203.9
+      },
+      "gpuRetained": {
+        "medianMs": 21.1,
+        "p95Ms": 31.74,
+        "totalMs": 21.1,
+        "queryUploadMs": 0,
+        "encodeSubmitMs": 0.1,
+        "gpuExecutionMs": 16.29,
+        "readbackMs": 20.9,
+        "gpuDispatchMs": 0.1,
+        "samples": [
+          17.6,
+          19.5,
+          21.1,
+          23.1,
+          33.9
+        ]
+      },
+      "gpuCold": {
+        "uploadMs": 97.3,
+        "totalMs": 123.4
+      },
+      "cpuParity": {
+        "medianMs": 5.6,
+        "p95Ms": 6.6,
+        "minMs": 4.2,
+        "maxMs": 6.8,
+        "meanMs": 5.44,
+        "samples": [
+          4.2,
+          4.8,
+          5.6,
+          5.8,
+          6.8
+        ]
+      },
+      "ufuzzy": {
+        "medianMs": 5.3,
+        "p95Ms": 10.5,
+        "minMs": 1.6,
+        "maxMs": 11.1,
+        "meanMs": 6.1,
+        "samples": [
+          1.6,
+          4.4,
+          5.3,
+          8.1,
+          11.1
+        ]
+      },
+      "jsNative": {
+        "medianMs": 3.9,
+        "p95Ms": 5.58,
+        "minMs": 1.3,
+        "maxMs": 5.9,
+        "meanMs": 3.34,
+        "samples": [
+          1.3,
+          1.3,
+          3.9,
+          4.3,
+          5.9
+        ]
+      },
+      "cpuParityMs": 5.6,
+      "ufuzzyMs": 5.3,
+      "jsNativeMs": 3.9,
+      "retainedVsUfuzzySpeedup": 0.25,
+      "retainedVsParitySpeedup": 0.27,
+      "retainedVsNativeSpeedup": 0.18,
+      "coldVsUfuzzySpeedup": 0.04,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": false,
+        "gpuRetainedBeatsParity": false,
+        "gpuRetainedBeatsNative": false,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 37,
+        "cpuParity": 37,
+        "ufuzzy": 0,
+        "native": 0
+      },
+      "hasOverflow": false,
+      "uiTelemetry": {
+        "workerFps": 120,
+        "mainThreadFps": 31,
+        "mainThreadJankMs": 83.4,
+        "droppedFrames": 11,
+        "jankSpikes": 7,
+        "totalFrameCount": 11
+      },
+      "hardwareQualified": false,
+      "qualificationStatus": "pending-hardware"
     },
-    "gpuCold": {
-      "uploadMs": 2.1,
-      "totalMs": 6
-    },
-    "ufuzzyMs": 0.77,
-    "jsNativeMs": 0.73,
-    "retainedVsUfuzzySpeedup": 0.24,
-    "retainedVsNativeSpeedup": 0.23,
-    "coldVsUfuzzySpeedup": 0.13,
-    "crossover": {
-      "gpuRetainedBeatsUfuzzy": false,
-      "gpuRetainedBeatsNative": false,
-      "gpuColdBeatsUfuzzy": false
-    },
-    "matchCount": {
-      "gpu": 37,
-      "ufuzzy": 0,
-      "native": 0
+    {
+      "datasetSize": 100000,
+      "corpusType": "ascii",
+      "query": "AuthController",
+      "mode": "fuzzy",
+      "utf16Units": 4308299,
+      "codePoints": 4308299,
+      "vramAllocation": {
+        "recordsBytes": 17233196,
+        "offsetsBytes": 400004,
+        "queryBytes": 512,
+        "outputBytes": 65544,
+        "totalBytes": 17699256
+      },
+      "packing": {
+        "normalizeMs": 340.3,
+        "packMs": 81.1,
+        "uploadMs": 253.4,
+        "totalPipelineMs": 674.8
+      },
+      "gpuRetained": {
+        "medianMs": 62,
+        "p95Ms": 79.5,
+        "totalMs": 62,
+        "queryUploadMs": 0,
+        "encodeSubmitMs": 0.2,
+        "gpuExecutionMs": 60.76,
+        "readbackMs": 60.4,
+        "gpuDispatchMs": 0.2,
+        "samples": [
+          59.5,
+          60.6,
+          62,
+          64.3,
+          83.3
+        ]
+      },
+      "gpuCold": {
+        "uploadMs": 253.4,
+        "totalMs": 345.2
+      },
+      "cpuParity": {
+        "medianMs": 14.6,
+        "p95Ms": 14.7,
+        "minMs": 14.5,
+        "maxMs": 14.7,
+        "meanMs": 14.6,
+        "samples": [
+          14.5,
+          14.5,
+          14.6,
+          14.7,
+          14.7
+        ]
+      },
+      "ufuzzy": {
+        "medianMs": 14.6,
+        "p95Ms": 20.3,
+        "minMs": 14.5,
+        "maxMs": 21.7,
+        "meanMs": 16.02,
+        "samples": [
+          14.5,
+          14.6,
+          14.6,
+          14.7,
+          21.7
+        ]
+      },
+      "jsNative": {
+        "medianMs": 10.2,
+        "p95Ms": 18.14,
+        "minMs": 10.1,
+        "maxMs": 19.8,
+        "meanMs": 12.36,
+        "samples": [
+          10.1,
+          10.2,
+          10.2,
+          11.5,
+          19.8
+        ]
+      },
+      "cpuParityMs": 14.6,
+      "ufuzzyMs": 14.6,
+      "jsNativeMs": 10.2,
+      "retainedVsUfuzzySpeedup": 0.24,
+      "retainedVsParitySpeedup": 0.24,
+      "retainedVsNativeSpeedup": 0.16,
+      "coldVsUfuzzySpeedup": 0.04,
+      "crossover": {
+        "gpuRetainedBeatsUfuzzy": false,
+        "gpuRetainedBeatsParity": false,
+        "gpuRetainedBeatsNative": false,
+        "gpuColdBeatsUfuzzy": false
+      },
+      "matchCount": {
+        "gpu": 356,
+        "cpuParity": 356,
+        "ufuzzy": 0,
+        "native": 0
+      },
+      "hasOverflow": false,
+      "uiTelemetry": {
+        "workerFps": 120,
+        "mainThreadFps": 38,
+        "mainThreadJankMs": 66.7,
+        "droppedFrames": 17,
+        "jankSpikes": 16,
+        "totalFrameCount": 33
+      },
+      "hardwareQualified": false,
+      "qualificationStatus": "pending-hardware"
     }
+  ],
+  "corpus": "ascii",
+  "query": "AuthController",
+  "qualificationStatus": "pending-hardware",
+  "hardwareQualified": false,
+  "adapterInfo": {
+    "vendor": "google",
+    "architecture": "swiftshader",
+    "device": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "description": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 10.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "maxBufferSizeMB": 1024,
+    "maxStorageBindingSizeMB": 1024,
+    "maxComputeWorkgroupsPerDimension": 65535,
+    "maxComputeInvocationsPerWorkgroup": 256,
+    "hasTimestampQuery": true
   },
-  {
-    "datasetSize": 100000,
-    "query": "AuthController",
-    "mode": "fuzzy",
-    "gpuRetained": {
-      "totalMs": 3.3,
-      "queryUploadMs": 0.03,
-      "gpuDispatchMs": 0.07,
-      "readbackMs": 3.2
-    },
-    "gpuCold": {
-      "uploadMs": 5,
-      "totalMs": 9.3
-    },
-    "ufuzzyMs": 17.9,
-    "jsNativeMs": 8.27,
-    "retainedVsUfuzzySpeedup": 5.42,
-    "retainedVsNativeSpeedup": 2.51,
-    "coldVsUfuzzySpeedup": 1.92,
-    "crossover": {
-      "gpuRetainedBeatsUfuzzy": true,
-      "gpuRetainedBeatsNative": true,
-      "gpuColdBeatsUfuzzy": true
-    },
-    "matchCount": {
-      "gpu": 356,
-      "ufuzzy": 0,
-      "native": 0
-    }
-  },
-  {
-    "datasetSize": 500000,
-    "query": "AuthController",
-    "mode": "fuzzy",
-    "gpuRetained": {
-      "totalMs": 6.6,
-      "queryUploadMs": 0,
-      "gpuDispatchMs": 0.1,
-      "readbackMs": 6.5
-    },
-    "gpuCold": {
-      "uploadMs": 67.2,
-      "totalMs": 85.2
-    },
-    "ufuzzyMs": 38.97,
-    "jsNativeMs": 42.87,
-    "retainedVsUfuzzySpeedup": 5.9,
-    "retainedVsNativeSpeedup": 6.49,
-    "coldVsUfuzzySpeedup": 0.46,
-    "crossover": {
-      "gpuRetainedBeatsUfuzzy": true,
-      "gpuRetainedBeatsNative": true,
-      "gpuColdBeatsUfuzzy": false
-    },
-    "matchCount": {
-      "gpu": 1775,
-      "ufuzzy": 0,
-      "native": 0
-    }
-  },
-  {
-    "datasetSize": 1000000,
-    "query": "AuthController",
-    "mode": "fuzzy",
-    "gpuRetained": {
-      "totalMs": 21.57,
-      "queryUploadMs": 0,
-      "gpuDispatchMs": 0.1,
-      "readbackMs": 21.47
-    },
-    "gpuCold": {
-      "uploadMs": 120.2,
-      "totalMs": 162.3
-    },
-    "ufuzzyMs": 79.1,
-    "jsNativeMs": 79.93,
-    "retainedVsUfuzzySpeedup": 3.67,
-    "retainedVsNativeSpeedup": 3.71,
-    "coldVsUfuzzySpeedup": 0.49,
-    "crossover": {
-      "gpuRetainedBeatsUfuzzy": true,
-      "gpuRetainedBeatsNative": true,
-      "gpuColdBeatsUfuzzy": false
-    },
-    "matchCount": {
-      "gpu": 3549,
-      "ufuzzy": 0,
-      "native": 0
-    }
-  },
-  {
-    "datasetSize": 2000000,
-    "query": "AuthController",
-    "mode": "fuzzy",
-    "gpuRetained": {
-      "totalMs": 17.6,
-      "queryUploadMs": 0,
-      "gpuDispatchMs": 0.07,
-      "readbackMs": 17.53
-    },
-    "gpuCold": {
-      "uploadMs": 259.9,
-      "totalMs": 340.2
-    },
-    "ufuzzyMs": 162.3,
-    "jsNativeMs": 174.07,
-    "retainedVsUfuzzySpeedup": 9.22,
-    "retainedVsNativeSpeedup": 9.89,
-    "coldVsUfuzzySpeedup": 0.48,
-    "crossover": {
-      "gpuRetainedBeatsUfuzzy": true,
-      "gpuRetainedBeatsNative": true,
-      "gpuColdBeatsUfuzzy": false
-    },
-    "matchCount": {
-      "gpu": 7098,
-      "ufuzzy": 0,
-      "native": 0
-    }
-  }
-]
+  "timestamp": "2026-09-18T19:05:46.915Z"
+}

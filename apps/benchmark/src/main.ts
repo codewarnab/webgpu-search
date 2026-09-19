@@ -1,5 +1,12 @@
-import { WebGPUEngine, CPUEngine, type SearchResult, type CPUSearchResult } from 'webgpu-search';
-import { generateDataset, type Dataset } from './dataset';
+import {
+    WebGPUEngine,
+    CPUEngine,
+    searchCpuReference,
+    normalizeText,
+    type SearchResult,
+    type CPUSearchResult
+} from 'webgpu-search';
+import { generateDataset, type Dataset, type CorpusType } from './dataset';
 import { BenchmarkRunner, type BenchmarkRowResult } from './benchmark';
 import { svgToPngBlob, generateBenchmarkCsv, generateMarkdownSummary, downloadBlob } from './export';
 
@@ -36,6 +43,7 @@ const hudModeVal = document.getElementById('hud-mode-val');
 const hudPulseDot = document.getElementById('hud-pulse-dot');
 
 const datasetSizeSelect = document.getElementById('dataset-size-select') as HTMLSelectElement;
+const corpusTypeSelect = document.getElementById('corpus-type-select') as HTMLSelectElement | null;
 const searchModeSelect = document.getElementById('search-mode-select') as HTMLSelectElement;
 const executionThreadSelect = document.getElementById('execution-thread-select') as HTMLSelectElement;
 const btnReloadData = document.getElementById('btn-reload-data') as HTMLButtonElement;
@@ -45,6 +53,9 @@ const searchQueryInput = document.getElementById('search-query-input') as HTMLIn
 const meterGpu = document.getElementById('meter-gpu')!;
 const meterGpuVal = document.getElementById('meter-gpu-val')!;
 const meterGpuSub = document.getElementById('meter-gpu-sub')!;
+
+const meterParity = document.getElementById('meter-parity') as HTMLDivElement | null;
+const meterParityVal = document.getElementById('meter-parity-val') as HTMLDivElement | null;
 
 const meterUfuzzy = document.getElementById('meter-ufuzzy')!;
 const meterUfuzzyVal = document.getElementById('meter-ufuzzy-val')!;
@@ -87,7 +98,12 @@ async function init() {
     (window as any).gpuEngine = gpuEngine;
     (window as any).cpuEngine = cpuEngine;
 
-    const isSupported = await gpuEngine.init();
+    let isSupported = false;
+    try {
+        isSupported = await gpuEngine.init();
+    } catch (err) {
+        console.warn('WebGPU engine init threw an error, falling back to CPU:', err);
+    }
     const warningBanner = document.getElementById('webgpu-warning-banner');
 
     if (!isSupported) {
@@ -179,7 +195,18 @@ async function init() {
                         );
                     }
                 }
-                handleSearchResults(gpuResult, payload.ufuzzyResult, payload.nativeResult, payload.query);
+                let parityResult = payload.parityResult ?? null;
+                if (!parityResult && currentDataset && payload.query) {
+                    const norm = normalizeText(payload.query, true);
+                    parityResult = searchCpuReference(
+                        currentDataset.recordTokens,
+                        norm.tokens,
+                        (payload.gpuMeta?.mode || 'substring') as 'substring' | 'fuzzy',
+                        1000,
+                        currentDataset.strings
+                    );
+                }
+                handleSearchResults(gpuResult, parityResult, payload.ufuzzyResult, payload.nativeResult, payload.query);
             } else if (type === 'SEARCH_ERROR') {
                 // Worker-side search failures (invalid mode, QueryTooLong,
                 // GPU loss) previously only console.error'd in the worker and
@@ -255,8 +282,17 @@ async function init() {
     // Bind Event Listeners
     datasetSizeSelect.addEventListener('change', () => {
         const size = parseInt(datasetSizeSelect.value, 10);
-        switchDataset(size);
+        const corpus = (corpusTypeSelect?.value || 'ascii') as CorpusType;
+        switchDataset(size, corpus);
     });
+
+    if (corpusTypeSelect) {
+        corpusTypeSelect.addEventListener('change', () => {
+            const size = parseInt(datasetSizeSelect.value, 10);
+            const corpus = (corpusTypeSelect.value || 'ascii') as CorpusType;
+            switchDataset(size, corpus);
+        });
+    }
 
     if (executionThreadSelect) {
         executionThreadSelect.addEventListener('change', () => {
@@ -266,7 +302,8 @@ async function init() {
 
     btnReloadData.addEventListener('click', () => {
         const size = parseInt(datasetSizeSelect.value, 10);
-        switchDataset(size);
+        const corpus = (corpusTypeSelect?.value || 'ascii') as CorpusType;
+        switchDataset(size, corpus);
     });
 
     searchModeSelect.addEventListener('change', () => {
@@ -396,6 +433,13 @@ async function init() {
     // Check URL parameters for autorun (e.g. ?autorun=all or ?autorun=fuzzy)
     const params = new URLSearchParams(window.location.search);
     const autorun = params.get('autorun');
+    if (params.get('corpus') && corpusTypeSelect) {
+        corpusTypeSelect.value = params.get('corpus')!;
+    }
+    if (params.get('query') && searchQueryInput) {
+        searchQueryInput.value = params.get('query')!;
+    }
+    console.log('[main] Application initialized. Autorun mode:', autorun);
     if (autorun) {
         if (autorun === 'fuzzy' || autorun === 'substring') {
             searchModeSelect.value = autorun;
@@ -410,10 +454,11 @@ async function init() {
     (window as any).__IS_INITIALIZED__ = true;
 }
 
-async function switchDataset(size: number) {
+async function switchDataset(size: number, corpusType: CorpusType = 'ascii') {
     btnReloadData.disabled = true;
     datasetSizeSelect.disabled = true;
-    activeDatasetSize.textContent = `Generating ${size.toLocaleString()} items...`;
+    if (corpusTypeSelect) corpusTypeSelect.disabled = true;
+    activeDatasetSize.textContent = `Generating ${size.toLocaleString()} ${corpusType.toUpperCase()} items...`;
 
     // Allow UI to render loading state
     await new Promise(r => setTimeout(r, 20));
@@ -421,7 +466,7 @@ async function switchDataset(size: number) {
     const t0 = performance.now();
     activeDatasetGeneration += 1;
     const thisGeneration = activeDatasetGeneration;
-    currentDataset = generateDataset(size);
+    currentDataset = generateDataset(size, { corpusType });
     const genTime = performance.now() - t0;
 
     activeDatasetSize.textContent = gpuEngine.isReady
@@ -447,16 +492,18 @@ async function switchDataset(size: number) {
             payload: {
                 strings: currentDataset.strings,
                 serialized: serializedCopy,
-                datasetGeneration: thisGeneration
+                datasetGeneration: thisGeneration,
+                sentTimestamp: performance.now()
             }
         }, [serializedCopy]);
     }
 
     activeDatasetSize.textContent = gpuEngine.isReady
-        ? `${size.toLocaleString()} items (Gen: ${genTime.toFixed(0)}ms, VRAM upload: ${uploadTimeMs.toFixed(1)}ms)`
-        : `${size.toLocaleString()} items (Gen: ${genTime.toFixed(0)}ms, CPU Ready)`;
+        ? `${size.toLocaleString()} items (${corpusType.toUpperCase()}) (Gen: ${genTime.toFixed(0)}ms, VRAM upload: ${uploadTimeMs.toFixed(1)}ms)`
+        : `${size.toLocaleString()} items (${corpusType.toUpperCase()}) (Gen: ${genTime.toFixed(0)}ms, CPU Ready)`;
     btnReloadData.disabled = false;
     datasetSizeSelect.disabled = false;
+    if (corpusTypeSelect) corpusTypeSelect.disabled = false;
 
     triggerSearch();
 }
@@ -470,17 +517,27 @@ function triggerSearch() {
 
 function handleSearchResults(
     gpuResult: SearchResult | null,
+    parityResult: { durationMs: number; totalMatches: number; results: any[] } | null,
     ufuzzyResult: CPUSearchResult | null,
     nativeResult: CPUSearchResult | null,
     query: string
 ) {
+    const parityTotal = parityResult?.durationMs ?? 0;
     const ufuzzyTotal = ufuzzyResult?.durationMs ?? 0;
     const nativeTotal = nativeResult?.durationMs ?? 0;
 
+    if (meterParityVal) {
+        meterParityVal.textContent = parityResult ? `${parityTotal.toFixed(2)} ms` : '-- ms';
+    }
     meterUfuzzyVal.textContent = ufuzzyResult ? `${ufuzzyTotal.toFixed(2)} ms` : '-- ms';
     meterNativeVal.textContent = nativeResult ? `${nativeTotal.toFixed(2)} ms` : '-- ms';
 
     resetMeterHighlights();
+
+    const times: { el: HTMLElement | null; time: number }[] = [];
+    if (parityResult && meterParity) times.push({ el: meterParity, time: parityTotal });
+    if (ufuzzyResult) times.push({ el: meterUfuzzy, time: ufuzzyTotal });
+    if (nativeResult) times.push({ el: meterNative, time: nativeTotal });
 
     if (gpuResult) {
         const gpuTotal = gpuResult.timings.totalMs;
@@ -490,35 +547,40 @@ function handleSearchResults(
             : '';
         meterGpuSub.textContent = `${execLabel}Submit: ${gpuResult.timings.encodeSubmitMs.toFixed(2)}ms | Readback: ${gpuResult.timings.readbackMs.toFixed(2)}ms`;
 
-        const minTime = Math.min(gpuTotal, ufuzzyTotal > 0 ? ufuzzyTotal : Infinity, nativeTotal > 0 ? nativeTotal : Infinity);
-        if (minTime === gpuTotal) {
-            meterGpu.classList.add('winner');
-        } else if (minTime === ufuzzyTotal) {
-            meterUfuzzy.classList.add('winner');
-        } else {
-            meterNative.classList.add('winner');
+        times.push({ el: meterGpu, time: gpuTotal });
+        times.sort((a, b) => a.time - b.time);
+        if (times[0] && times[0].el) {
+            times[0].el.classList.add('winner');
         }
 
         const overflowBadge = gpuResult.hasOverflow
             ? ` (⚠️ pool overflow: top ${gpuResult.results.length} of ${gpuResult.totalMatches.toLocaleString()})`
             : '';
-        resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU)${overflowBadge} | ${ufuzzyResult ? ufuzzyResult.totalMatches.toLocaleString() : 0} (uFuzzy)`;
+        resultsCountSummary.textContent = `Found ${gpuResult.totalMatches.toLocaleString()} matches (WebGPU)${overflowBadge} | ${parityResult ? parityResult.totalMatches.toLocaleString() : 0} (CPU Parity) | ${ufuzzyResult ? ufuzzyResult.totalMatches.toLocaleString() : 0} (uFuzzy)`;
         renderResults(gpuResult.results, query);
     } else {
         meterGpuVal.textContent = 'Disabled';
         meterGpuSub.textContent = 'WebGPU unavailable';
 
-        if (ufuzzyTotal <= nativeTotal) {
-            meterUfuzzy.classList.add('winner');
-        } else {
-            meterNative.classList.add('winner');
+        times.sort((a, b) => a.time - b.time);
+        if (times[0] && times[0].el) {
+            times[0].el.classList.add('winner');
         }
 
-        resultsCountSummary.textContent = `Found ${ufuzzyResult ? ufuzzyResult.totalMatches.toLocaleString() : 0} matches (uFuzzy) | ${nativeResult ? nativeResult.totalMatches.toLocaleString() : 0} (JS Native)`;
-        if (ufuzzyResult) {
+        resultsCountSummary.textContent = `Found ${parityResult ? parityResult.totalMatches.toLocaleString() : 0} matches (CPU Parity) | ${ufuzzyResult ? ufuzzyResult.totalMatches.toLocaleString() : 0} (uFuzzy) | ${nativeResult ? nativeResult.totalMatches.toLocaleString() : 0} (JS Native)`;
+        if (parityResult) {
+            renderResults(parityResult.results, query);
+        } else if (ufuzzyResult) {
             renderResults(ufuzzyResult.results, query);
         }
     }
+}
+
+function resetMeterHighlights() {
+    meterGpu.classList.remove('winner');
+    if (meterParity) meterParity.classList.remove('winner');
+    meterUfuzzy.classList.remove('winner');
+    meterNative.classList.remove('winner');
 }
 
 async function executeLiveSearch() {
@@ -529,6 +591,7 @@ async function executeLiveSearch() {
 
     if (!query) {
         meterGpuVal.textContent = '-- ms';
+        if (meterParityVal) meterParityVal.textContent = '-- ms';
         meterUfuzzyVal.textContent = '-- ms';
         meterNativeVal.textContent = '-- ms';
         meterGpuSub.textContent = 'Awaiting query';
@@ -567,18 +630,24 @@ async function executeLiveSearch() {
         }
     }
 
+    let parityResult: { durationMs: number; totalMatches: number; results: any[] } | null = null;
+    if (currentDataset && query) {
+        const norm = normalizeText(query, true);
+        parityResult = searchCpuReference(
+            currentDataset.recordTokens,
+            norm.tokens,
+            mode,
+            1000,
+            currentDataset.strings
+        );
+    }
+
     const ufuzzyResult: CPUSearchResult = cpuEngine.searchUFuzzy(currentDataset.strings, query, 1000);
     const nativeResult: CPUSearchResult = cpuEngine.searchNative(currentDataset.strings, query, 1000);
 
     if (queryId === activeQuerySeq) {
-        handleSearchResults(gpuResult, ufuzzyResult, nativeResult, query);
+        handleSearchResults(gpuResult, parityResult, ufuzzyResult, nativeResult, query);
     }
-}
-
-function resetMeterHighlights() {
-    meterGpu.classList.remove('winner');
-    meterUfuzzy.classList.remove('winner');
-    meterNative.classList.remove('winner');
 }
 
 function renderResults(results: Array<{ index: number; score?: number; text?: string }>, query: string) {
@@ -608,7 +677,7 @@ function renderResults(results: Array<{ index: number; score?: number; text?: st
             const before = text.substring(0, matchIdx);
             const match = text.substring(matchIdx, matchIdx + query.length);
             const after = text.substring(matchIdx + query.length);
-            highlightedHtml = `${escapeHtml(before)}<span class="result-match-highlight">${escapeHtml(match)}</span>${escapeHtml(after)}`;
+            highlightedHtml = `${escapeHtml(before)}<mark>${escapeHtml(match)}</mark>${escapeHtml(after)}`;
         } else {
             highlightedHtml = escapeHtml(text);
         }
@@ -646,73 +715,115 @@ async function runFullBenchmark() {
     substringBenchmarkResults = [];
     fuzzyBenchmarkResults = [];
 
-    const sizes = [10_000, 100_000, 500_000, 1_000_000, 2_000_000];
-    const query = searchQueryInput.value.trim() || 'AuthController';
+    const params = new URLSearchParams(window.location.search);
+    const autorun = params.get('autorun');
+    const sizesParam = params.get('sizes');
+    const corpusParam = params.get('corpus') as CorpusType | null;
+    const queryParam = params.get('query');
+    const warmupsParam = params.get('warmups');
+    const samplesParam = params.get('samples');
 
-    const totalSteps = sizes.length * 2; // Both algorithms
+    const sizes = sizesParam
+        ? sizesParam.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n) && n > 0)
+        : [10_000, 100_000, 500_000, 1_000_000, 2_000_000];
+    const query = queryParam || searchQueryInput.value.trim() || 'AuthController';
+    const corpus: CorpusType = (corpusParam && ['ascii', 'cjk', 'emoji'].includes(corpusParam))
+        ? corpusParam
+        : ((corpusTypeSelect?.value as CorpusType) || 'ascii');
+    const pWarmups = warmupsParam ? parseInt(warmupsParam, 10) : NaN;
+    const warmups = Number.isFinite(pWarmups) && pWarmups >= 1 ? Math.min(pWarmups, 100) : 5;
+    const pSamples = samplesParam ? parseInt(samplesParam, 10) : NaN;
+    const samples = Number.isFinite(pSamples) && pSamples >= 1 ? Math.min(pSamples, 100) : 20;
+
+    const runSubstring = autorun !== 'fuzzy';
+    const runFuzzy = autorun !== 'substring';
+    const totalSteps = (runSubstring ? sizes.length : 0) + (runFuzzy ? sizes.length : 0);
+
+    console.log('[main] Starting runFullBenchmark:', { autorun, sizes, corpus, warmups, samples, runSubstring, runFuzzy });
 
     try {
-        // PHASE 1: Substring Algorithm
-        tabBtnSubstring.click(); // Focus substring tab
-        await benchmarkRunner.runBenchmark(
-            sizes,
-            query,
-            'substring',
-            3,
-            (progress) => {
-                const percent = Math.round((progress.currentStep / totalSteps) * 100);
-                benchmarkProgressBar.style.width = `${percent}%`;
-                benchmarkProgressText.textContent = `[1/2 Substring] ${progress.stepName}`;
+        if (runSubstring) {
+            // PHASE 1: Substring Algorithm
+            tabBtnSubstring.click(); // Focus substring tab
+            const subResults = await benchmarkRunner.runBenchmark(
+                sizes,
+                query,
+                'substring',
+                { sizes, query, mode: 'substring', corpusType: corpus, warmups, samples },
+                (progress) => {
+                    const percent = Math.round((progress.currentStep / totalSteps) * 100);
+                    benchmarkProgressBar.style.width = `${percent}%`;
+                    benchmarkProgressText.textContent = `[1/${runFuzzy ? '2' : '1'} Substring] ${progress.stepName}`;
 
-                if (progress.currentRow) {
-                    substringBenchmarkResults.push(progress.currentRow);
-                    appendBenchmarkTableRow(tableBodySubstring, progress.currentRow);
-                    drawBenchmarkChart(
-                        chartSubstring,
-                        substringBenchmarkResults,
-                        'WebGPU vs uFuzzy: Exact Substring Search',
-                        getChartMeta(query, substringBenchmarkResults)
-                    );
+                    if (progress.currentRow) {
+                        substringBenchmarkResults.push(progress.currentRow);
+                        appendBenchmarkTableRow(tableBodySubstring, progress.currentRow);
+                        drawBenchmarkChart(
+                            chartSubstring,
+                            substringBenchmarkResults,
+                            `WebGPU vs CPU: Exact Substring Search (${corpus.toUpperCase()})`,
+                            getChartMeta(query, substringBenchmarkResults)
+                        );
+                    }
                 }
+            );
+            if (substringBenchmarkResults.length === 0 && subResults.length > 0) {
+                substringBenchmarkResults = subResults;
             }
-        );
+            console.log(`[main] Substring benchmark finished with ${substringBenchmarkResults.length} rows.`);
 
-        // Allow UI to breathe
-        await new Promise(r => setTimeout(r, 60));
+            // Allow UI to breathe
+            if (runFuzzy) {
+                await new Promise(r => setTimeout(r, 60));
+            }
+        }
 
-        // PHASE 2: Fuzzy Algorithm
-        tabBtnFuzzy.click(); // Focus fuzzy tab
-        await benchmarkRunner.runBenchmark(
-            sizes,
-            query,
-            'fuzzy',
-            3,
-            (progress) => {
-                const currentTotal = sizes.length + progress.currentStep;
-                const percent = Math.round((currentTotal / totalSteps) * 100);
-                benchmarkProgressBar.style.width = `${percent}%`;
-                benchmarkProgressText.textContent = `[2/2 Fuzzy] ${progress.stepName}`;
+        if (runFuzzy) {
+            // PHASE 2: Fuzzy Algorithm
+            tabBtnFuzzy.click(); // Focus fuzzy tab
+            const stepOffset = runSubstring ? sizes.length : 0;
+            const fuzResults = await benchmarkRunner.runBenchmark(
+                sizes,
+                query,
+                'fuzzy',
+                { sizes, query, mode: 'fuzzy', corpusType: corpus, warmups, samples },
+                (progress) => {
+                    const currentTotal = stepOffset + progress.currentStep;
+                    const percent = Math.round((currentTotal / totalSteps) * 100);
+                    benchmarkProgressBar.style.width = `${percent}%`;
+                    benchmarkProgressText.textContent = `[${runSubstring ? '2/2' : '1/1'} Fuzzy] ${progress.stepName}`;
 
-                if (progress.currentRow) {
-                    fuzzyBenchmarkResults.push(progress.currentRow);
-                    appendBenchmarkTableRow(tableBodyFuzzy, progress.currentRow);
-                    drawBenchmarkChart(
-                        chartFuzzy,
-                        fuzzyBenchmarkResults,
-                        'WebGPU vs uFuzzy: Fuzzy Subsequence Search',
-                        getChartMeta(query, fuzzyBenchmarkResults)
-                    );
+                    if (progress.currentRow) {
+                        fuzzyBenchmarkResults.push(progress.currentRow);
+                        appendBenchmarkTableRow(tableBodyFuzzy, progress.currentRow);
+                        drawBenchmarkChart(
+                            chartFuzzy,
+                            fuzzyBenchmarkResults,
+                            `WebGPU vs CPU: Fuzzy Subsequence Search (${corpus.toUpperCase()})`,
+                            getChartMeta(query, fuzzyBenchmarkResults)
+                        );
+                    }
                 }
+            );
+            if (fuzzyBenchmarkResults.length === 0 && fuzResults.length > 0) {
+                fuzzyBenchmarkResults = fuzResults;
             }
-        );
+            console.log(`[main] Fuzzy benchmark finished with ${fuzzyBenchmarkResults.length} rows.`);
+        }
 
         benchmarkStatus.textContent = 'Benchmark Complete';
-        benchmarkProgressText.textContent = `Completed full benchmark matrix for Substring and Fuzzy (10k to 2M rows)!`;
+        benchmarkProgressText.textContent = `Completed benchmark matrix (${sizes.map(s => s.toLocaleString()).join(', ')} rows)!`;
 
         // Store results globally
         (window as any).__BENCHMARK_RESULTS__ = {
             substring: substringBenchmarkResults,
-            fuzzy: fuzzyBenchmarkResults
+            fuzzy: fuzzyBenchmarkResults,
+            corpus,
+            query,
+            qualificationStatus: (substringBenchmarkResults[0]?.qualificationStatus || fuzzyBenchmarkResults[0]?.qualificationStatus || 'pending-hardware'),
+            hardwareQualified: (substringBenchmarkResults[0]?.hardwareQualified ?? fuzzyBenchmarkResults[0]?.hardwareQualified ?? false),
+            adapterInfo: (window as any).gpuEngine?.adapterInfo || null,
+            timestamp: new Date().toISOString()
         };
 
         // Enable download buttons
@@ -721,8 +832,14 @@ async function runFullBenchmark() {
         btnDownloadPngSub.disabled = false;
         btnDownloadPngFuz.disabled = false;
         if (btnCopySummary) btnCopySummary.disabled = false;
-    } catch (err) {
+
+        // Re-synchronize VRAM with active playground dataset
+        const restoreSize = parseInt(datasetSizeSelect.value, 10);
+        const restoreCorpus = (corpusTypeSelect?.value || 'ascii') as CorpusType;
+        await switchDataset(restoreSize, restoreCorpus);
+    } catch (err: any) {
         console.error('Benchmark failed:', err);
+        (window as any).__BENCHMARK_ERROR__ = String(err?.stack || err?.message || err);
         benchmarkStatus.textContent = 'Benchmark Failed';
         benchmarkProgressText.textContent = `Error: ${err}`;
     } finally {
@@ -733,40 +850,39 @@ async function runFullBenchmark() {
 function appendBenchmarkTableRow(tbody: HTMLElement, row: BenchmarkRowResult) {
     const tr = document.createElement('tr');
 
-    const crossoverBadge = row.gpuRetained.totalMs === 0
-        ? `<span class="tag-crossover-loss">CPU Mode (GPU Off)</span>`
-        : row.crossover.gpuRetainedBeatsUfuzzy
+    const statusBadge = row.qualificationStatus === 'qualified'
+        ? (row.crossover.gpuRetainedBeatsUfuzzy
             ? `<span class="tag-crossover-win">⚡ GPU Win (${row.retainedVsUfuzzySpeedup}x)</span>`
-            : `<span class="tag-crossover-loss">CPU Wins (${(1 / row.retainedVsUfuzzySpeedup).toFixed(1)}x)</span>`;
+            : `<span class="tag-crossover-loss">CPU Wins (${(1 / (row.retainedVsUfuzzySpeedup || 1)).toFixed(1)}x)</span>`)
+        : `<span class="tag-crossover-loss" title="Running under software rasterizer or mock device">Pending-HW (${row.retainedVsUfuzzySpeedup}x)</span>`;
 
-    const gpuRetainedTotal = row.gpuRetained.totalMs > 0 ? `${row.gpuRetained.totalMs} ms` : 'N/A';
-    const gpuSubmit = row.gpuRetained.encodeSubmitMs > 0 ? `${row.gpuRetained.encodeSubmitMs} ms` : '-';
-    const gpuExec = row.gpuRetained.gpuExecutionMs !== null
-        ? `${row.gpuRetained.gpuExecutionMs} ms`
-        : (row.gpuRetained.totalMs > 0 ? '<span title="Timestamp queries require hardware support or --enable-unsafe-webgpu" style="color: var(--text-muted); cursor: help;">N/A*</span>' : '-');
-    const gpuReadback = row.gpuRetained.readbackMs > 0 ? `${row.gpuRetained.readbackMs} ms` : '-';
+    const gpuRetained = row.gpuRetained.medianMs > 0 ? `${row.gpuRetained.medianMs} / ${row.gpuRetained.p95Ms} ms` : 'N/A';
     const gpuColdTotal = row.gpuCold.totalMs > 0 ? `${row.gpuCold.totalMs} ms` : 'N/A';
-    const speedupText = row.retainedVsUfuzzySpeedup > 0 ? `<strong>${row.retainedVsUfuzzySpeedup}x</strong>` : '-';
+    const parityMs = row.cpuParity ? `${row.cpuParity.medianMs} / ${row.cpuParity.p95Ms} ms` : (row.cpuParityMs ? `${row.cpuParityMs} ms` : '-');
+    const ufuzzyMs = row.ufuzzy ? `${row.ufuzzy.medianMs} / ${row.ufuzzy.p95Ms} ms` : `${row.ufuzzyMs} ms`;
+    const jsNativeMs = row.jsNative ? `${row.jsNative.medianMs} ms` : `${row.jsNativeMs} ms`;
+    const speedupParityText = row.retainedVsParitySpeedup > 0 ? `<strong>${row.retainedVsParitySpeedup}x</strong>` : '-';
+    const speedupUfuzzyText = row.retainedVsUfuzzySpeedup > 0 ? `<strong>${row.retainedVsUfuzzySpeedup}x</strong>` : '-';
 
     const uiFpsHtml = row.uiTelemetry
         ? `<div style="font-size: 0.8rem; line-height: 1.25;">
              <span style="color: #10b981; font-weight: 600;">⚡ ${row.uiTelemetry.workerFps} FPS</span>
-             <span style="color: var(--text-muted); font-size: 0.72rem; display: block;">(${row.uiTelemetry.mainThreadFps} FPS Main)</span>
+             <span style="color: var(--text-muted); font-size: 0.72rem; display: block;">(${row.uiTelemetry.mainThreadFps} FPS, ${row.uiTelemetry.jankSpikes} jank)</span>
            </div>`
-        : `<span style="color: var(--text-muted); font-size: 0.8rem;">~120 FPS</span>`;
+        : `<span style="color: var(--text-muted); font-size: 0.8rem;">~60 FPS</span>`;
 
     tr.innerHTML = `
         <td><strong>${row.datasetSize.toLocaleString()}</strong></td>
-        <td>${gpuSubmit}</td>
-        <td>${gpuExec}</td>
-        <td>${gpuReadback}</td>
-        <td style="color: var(--color-gpu); font-weight: 600;">${gpuRetainedTotal}</td>
+        <td><span style="font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted); font-weight: 600;">${row.corpusType || 'ASCII'}</span></td>
+        <td style="color: var(--color-gpu); font-weight: 600;">${gpuRetained}</td>
         <td style="color: var(--text-muted);">${gpuColdTotal}</td>
-        <td style="color: var(--color-ufuzzy); font-weight: 600;">${row.ufuzzyMs} ms</td>
-        <td style="color: var(--color-native);">${row.jsNativeMs} ms</td>
-        <td>${speedupText}</td>
+        <td style="color: #f43f5e; font-weight: 600;">${parityMs}</td>
+        <td style="color: var(--color-ufuzzy); font-weight: 600;">${ufuzzyMs}</td>
+        <td style="color: var(--color-native);">${jsNativeMs}</td>
+        <td>${speedupParityText}</td>
+        <td>${speedupUfuzzyText}</td>
         <td>${uiFpsHtml}</td>
-        <td>${crossoverBadge}</td>
+        <td>${statusBadge}</td>
     `;
     tbody.appendChild(tr);
 }
@@ -810,7 +926,11 @@ function drawBenchmarkChart(
     // Find max value for Y scale
     let maxTime = 10;
     for (const r of results) {
-        maxTime = Math.max(maxTime, r.gpuRetained.totalMs, r.ufuzzyMs, r.jsNativeMs);
+        const gpuTime = r.gpuRetained.medianMs || r.gpuRetained.totalMs || 0;
+        const parityTime = r.cpuParity?.medianMs || r.cpuParityMs || 0;
+        const ufuzzyTime = r.ufuzzy?.medianMs || r.ufuzzyMs || 0;
+        const nativeTime = r.jsNative?.medianMs || r.jsNativeMs || 0;
+        maxTime = Math.max(maxTime, gpuTime, parityTime, ufuzzyTime, nativeTime);
     }
     maxTime = Math.ceil(maxTime * 1.15); // Add headroom
 
@@ -856,12 +976,13 @@ function drawBenchmarkChart(
 
     // 3. Embedded Legend (top right)
     const legendItems = [
-        { color: '#38bdf8', label: 'WebGPU (Retained)' },
-        { color: '#f59e0b', label: 'uFuzzy (CPU)' },
-        { color: '#a855f7', label: 'JS Native (CPU)' }
+        { color: '#38bdf8', label: 'WebGPU' },
+        { color: '#f43f5e', label: 'CPU Parity' },
+        { color: '#f59e0b', label: 'uFuzzy' },
+        { color: '#a855f7', label: 'Native' }
     ];
 
-    let legendX = 540;
+    let legendX = 460;
     legendItems.forEach(item => {
         const dot = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
         dot.setAttribute('cx', `${legendX}`);
@@ -880,7 +1001,7 @@ function drawBenchmarkChart(
         lbl.textContent = item.label;
         svgElement.appendChild(lbl);
 
-        legendX += 140;
+        legendX += 120;
     });
 
     // 4. Speedup Highlight Badge (top right below legend)
@@ -1016,14 +1137,19 @@ function drawBenchmarkChart(
         });
     };
 
-    drawSeries('#a855f7', r => r.jsNativeMs, -8);
-    drawSeries('#f59e0b', r => r.ufuzzyMs, -8);
-    if (results.some(r => r.gpuRetained.totalMs > 0)) {
-        drawSeries('#38bdf8', r => r.gpuRetained.totalMs, 14);
+    drawSeries('#a855f7', r => r.jsNative?.medianMs ?? r.jsNativeMs, -8);
+    drawSeries('#f59e0b', r => r.ufuzzy?.medianMs ?? r.ufuzzyMs, -8);
+    drawSeries('#f43f5e', r => r.cpuParity?.medianMs ?? r.cpuParityMs ?? 0, -8);
+    if (results.some(r => (r.gpuRetained.medianMs ?? r.gpuRetained.totalMs) > 0)) {
+        drawSeries('#38bdf8', r => r.gpuRetained.medianMs || r.gpuRetained.totalMs, 14);
     }
 }
 
 // Start application
-window.addEventListener('DOMContentLoaded', () => {
+if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', () => {
+        init().catch(console.error);
+    });
+} else {
     init().catch(console.error);
-});
+}
