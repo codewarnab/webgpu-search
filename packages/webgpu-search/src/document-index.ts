@@ -772,6 +772,21 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     const tag = options.highlightOptions?.tag ?? options.tag;
     const highlightFieldsRule = options.highlightOptions?.fields ?? options.highlightFields ?? 'all-matched';
+    const escapeHtml = options.highlightOptions?.escapeHtml ?? options.escapeHtml ?? false;
+
+    if (
+      typeof highlightFieldsRule === 'string' &&
+      highlightFieldsRule !== 'all-matched' &&
+      highlightFieldsRule !== 'matched-field' &&
+      highlightFieldsRule !== 'all-fields'
+    ) {
+      throw new TypeError(
+        `[webgpu-search] Invalid highlightFields option: "${highlightFieldsRule}". Must be 'all-matched', 'matched-field', 'all-fields', or an array of field names.`
+      );
+    }
+
+    const queryTokens = normalizeText(query, this.folded).tokens;
+    const alignOpts = { mode, folded: this.folded, queryTokens };
 
     for (let i = 0; i < results.length; i++) {
       const item = results[i];
@@ -785,11 +800,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         for (let f = 0; f < this.sortedFields.length; f++) {
           const fieldDef = this.sortedFields[f];
           const rawStr = this.rawFieldStrings[dIdx][f] ?? '';
-          const ranges = alignHighlights(rawStr, query, { mode, folded: this.folded });
+          const ranges = alignHighlights(rawStr, query, alignOpts);
           if (ranges.length > 0) {
             highlights[fieldDef.name] = ranges;
             if (tag) {
-              highlightedText[fieldDef.name] = renderHighlightedText(rawStr, ranges, tag);
+              highlightedText[fieldDef.name] = renderHighlightedText(rawStr, ranges, tag, escapeHtml);
             }
           }
         }
@@ -799,11 +814,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           const fIdx = this.fieldNameToIndex.get(fName);
           if (fIdx !== undefined) {
             const rawStr = this.rawFieldStrings[dIdx][fIdx] ?? '';
-            const ranges = alignHighlights(rawStr, query, { mode, folded: this.folded });
+            const ranges = alignHighlights(rawStr, query, alignOpts);
             if (ranges.length > 0) {
               highlights[fName] = ranges;
               if (tag) {
-                highlightedText[fName] = renderHighlightedText(rawStr, ranges, tag);
+                highlightedText[fName] = renderHighlightedText(rawStr, ranges, tag, escapeHtml);
               }
             }
           }
@@ -813,10 +828,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         const primaryFIdx = this.fieldNameToIndex.get(item.matchedField);
         if (primaryFIdx !== undefined) {
           const primaryRaw = this.rawFieldStrings[dIdx][primaryFIdx] ?? '';
-          const ranges = alignHighlights(primaryRaw, query, { mode, folded: this.folded });
+          const ranges = alignHighlights(primaryRaw, query, alignOpts);
           highlights[item.matchedField] = ranges;
           if (tag) {
-            highlightedText[item.matchedField] = renderHighlightedText(primaryRaw, ranges, tag);
+            highlightedText[item.matchedField] = renderHighlightedText(primaryRaw, ranges, tag, escapeHtml);
           }
         }
 
@@ -826,13 +841,23 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             const auxFIdx = this.fieldNameToIndex.get(aux.field);
             if (auxFIdx !== undefined) {
               const auxRaw = this.rawFieldStrings[dIdx][auxFIdx] ?? '';
-              const ranges = alignHighlights(auxRaw, query, { mode, folded: this.folded });
+              const ranges = alignHighlights(auxRaw, query, alignOpts);
               aux.highlights = ranges;
               highlights[aux.field] = ranges;
               if (tag) {
-                highlightedText[aux.field] = renderHighlightedText(auxRaw, ranges, tag);
+                highlightedText[aux.field] = renderHighlightedText(auxRaw, ranges, tag, escapeHtml);
               }
             }
+          }
+        }
+      }
+
+      // Synchronize auxiliary match highlights across all modes if highlights exist
+      if (item.matches) {
+        for (let m = 0; m < item.matches.length; m++) {
+          const aux = item.matches[m];
+          if (highlights[aux.field] !== undefined) {
+            aux.highlights = highlights[aux.field];
           }
         }
       }

@@ -103,5 +103,6 @@ export {
   renderHighlightedText,
   type SourceMappedText,
   type AlignHighlightOptions,
+  type RenderHighlightOptions,
 } from './highlight';
 

@@ -24,7 +24,8 @@ import {
   mergeHighlightRanges,
   renderHighlightedText,
   type HighlightRange,
-  type DocumentIndexOptions
+  type DocumentIndexOptions,
+  IncompatibleOptionError
 } from '../packages/webgpu-search/src/index';
 import { createMockAdapter } from 'vgpu/mock';
 
@@ -581,6 +582,116 @@ async function runM3Tests() {
     cpuIdx.destroy();
     gpuIdx.destroy();
     console.log('   ✅ WebGPU vs CPU highlighting parity verified 100%');
+  }
+
+  // =========================================================================
+  // 12. Security, Edge Cases, and Multi-Agent Hardening Verification
+  // =========================================================================
+  console.log('12. Testing security, edge cases, and multi-agent review hardening...');
+  {
+    // (a) HTML entity escaping / XSS mitigation
+    const dangerousText = '<script>alert("XSS & danger")</script>';
+    const dangerRanges: HighlightRange[] = [{ start: 8, end: 13 }]; // 'alert'
+    const escapedHtml = renderHighlightedText(dangerousText, dangerRanges, 'mark', true);
+    assert.strictEqual(
+      escapedHtml,
+      '&lt;script&gt;<mark>alert</mark>(&quot;XSS &amp; danger&quot;)&lt;/script&gt;',
+      'Expected raw slices to be HTML-escaped'
+    );
+
+    // Empty ranges with escapeHtml
+    const escapedEmpty = renderHighlightedText('A < B & C > D', [], 'mark', true);
+    assert.strictEqual(escapedEmpty, 'A &lt; B &amp; C &gt; D');
+
+    // (b) Custom tags with attributes emit valid closing tags
+    const styledHtml = renderHighlightedText('WebGPU search', [{ start: 0, end: 6 }], 'mark class="highlight"');
+    assert.strictEqual(styledHtml, '<mark class="highlight">WebGPU</mark> search');
+
+    // (c) Malformed tag names throw TypeError
+    assert.throws(
+      () => renderHighlightedText('hello', [{ start: 0, end: 2 }], '<script>'),
+      (err: any) => err instanceof TypeError && err.message.includes('Invalid HTML tag')
+    );
+
+    // (d) Emoji skin-tone modifier sequences and ZWJ composite protection
+    const thumbModifier = 'Thumbs up 👍🏽 for WebGPU';
+    // Match '👍' (start 10, end 12); skin tone is at 12..14
+    const guardedThumb = guardClusterBoundary(thumbModifier, 12);
+    assert.strictEqual(guardedThumb, 14, 'Should extend boundary across emoji skin tone modifier');
+
+    const womanCoder = 'Dev 👩‍💻 at work';
+    // '👩' is 4..6; ZWJ is 6..7; laptop is 7..9
+    const guardedCoder = guardClusterBoundary(womanCoder, 6);
+    assert.strictEqual(guardedCoder, 9, 'Should extend boundary across ZWJ composite cluster');
+
+    // (e) Inverted and negative range sanitization in mergeHighlightRanges
+    const messyRanges: HighlightRange[] = [
+      { start: 10, end: 5 }, // inverted -> [5, 10]
+      { start: -5, end: 3 }, // negative start -> [0, 3]
+      { start: 2, end: 6 }   // overlapping [2, 6] connects [0, 3] and [5, 10]
+    ];
+    const cleaned = mergeHighlightRanges(messyRanges);
+    assert.strictEqual(cleaned.length, 1);
+    assert.strictEqual(cleaned[0].start, 0);
+    assert.strictEqual(cleaned[0].end, 10);
+
+    const withDisjoint = mergeHighlightRanges([...messyRanges, { start: 15, end: 20 }]);
+    assert.strictEqual(withDisjoint.length, 2);
+    assert.strictEqual(withDisjoint[0].start, 0);
+    assert.strictEqual(withDisjoint[0].end, 10);
+    assert.strictEqual(withDisjoint[1].start, 15);
+    assert.strictEqual(withDisjoint[1].end, 20);
+
+    // (f) Pre-computed source map case-sensitive option preservation in alignHighlights
+    const csRaw = 'CaseSensitive Test';
+    const csMap = normalizeWithSourceMap(csRaw, false); // folded: false
+    // Should match exact case 'Case'
+    const csRanges = alignHighlights(csRaw, 'Case', { sourceMap: csMap });
+    assert.strictEqual(csRanges.length, 1);
+    assert.strictEqual(csRaw.slice(csRanges[0].start, csRanges[0].end), 'Case');
+
+    // Mismatched sourceMap.folded and options.folded should throw IncompatibleOptionError
+    assert.throws(
+      () => alignHighlights(csRaw, 'Case', { sourceMap: csMap, folded: true }),
+      (err: any) => err instanceof IncompatibleOptionError
+    );
+
+    // (g) DocumentIndex auxiliary matches populated in 'all-fields' mode
+    const multiDoc: DocItem[] = [
+      {
+        id: 'doc-m',
+        title: 'Graphics API',
+        body: 'WebGPU compute',
+        tags: ['graphics', 'gpu']
+      }
+    ];
+    const docIdx = await DocumentIndex.create(multiDoc, {
+      fields: [
+        { name: 'title', weight: 2.0 },
+        { name: 'tags', weight: 1.5 },
+        { name: 'body', weight: 1.0 }
+      ],
+      preferGpu: false
+    });
+
+    const multiRes = await docIdx.search('graphics', { highlightFields: 'all-fields', tag: 'mark' });
+    assert.strictEqual(multiRes.results.length, 1);
+    const mHit = multiRes.results[0];
+    assert.strictEqual(mHit.matchedField, 'title');
+    assert(mHit.highlights!['title'] !== undefined);
+    assert(mHit.highlights!['tags'] !== undefined);
+    assert(mHit.matches !== undefined && mHit.matches.length > 0);
+    // Verify that aux.highlights is populated in 'all-fields' mode
+    assert(mHit.matches[0].highlights !== undefined, 'Expected aux.highlights to be populated in all-fields mode');
+
+    // (h) Invalid highlightFields string throws TypeError
+    await assert.rejects(
+      async () => docIdx.search('graphics', { highlightFields: 'invalid-field-mode' as any }),
+      (err: any) => err instanceof TypeError && err.message.includes('Invalid highlightFields option')
+    );
+
+    docIdx.destroy();
+    console.log('   ✅ Security, edge cases, and multi-agent review hardening verified 100%');
   }
 
   console.log('\n--- All Milestone 3: Unicode-Safe Highlighting Engine Tests Passed! ✅ ---');

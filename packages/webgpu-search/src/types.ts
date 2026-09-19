@@ -141,6 +141,8 @@ export interface HighlightOptions {
   tag?: string;
   /** Fields to highlight ('matched-field' | 'all-matched' | 'all-fields' | string[]) */
   fields?: 'matched-field' | 'all-matched' | 'all-fields' | string[];
+  /** Whether to HTML-escape special characters in raw strings (default: false) */
+  escapeHtml?: boolean;
 }
 
 export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
@@ -154,6 +156,8 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   highlightOptions?: HighlightOptions;
   /** Fields to highlight ('matched-field' | 'all-matched' | 'all-fields' | string[]) */
   highlightFields?: 'matched-field' | 'all-matched' | 'all-fields' | string[];
+  /** Whether to HTML-escape special characters in snippet rendering (default: false) */
+  escapeHtml?: boolean;
   /** Predicate filter applied post-match */
   filter?: (doc: TDoc) => boolean;
 }

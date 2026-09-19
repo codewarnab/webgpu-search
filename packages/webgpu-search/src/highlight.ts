@@ -2,6 +2,7 @@ import type { HighlightRange, SearchMode } from './types';
 import { toWellFormedSafe, normalizeText } from './unicode-preprocess';
 import { foldCodePoint } from './fold-table';
 import { scoreSubstringTokens } from './cpu-reference';
+import { IncompatibleOptionError } from './text-profile';
 
 export interface SourceMappedText {
   /** Post-fold NFC scalar stream (u32 code points). */
@@ -33,7 +34,16 @@ export interface AlignHighlightOptions {
   queryTokens?: Uint32Array;
 }
 
+export interface RenderHighlightOptions {
+  /** HTML/formatting tag for snippets (default: 'mark') */
+  tag?: string;
+  /** Whether to HTML-escape special characters in raw string slices (default: false) */
+  escapeHtml?: boolean;
+}
+
 const COMBINING_MARK_REGEX = /^\p{M}/u;
+const EXTEND_OR_JOINER_REGEX = /^[\p{M}\p{Sk}\u200D\uFE0F]/u;
+const JAMO_V_OR_T_REGEX = /^[\u1160-\u11FF\uD7B0-\uD7FB]/u;
 
 let cachedSegmenter: Intl.Segmenter | null = null;
 function getSegmenter(): Intl.Segmenter | null {
@@ -186,11 +196,16 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
       const cp = wellFormed.codePointAt(i) as number;
       i += cp > 0xffff ? 2 : 1;
 
-      // Extend across following combining marks
+      // Extend across following combining marks, modifiers, joiners, and Jamo
       while (i < wfLen) {
         const nextCp = wellFormed.codePointAt(i) as number;
         const nextLen = nextCp > 0xffff ? 2 : 1;
-        if (COMBINING_MARK_REGEX.test(wellFormed.slice(i, i + nextLen))) {
+        const slice = wellFormed.slice(i, i + nextLen);
+        if (
+          COMBINING_MARK_REGEX.test(slice) ||
+          EXTEND_OR_JOINER_REGEX.test(slice) ||
+          JAMO_V_OR_T_REGEX.test(slice)
+        ) {
           i += nextLen;
         } else {
           break;
@@ -217,17 +232,43 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
 }
 
 /**
- * Extends end offset across any trailing combining marks so highlight ranges
- * never truncate a combining sequence or grapheme cluster.
+ * Extends end offset across any trailing combining marks, skin tone modifiers,
+ * or cluster joiners so highlight ranges never truncate a grapheme cluster.
  */
 export function guardClusterBoundary(raw: string, end: number): number {
   const len = raw.length;
+  if (end <= 0) return 0;
+  if (end >= len) return len;
+
   let cur = end;
+
+  // Prevent splitting surrogate pairs (0xd800..0xdbff followed by 0xdc00..0xdfff)
+  const prevCu = raw.charCodeAt(cur - 1);
+  const curCu = raw.charCodeAt(cur);
+  if (prevCu >= 0xd800 && prevCu <= 0xdbff && curCu >= 0xdc00 && curCu <= 0xdfff) {
+    cur++;
+  }
+
+  const segmenter = getSegmenter();
+  if (segmenter !== null) {
+    for (const seg of segmenter.segment(raw)) {
+      const segStart = seg.index;
+      const segEnd = segStart + seg.segment.length;
+      if (cur > segStart && cur < segEnd) {
+        return segEnd;
+      }
+      if (segStart >= cur) break;
+    }
+    return cur;
+  }
+
+  // Regex fallback for environments without Intl.Segmenter
   while (cur < len) {
     const cp = raw.codePointAt(cur);
-    if (cp === undefined) break;
+    if (cp === undefined || cp < 0x0300) break;
     const charLen = cp > 0xffff ? 2 : 1;
-    if (COMBINING_MARK_REGEX.test(raw.slice(cur, cur + charLen))) {
+    const slice = raw.slice(cur, cur + charLen);
+    if (EXTEND_OR_JOINER_REGEX.test(slice) || JAMO_V_OR_T_REGEX.test(slice)) {
       cur += charLen;
     } else {
       break;
@@ -238,22 +279,36 @@ export function guardClusterBoundary(raw: string, end: number): number {
 
 /**
  * Merges overlapping or contiguous highlight ranges into minimal non-overlapping slices.
+ * Clamps negative numbers and normalizes inverted ranges.
  */
 export function mergeHighlightRanges(ranges: readonly HighlightRange[]): HighlightRange[] {
   if (ranges.length === 0) return [];
-  if (ranges.length === 1) return [{ start: ranges[0].start, end: ranges[0].end }];
 
-  const sorted = [...ranges].sort((a, b) => {
+  const normalized: HighlightRange[] = [];
+  for (let i = 0; i < ranges.length; i++) {
+    const r = ranges[i];
+    if (r && typeof r.start === 'number' && typeof r.end === 'number') {
+      const s = Math.max(0, Math.min(r.start, r.end));
+      const e = Math.max(0, Math.max(r.start, r.end));
+      if (e > s) {
+        normalized.push({ start: s, end: e });
+      }
+    }
+  }
+  if (normalized.length === 0) return [];
+  if (normalized.length === 1) return [{ start: normalized[0].start, end: normalized[0].end }];
+
+  normalized.sort((a, b) => {
     if (a.start !== b.start) return a.start - b.start;
     return a.end - b.end;
   });
 
   const merged: HighlightRange[] = [];
-  let curStart = sorted[0].start;
-  let curEnd = sorted[0].end;
+  let curStart = normalized[0].start;
+  let curEnd = normalized[0].end;
 
-  for (let i = 1; i < sorted.length; i++) {
-    const next = sorted[i];
+  for (let i = 1; i < normalized.length; i++) {
+    const next = normalized[i];
     if (next.start <= curEnd) {
       if (next.end > curEnd) {
         curEnd = next.end;
@@ -282,7 +337,16 @@ export function alignHighlights(
 
   const folded = options.folded !== undefined
     ? options.folded
-    : !(options.caseSensitive ?? false);
+    : options.caseSensitive !== undefined
+      ? !options.caseSensitive
+      : (options.sourceMap ? options.sourceMap.folded : true);
+
+  if (options.sourceMap && options.folded !== undefined && options.sourceMap.folded !== options.folded) {
+    throw new IncompatibleOptionError(
+      'folded',
+      `[webgpu-search] alignHighlights sourceMap.folded (${options.sourceMap.folded}) diverges from requested folded mode (${options.folded}).`
+    );
+  }
 
   const sourceMap = options.sourceMap ?? normalizeWithSourceMap(raw, folded);
   if (sourceMap.isEmpty) return [];
@@ -322,20 +386,50 @@ export function alignHighlights(
   return mergeHighlightRanges(rawRanges);
 }
 
+function escapeHtmlEntities(str: string): string {
+  return str.replace(/[&<>"']/g, (m) => {
+    switch (m) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#39;';
+      default: return m;
+    }
+  });
+}
+
 /**
  * Formats a raw string with HTML tags injected at the specified highlight ranges.
- * If ranges is empty or raw is empty, returns raw without modifications.
+ * If ranges is empty or raw is empty, returns raw (or escaped raw if escapeHtml is true).
  */
 export function renderHighlightedText(
   raw: string,
   ranges: readonly HighlightRange[],
-  tag: string = 'mark'
+  tagOrOptions: string | RenderHighlightOptions = 'mark',
+  escapeHtmlOption?: boolean
 ): string {
-  if (!raw || ranges.length === 0) return raw;
+  if (!raw) return '';
+
+  const tag = typeof tagOrOptions === 'string' ? tagOrOptions : (tagOrOptions?.tag ?? 'mark');
+  const shouldEscape = typeof tagOrOptions === 'object' && tagOrOptions !== null
+    ? (tagOrOptions.escapeHtml ?? escapeHtmlOption ?? false)
+    : (escapeHtmlOption ?? false);
+
+  if (ranges.length === 0) {
+    return shouldEscape ? escapeHtmlEntities(raw) : raw;
+  }
+
+  const trimmedTag = tag.trim();
+  const tagMatch = /^([a-zA-Z][a-zA-Z0-9_-]*)/.exec(trimmedTag);
+  if (!tagMatch) {
+    throw new TypeError(`[webgpu-search] Invalid HTML tag: "${tag}". Must be a valid HTML element tag.`);
+  }
+  const tagName = tagMatch[1];
+  const openTag = `<${trimmedTag}>`;
+  const closeTag = `</${tagName}>`;
 
   const merged = mergeHighlightRanges(ranges);
-  const openTag = `<${tag}>`;
-  const closeTag = `</${tag}>`;
   let out = '';
   let lastIdx = 0;
 
@@ -345,18 +439,19 @@ export function renderHighlightedText(
     const clampedEnd = Math.max(clampedStart, Math.min(end, raw.length));
 
     if (clampedStart > lastIdx) {
-      out += raw.slice(lastIdx, clampedStart);
+      const slice = raw.slice(lastIdx, clampedStart);
+      out += shouldEscape ? escapeHtmlEntities(slice) : slice;
     }
     if (clampedEnd > clampedStart) {
-      out += openTag;
-      out += raw.slice(clampedStart, clampedEnd);
-      out += closeTag;
+      const slice = raw.slice(clampedStart, clampedEnd);
+      out += openTag + (shouldEscape ? escapeHtmlEntities(slice) : slice) + closeTag;
     }
     lastIdx = clampedEnd;
   }
 
   if (lastIdx < raw.length) {
-    out += raw.slice(lastIdx);
+    const slice = raw.slice(lastIdx);
+    out += shouldEscape ? escapeHtmlEntities(slice) : slice;
   }
 
   return out;
