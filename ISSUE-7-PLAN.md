@@ -228,11 +228,67 @@ class IncompatibleOptionError extends Error { option: string; reason: string; }
 > M5 delivery: Fully upgraded benchmark harness in `apps/benchmark` (warm median/p95 over configurable warmups and samples, interleaved 4-engine execution, CPU parity reference comparison, real rAF main thread telemetry, per-buffer VRAM accounting, packing breakdown) and `scripts/` (cross-platform headless runner with Playwright/Puppeteer cache discovery, Vite dev server lifecycle management, JSON & Markdown summary exports). Multi-corpus support (ASCII, CJK, Emoji/astral). All gates green (`check:shaders`, `typecheck`, `build`, `test:mock`, `test:parity`, `test:browser`, `test:benchmark`). Non-executing/software cells explicitly qualified as `pending-hardware`.
 
 
-### M6 — Migration + release (breaking)
+### M6 — Migration + Release (breaking)
 
-- [ ] Docs: 0.1.x limits note; **breaking** v0.2 migration (rebuild required, offsets bytes→tokens, `ß/ss` merges, canonical merges, astral/mark fixes, tie-break, `mode:'fuzzy'` semantic change, `slotBytes` throws, cache invalidation); before/after table; rebuild + `getStats()` version-check snippets; `TextProfile` doc block (code points ≠ graphemes, `Intl.Segmenter` pointer, ASCII delimiters, no locale mappings — preempts "Turkish bug"/"emoji ranking" issues); README benchmark invalidation note.
-- [ ] `legacy-ascii-v0.1` internal-only `console.warn` + v0.3 removal target; prerelease → compat reports → stable.
-- [ ] Final: no DOM refs, no temp files/logs, clean diff.
+- [ ] **Breaking v0.2 Migration Documentation (`docs/migration-v0.2.md` & `README.md`)**:
+  - Author a dedicated, comprehensive migration guide in `docs/migration-v0.2.md` and link it prominently in root `README.md`.
+  - **Index Rebuild & Binary Format Changes**:
+    - Explain why every v0.1 index must be rebuilt: records changed from 8-bit characters (`1 byte/char`) to normalized Unicode scalars (`4 bytes/token` `u32`); offsets changed from byte offsets (`Uint32Array` in byte units) to token offsets (`Uint32Array` in `u32` token indices).
+    - Document binary serialization format `U2F2`: magic `0x55324632` (`'U2F2'`), `formatVersion: 2`, CRC32 checksum, and metadata headers (`profileEnum`, `unicodeVersionEnum`, `scoringVersionEnum`, `rowCount`, `tokenCount`, `folded`).
+    - Explain that v0.1 serialized buffers lack magic bytes and will fail closed with `IncompatibleIndexError { expected: 2, actual: ..., remediation: 'rebuild required' }`.
+    - Provide copy-pasteable TypeScript snippets for re-indexing datasets, saving/loading U2F2 buffers via `serializeUnicodeDataset` / `deserializeUnicodeDataset`, and reading version/profile telemetry via `index.getStats()`.
+  - **Before / After Comparison Table**:
+    | Dimension | v0.1 (Legacy) | v0.2 (Unicode Code-Point-Safe) | Impact / Remediation |
+    |---|---|---|---|
+    | **Matching Unit** | UTF-16 code units (`charCodeAt`) | Unicode scalar values (`codePointAt`) | Astral characters, emojis, and symbols no longer split across surrogate boundaries. |
+    | **Character Sanitization** | NFKD + strips U+0300..U+036F + replaces non-ASCII with `?` | `trim` → `toWellFormed()` (U+FFFD fallback) → NFC → full C+F fold → NFC | Non-Latin scripts (CJK, Arabic, Indic, Cyrillic) and marks survive without destructive replacement. |
+    | **Case Insensitivity** | ASCII-only A-Z lowercase (`toLowerCase()`) | Pinned `CaseFolding-16.0.0` (C+F only, 1,557 mappings) | Full multi-scalar folds supported (e.g., `ß` $\leftrightarrow$ `ss`, `ﬀ` $\leftrightarrow$ `ff`, `ς`/`σ`/`Σ` merge). |
+    | **Canonical Equivalence** | Distinct unless identical code units | NFC canonical equivalence | Decomposed forms (`e` + `\u0301`) match precomposed forms (`é`). |
+    | **Query Length Limit** | Implicit 59 UTF-16 unit truncation in uniform | Explicit 128 post-fold code point capacity | Queries $> 128$ tokens fail-fast with `QueryTooLongError` or route to CPU via `onQueryTooLong: 'cpu-fallback'`. |
+    | **GPU Memory Representation** | Byte-packed records + byte offsets | `u32` scalar tokens + token offsets | True VRAM budget accounting; per-buffer allocation checks against device limits. |
+    | **Fuzzy Matching Semantics** | CPU-only `uFuzzy` rank scoring (`1000 - len * 2`) | Unified integer subsequence parity scorer | Bit-exact score and ranking symmetry between WebGPU compute shader and CPU reference fallback. |
+    | **Tie-Breaking Rule** | Undefined / non-deterministic sort | Strict deterministic `(score DESC, index ASC)` | Identical result ranking across WebGPU and CPU reference runs. |
+    | **Deprecated Options** | `IndexOptions.slotBytes` (ignored) | `IndexOptions.slotBytes` (throws `IncompatibleOptionError`) | Remove `slotBytes` from index options; scheduled for complete removal in v0.3. |
+  - **`TextProfile` Call-Site Contract & Semantic Disclaimers**:
+    - Explicitly state that matching operates on Unicode scalar values (code points), **not user-perceived grapheme clusters**. Point callers requiring grapheme cluster segmentation to `Intl.Segmenter`.
+    - Document the explicit 7-character ASCII word delimiter set (`/`, `_`, `-`, `.`, space, `:`, `\`). Note that non-ASCII spaces (such as `U+3000`) or non-Latin word boundaries receive no word-boundary bonus in v0.2.
+    - Explicitly state that default casing is locale-neutral (does not apply Turkic `I/İ/ı` mappings; `I` folds to `i`, not `ı`).
+    - Disclaim automatic transliteration, spelling correction, and Unicode confusable/skeleton matching (UTS #39).
+    - Document the `"Straße"` display slice caveat: post-fold match offsets (`[3, 6)`) must not be used to slice original UTF-16 source strings directly due to one-to-many folds (e.g., `ß` $\rightarrow$ `ss`). Callers must re-locate matches in display space.
+
+- [ ] **README Overhaul & Benchmark Invalidation**:
+  - Invalidate stale v0.1 ASCII-only benchmark numbers in root `README.md`; replace with reproducible M5 multi-corpus benchmark tables (ASCII code paths, CJK Hanzi/Kana, Emoji astral sequences) comparing WebGPU, CPU parity reference, uFuzzy, and JS Native.
+  - Clearly disclose hardware qualification: distinguish physical GPU execution from software Vulkan (`pending-hardware`).
+  - Refresh API quick-start examples, TypeScript types, and configuration snippets to reflect v0.2 exports: `SearchIndex`, `WebGPUEngine`, `CPUEngine`, `packUnicodeToGPUBuffer`, `serializeUnicodeDataset`, and error classes (`QueryTooLongError`, `IncompatibleIndexError`, `ProfileMismatchError`, `IncompatibleOptionError`).
+
+- [ ] **Internal Deprecation & Monorepo Boundary Enforcement (`packages/webgpu-search`)**:
+  - Verify that the internal deprecated `legacy-ascii-v0.1` path emits a `console.warn` notifying users of removal in v0.3.
+  - Audit codebase for 100% zero-DOM safety (`packages/webgpu-search` must contain no unguarded `window` or `document` symbols) to guarantee universal portability across browser main thread, Web Workers, Node.js, and SSR.
+  - Ensure zero external runtime dependencies are introduced to `packages/webgpu-search`.
+
+- [ ] **Pre-Publish Release Pipeline & Quality Assurance Gates (`.agents/skills/pre-publish/SKILL.md`)**:
+  - **Tarball Content & Leak Audit**:
+    - Execute `npm pack --dry-run` in `packages/webgpu-search`.
+    - Verify only authorized files are packaged: `dist/index.js`, `dist/index.cjs`, `dist/index.d.ts`, `dist/index.d.cts`, `README.md`, `LICENSE`.
+    - Ensure zero test fixtures, internal scripts, intermediate build caches, or sensitive files leak into the package tarball.
+  - **Bundle Size Budget Enforcement**:
+    - Assert `dist/index.js` gzipped size remains $\le$ 22.5 KB (M1 budget ceiling).
+  - **SemVer Version Bump & Changeset**:
+    - Bump package version from `0.1.0` to `0.2.0` in `packages/webgpu-search/package.json`.
+    - Synchronize workspace package references (`packages/webgpu-search` $\leftrightarrow$ `apps/benchmark`).
+  - **Full Monorepo Validation Gate**:
+    - `bun run check:shaders`: Offline AST & uniform layout check via `vgpu check`.
+    - `bun run typecheck`: 0 TypeScript diagnostics across all workspaces.
+    - `bun run build`: Clean production builds for both `packages/webgpu-search` and `apps/benchmark`.
+    - `bun run test:mock`: 25/25 in-memory mock suites passing.
+    - `bun run test:parity`: 117/117 differential parity assertions passing.
+    - `bun run test:browser`: 14/14 browser regression assertions passing.
+    - `bun run test:benchmark -- --fast`: End-to-end benchmark execution in headless browser context.
+
+- [ ] **Git Release Tagging & Issue Closure**:
+  - Create annotated Git release tag `v0.2.0`.
+  - Update `ISSUE-7-PLAN.md` and GitHub Issue #7 to 100% complete, closing Issue #7.
+  - Publish GitHub release notes detailing the breaking Unicode migration, benchmark numbers, and architectural guarantees.
 
 ## 4. Acceptance checklist
 
