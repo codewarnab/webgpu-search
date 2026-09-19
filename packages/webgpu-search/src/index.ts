@@ -1,5 +1,8 @@
 // High-Level Primary API
 export { SearchIndex } from './hybrid-index';
+export { DocumentIndex } from './document-index';
+export { SearchWorkerClient } from './worker/worker-client';
+
 
 // Low-Level Engines & Hardware Utilities for Power Users & Benchmarks
 export { WebGPUEngine, type DatasetLike, type EngineDataset, type ColdSearchResult, type WebGPUSearchResult, type SearchResult } from './webgpu-engine';
@@ -41,6 +44,11 @@ export {
   IncompatibleOptionError,
   ProfileMismatchError,
   QueryTooLongError,
+  DOC_FORMAT_VERSION,
+  SERIALIZED_DOC_MAGIC,
+  SERIALIZED_DOC_HEADER_BYTES,
+  DuplicateIdError,
+  DocumentNotFoundError,
   type CpuAlgorithm,
   type OnQueryTooLong,
   type TextProfileId,
