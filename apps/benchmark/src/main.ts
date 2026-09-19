@@ -98,7 +98,12 @@ async function init() {
     (window as any).gpuEngine = gpuEngine;
     (window as any).cpuEngine = cpuEngine;
 
-    const isSupported = await gpuEngine.init();
+    let isSupported = false;
+    try {
+        isSupported = await gpuEngine.init();
+    } catch (err) {
+        console.warn('WebGPU engine init threw an error, falling back to CPU:', err);
+    }
     const warningBanner = document.getElementById('webgpu-warning-banner');
 
     if (!isSupported) {
@@ -190,8 +195,8 @@ async function init() {
                         );
                     }
                 }
-                let parityResult: { durationMs: number; totalMatches: number; results: any[] } | null = null;
-                if (currentDataset && payload.query) {
+                let parityResult = payload.parityResult ?? null;
+                if (!parityResult && currentDataset && payload.query) {
                     const norm = normalizeText(payload.query, true);
                     parityResult = searchCpuReference(
                         currentDataset.recordTokens,
@@ -672,7 +677,7 @@ function renderResults(results: Array<{ index: number; score?: number; text?: st
             const before = text.substring(0, matchIdx);
             const match = text.substring(matchIdx, matchIdx + query.length);
             const after = text.substring(matchIdx + query.length);
-            highlightedHtml = `${escapeHtml(before)}<span class="result-match-highlight">${escapeHtml(match)}</span>${escapeHtml(after)}`;
+            highlightedHtml = `${escapeHtml(before)}<mark>${escapeHtml(match)}</mark>${escapeHtml(after)}`;
         } else {
             highlightedHtml = escapeHtml(text);
         }
@@ -725,8 +730,10 @@ async function runFullBenchmark() {
     const corpus: CorpusType = (corpusParam && ['ascii', 'cjk', 'emoji'].includes(corpusParam))
         ? corpusParam
         : ((corpusTypeSelect?.value as CorpusType) || 'ascii');
-    const warmups = warmupsParam ? Math.max(1, parseInt(warmupsParam, 10)) : 5;
-    const samples = samplesParam ? Math.max(1, parseInt(samplesParam, 10)) : 20;
+    const pWarmups = warmupsParam ? parseInt(warmupsParam, 10) : NaN;
+    const warmups = Number.isFinite(pWarmups) && pWarmups >= 1 ? Math.min(pWarmups, 100) : 5;
+    const pSamples = samplesParam ? parseInt(samplesParam, 10) : NaN;
+    const samples = Number.isFinite(pSamples) && pSamples >= 1 ? Math.min(pSamples, 100) : 20;
 
     const runSubstring = autorun !== 'fuzzy';
     const runFuzzy = autorun !== 'substring';
@@ -825,6 +832,11 @@ async function runFullBenchmark() {
         btnDownloadPngSub.disabled = false;
         btnDownloadPngFuz.disabled = false;
         if (btnCopySummary) btnCopySummary.disabled = false;
+
+        // Re-synchronize VRAM with active playground dataset
+        const restoreSize = parseInt(datasetSizeSelect.value, 10);
+        const restoreCorpus = (corpusTypeSelect?.value || 'ascii') as CorpusType;
+        await switchDataset(restoreSize, restoreCorpus);
     } catch (err: any) {
         console.error('Benchmark failed:', err);
         (window as any).__BENCHMARK_ERROR__ = String(err?.stack || err?.message || err);

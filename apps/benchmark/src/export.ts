@@ -129,6 +129,14 @@ export function generateBenchmarkCsv(
     'uFuzzy Total Matches'
   ].join(','));
 
+  const sanitizeCsvField = (val: string): string => {
+    let s = val.replace(/"/g, '""');
+    if (/^[=+@\-\t\r]/.test(s)) {
+      s = "'" + s;
+    }
+    return `"${s}"`;
+  };
+
   const addRows = (rows: BenchmarkRowResult[]) => {
     for (const r of rows) {
       const hasGpuTiming = r.gpuRetained.medianMs > 0;
@@ -136,7 +144,7 @@ export function generateBenchmarkCsv(
         r.mode.toUpperCase(),
         r.corpusType ? r.corpusType.toUpperCase() : 'ASCII',
         r.datasetSize,
-        `"${r.query.replace(/"/g, '""')}"`,
+        sanitizeCsvField(r.query),
         r.utf16Units ?? 0,
         r.codePoints ?? 0,
         `"${gpuDevice.replace(/"/g, '""')}"`,
@@ -280,5 +288,5 @@ export function downloadBlob(blob: Blob, filename: string): void {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
 }

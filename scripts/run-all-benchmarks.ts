@@ -77,7 +77,7 @@ async function main() {
             if (!res) return false;
             const hasSub = Array.isArray(res.substring) && res.substring.length > 0;
             const hasFuz = Array.isArray(res.fuzzy) && res.fuzzy.length > 0;
-            return hasSub || hasFuz ? res : false;
+            return hasSub && hasFuz ? res : false;
         }, { timeout: 360000, polling: 1000 });
 
         const benchmarkData = await resultsHandle.jsonValue() as any;

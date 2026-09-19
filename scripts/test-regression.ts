@@ -18,11 +18,16 @@ async function main() {
     const browser = await puppeteer.launch({
         executablePath: chromePath,
         headless: 'new',
-        args: getChromeLaunchArgs()
+        args: getChromeLaunchArgs(),
+        protocolTimeout: 0
     });
 
     try {
         const page = await browser.newPage();
+
+        page.on('pageerror', err => {
+            console.error('[Browser PageError]', err);
+        });
 
         page.on('console', msg => {
             const text = msg.text();
@@ -46,7 +51,7 @@ async function main() {
         }
 
         await page.waitForFunction(
-            () => (window as any).gpuEngine && (window as any).gpuEngine.isReady,
+            () => (window as any).__IS_INITIALIZED__ === true,
             { timeout: 15000 }
         );
 

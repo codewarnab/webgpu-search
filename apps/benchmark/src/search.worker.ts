@@ -1,15 +1,19 @@
 import {
   WebGPUEngine,
   CPUEngine,
+  searchCpuReference,
+  normalizeText,
   packUnicodeToGPUBuffer,
   deserializeUnicodeDataset,
   type SearchResult,
-  type CPUSearchResult
+  type CPUSearchResult,
+  type PackedUnicodeBufferV2
 } from 'webgpu-search';
 
 let gpuEngine: WebGPUEngine | null = null;
 let cpuEngine: CPUEngine | null = null;
 let datasetStrings: string[] = [];
+let datasetRecordTokens: Uint32Array[] = [];
 let datasetSize = 0;
 // Monotonic dataset generation: bumped only on successful LOAD_DATASET
 // commit. SEARCH_RESULTS echoes it so the main thread can drop hits that
@@ -174,6 +178,10 @@ self.onmessage = async (e: MessageEvent) => {
         const packMs = performance.now() - t0;
         const nextStrings = Array.isArray(strings) ? strings : [];
         const nextSize = packed.rowCount;
+        const nextTokens = new Array<Uint32Array>(packed.rowCount);
+        for (let i = 0; i < packed.rowCount; i++) {
+          nextTokens[i] = packed.tokens.subarray(packed.offsets[i]!, packed.offsets[i + 1]!);
+        }
         let uploadTimeMs = 0;
         if (gpuEngine?.isReady) {
           try {
@@ -207,6 +215,7 @@ self.onmessage = async (e: MessageEvent) => {
         }
         // Commit only after successful deserialize + GPU load.
         datasetStrings = nextStrings;
+        datasetRecordTokens = nextTokens;
         datasetSize = nextSize;
         datasetGeneration =
           incomingGeneration !== undefined ? incomingGeneration : datasetGeneration + 1;
@@ -265,7 +274,7 @@ self.onmessage = async (e: MessageEvent) => {
     // Always pack for metrics, even when the GPU is not ready (CPU-only
     // worker still reports tokenCount instead of a misleading 0).
     const t0 = performance.now();
-    let packedForMetrics: { tokenCount: number } | null = null;
+    let packedForMetrics: PackedUnicodeBufferV2 | null = null;
     try {
       packedForMetrics = packUnicodeToGPUBuffer(list, { folded: true });
     } catch (packErr) {
@@ -290,7 +299,7 @@ self.onmessage = async (e: MessageEvent) => {
         // SEARCH returns compact hits, main enriches). Legacy path loads
         // `strings` into the engine for full-text returns.
         const loadable = STRING_ISOLATED_ENRICHMENT
-          ? packUnicodeToGPUBuffer(list, { folded: true })
+          ? packedForMetrics
           : { size: list.length, strings: list };
         const res = await gpuEngine.loadDataset(loadable);
         uploadTimeMs = res.uploadTimeMs;
@@ -317,6 +326,13 @@ self.onmessage = async (e: MessageEvent) => {
     // Commit only after successful pack + GPU load.
     datasetStrings = list;
     datasetSize = list.length;
+    if (packedForMetrics) {
+      const nextTokens = new Array<Uint32Array>(packedForMetrics.rowCount);
+      for (let i = 0; i < packedForMetrics.rowCount; i++) {
+        nextTokens[i] = packedForMetrics.tokens.subarray(packedForMetrics.offsets[i]!, packedForMetrics.offsets[i + 1]!);
+      }
+      datasetRecordTokens = nextTokens;
+    }
     datasetGeneration =
       incomingGeneration !== undefined ? incomingGeneration : datasetGeneration + 1;
 
@@ -422,9 +438,22 @@ self.onmessage = async (e: MessageEvent) => {
         return;
       }
 
-      if (runCpuComparison && cpuEngine && query && datasetStrings.length > 0) {
-        ufuzzyResult = cpuEngine.searchUFuzzy(datasetStrings, query, limit);
-        nativeResult = cpuEngine.searchNative(datasetStrings, query, limit);
+      let parityResult: { durationMs: number; totalMatches: number; results: any[] } | null = null;
+      if (runCpuComparison && query) {
+        if (datasetRecordTokens.length > 0) {
+          const norm = normalizeText(query, true);
+          parityResult = searchCpuReference(
+            datasetRecordTokens,
+            norm.tokens,
+            mode,
+            limit,
+            datasetStrings
+          );
+        }
+        if (cpuEngine && datasetStrings.length > 0) {
+          ufuzzyResult = cpuEngine.searchUFuzzy(datasetStrings, query, limit);
+          nativeResult = cpuEngine.searchNative(datasetStrings, query, limit);
+        }
       }
 
       if (signal.aborted || queryId < latestQueryId) {
@@ -441,6 +470,7 @@ self.onmessage = async (e: MessageEvent) => {
           gpuResult,
           gpuCompact,
           gpuMeta,
+          parityResult,
           ufuzzyResult,
           nativeResult,
           workerPostTimestamp: performance.now(),

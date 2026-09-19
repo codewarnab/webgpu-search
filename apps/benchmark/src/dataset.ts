@@ -324,7 +324,9 @@ export function generateDataset(
     const s = strings[i]!;
     utf16Units += s.length;
     // Count Unicode code points (astral scalars count as 1, surrogates counted accurately)
-    for (const _ of s) {
+    for (let j = 0; j < s.length; ) {
+      const cp = s.codePointAt(j)!;
+      j += cp > 0xffff ? 2 : 1;
       codePoints++;
     }
     const norm = normalizeText(s, folded);

@@ -96,9 +96,13 @@ async function main() {
         })));
 
         // Screenshot
-        const screenshotPath = path.resolve('fuzzy-benchmark-results.png');
-        await page.screenshot({ path: screenshotPath, fullPage: true });
-        console.log(`Saved screenshot to: ${screenshotPath}`);
+        try {
+            const screenshotPath = path.resolve('fuzzy-benchmark-results.png');
+            await page.screenshot({ path: screenshotPath, fullPage: true });
+            console.log(`Saved screenshot to: ${screenshotPath}`);
+        } catch (e) {
+            console.warn('Could not save screenshot:', e);
+        }
 
         // Save JSON
         const jsonPath = path.resolve('fuzzy-benchmark-results.json');

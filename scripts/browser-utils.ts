@@ -10,10 +10,20 @@ import { spawn, type ChildProcess } from 'child_process';
  * and standard operating system installation paths.
  */
 export function getChromeExecutablePath(): string {
-    if (process.env.CHROME_BIN && fs.existsSync(process.env.CHROME_BIN)) {
+    const isExecutable = (p: string): boolean => {
+        try {
+            if (!fs.existsSync(p) || !fs.statSync(p).isFile()) return false;
+            if (process.platform !== 'win32') fs.accessSync(p, fs.constants.X_OK);
+            return true;
+        } catch {
+            return false;
+        }
+    };
+
+    if (process.env.CHROME_BIN && isExecutable(process.env.CHROME_BIN)) {
         return process.env.CHROME_BIN;
     }
-    if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+    if (process.env.PUPPETEER_EXECUTABLE_PATH && isExecutable(process.env.PUPPETEER_EXECUTABLE_PATH)) {
         return process.env.PUPPETEER_EXECUTABLE_PATH;
     }
 
@@ -35,6 +45,7 @@ export function getChromeExecutablePath(): string {
             const localAppData = process.env.LOCALAPPDATA || path.join(h, 'AppData', 'Local');
             cacheDirs.push(path.join(localAppData, 'ms-playwright'));
             cacheDirs.push(path.join(localAppData, 'puppeteer'));
+            cacheDirs.push(path.join(h, '.cache', 'puppeteer'));
         } else if (platform === 'darwin') {
             cacheDirs.push(path.join(h, 'Library', 'Caches', 'ms-playwright'));
             cacheDirs.push(path.join(h, 'Library', 'Caches', 'puppeteer'));
@@ -46,14 +57,22 @@ export function getChromeExecutablePath(): string {
 
     for (const cacheDir of cacheDirs) {
         if (!fs.existsSync(cacheDir)) continue;
-        const candidates = findExecutablesRecursively(
-            cacheDir,
-            platform === 'win32' ? ['chrome.exe', 'msedge.exe'] : ['chrome', 'chromium']
-        );
+        const targetNames = platform === 'win32'
+            ? ['chrome.exe', 'msedge.exe']
+            : platform === 'darwin'
+                ? ['Google Chrome for Testing', 'Chromium', 'Google Chrome', 'chrome', 'chromium']
+                : ['chrome', 'chromium'];
+        const candidates = findExecutablesRecursively(cacheDir, targetNames, 8);
         if (candidates.length > 0) {
             // Sort by modification time descending (prefer latest version)
-            candidates.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-            return candidates[0];
+            candidates.sort((a, b) => {
+                try {
+                    return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs;
+                } catch {
+                    return 0;
+                }
+            });
+            return candidates[0]!;
         }
     }
 
@@ -112,8 +131,11 @@ function findExecutablesRecursively(dir: string, targetNames: string[], maxDepth
             const fullPath = path.join(currentDir, entry.name);
             if (entry.isDirectory()) {
                 walk(fullPath, depth + 1);
-            } else if (entry.isFile()) {
-                if (targetNames.includes(entry.name)) {
+            } else if (entry.isFile() || entry.isSymbolicLink()) {
+                const match = targetNames.some(t =>
+                    process.platform === 'win32' ? t.toLowerCase() === entry.name.toLowerCase() : t === entry.name
+                );
+                if (match) {
                     if (process.platform !== 'win32') {
                         try {
                             fs.accessSync(fullPath, fs.constants.X_OK);
@@ -138,15 +160,18 @@ function findExecutablesRecursively(dir: string, targetNames: string[], maxDepth
 export function getChromeLaunchArgs(): string[] {
     const args = [
         '--enable-unsafe-webgpu',
-        '--enable-features=Vulkan,DefaultANGLEVulkan,WebGPU',
+        '--enable-features=Vulkan,WebGPU',
         '--enable-gpu-rasterization',
         '--enable-unsafe-swiftshader',
+        '--disable-dev-shm-usage',
+        '--ignore-gpu-blocklist',
+        '--disable-gpu-sandbox',
         '--window-size=1280,950',
         '--no-sandbox',
         '--disable-setuid-sandbox'
     ];
     if (process.platform === 'win32') {
-        args.push('--use-angle=d3d11');
+        args.push('--use-angle=d3d12');
     }
     return args;
 }
@@ -166,7 +191,8 @@ export async function ensureBenchmarkServer(port = 5173, timeoutMs = 30000): Pro
     // Test if already running
     try {
         const res = await fetch(`${url}/`, { signal: AbortSignal.timeout(1000) });
-        if (res.ok || res.status === 200 || res.status === 304) {
+        const html = await res.text().catch(() => '');
+        if ((res.ok || res.status === 200 || res.status === 304) && html.includes('WebGPU Fuzzy Search')) {
             console.log(`[Server] Detected existing benchmark server running at ${url}`);
             return {
                 url,
@@ -178,12 +204,14 @@ export async function ensureBenchmarkServer(port = 5173, timeoutMs = 30000): Pro
     }
 
     console.log(`[Server] Spawning Vite benchmark server on ${url}...`);
-    const benchmarkDir = path.resolve(process.cwd(), 'apps/benchmark');
+    const repoRoot = path.resolve(__dirname, '..');
+    const benchmarkDir = path.resolve(repoRoot, 'apps/benchmark');
     const child = spawn(
         'bun',
-        ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(port), '--no-open'],
+        ['run', 'dev', '--', '--host', '127.0.0.1', '--port', String(port), '--strictPort', '--no-open'],
         {
             cwd: benchmarkDir,
+            detached: process.platform !== 'win32',
             stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...process.env, BROWSER: 'none', CI: 'true' }
         }
@@ -199,10 +227,22 @@ export async function ensureBenchmarkServer(port = 5173, timeoutMs = 30000): Pro
         if (killed) return;
         killed = true;
         try {
-            child.kill('SIGTERM');
+            if (process.platform !== 'win32' && child.pid) {
+                try {
+                    process.kill(-child.pid, 'SIGTERM');
+                } catch {
+                    child.kill('SIGTERM');
+                }
+            } else {
+                child.kill('SIGTERM');
+            }
             const killTimer = setTimeout(() => {
                 try {
-                    if (!child.killed) child.kill('SIGKILL');
+                    if (process.platform !== 'win32' && child.pid) {
+                        process.kill(-child.pid, 'SIGKILL');
+                    } else if (!child.killed) {
+                        child.kill('SIGKILL');
+                    }
                 } catch {}
             }, 2000);
             if (typeof killTimer.unref === 'function') {
@@ -255,12 +295,14 @@ export function formatBenchmarkMarkdown(benchmarkData: {
     lines.push('# WebGPU Fuzzy Search Benchmark Results');
     lines.push('');
     lines.push(`- **Date**: ${new Date().toISOString()}`);
-    if (benchmarkData.meta?.qualificationStatus) {
-        const isQualified = benchmarkData.meta.qualificationStatus === 'qualified';
+    const qualStatus = benchmarkData.meta?.qualificationStatus || (benchmarkData as any).qualificationStatus;
+    if (qualStatus) {
+        const isQualified = qualStatus === 'qualified';
         lines.push(`- **Hardware Qualification**: ${isQualified ? '✅ Qualified (Physical GPU)' : '⚠️ pending-hardware (Software Vulkan / Mock Render)'}`);
     }
-    if (benchmarkData.meta?.adapterInfo) {
-        lines.push(`- **Adapter**: ${JSON.stringify(benchmarkData.meta.adapterInfo)}`);
+    const adapter = benchmarkData.meta?.adapterInfo || (benchmarkData as any).adapterInfo;
+    if (adapter) {
+        lines.push(`- **Adapter**: ${JSON.stringify(adapter)}`);
     }
     lines.push('');
 

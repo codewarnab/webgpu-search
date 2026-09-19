@@ -15,81 +15,81 @@
         "totalBytes": 1789340
       },
       "packing": {
-        "normalizeMs": 62,
-        "packMs": 25.4,
-        "uploadMs": 47,
-        "totalPipelineMs": 134.4
+        "normalizeMs": 71.1,
+        "packMs": 23.7,
+        "uploadMs": 46.6,
+        "totalPipelineMs": 141.4
       },
       "gpuRetained": {
         "medianMs": 7.2,
-        "p95Ms": 8.82,
+        "p95Ms": 8.36,
         "totalMs": 7.2,
         "queryUploadMs": 0,
-        "encodeSubmitMs": 0.2,
-        "gpuExecutionMs": 5.26,
-        "readbackMs": 5.4,
-        "gpuDispatchMs": 0.2,
+        "encodeSubmitMs": 0.1,
+        "gpuExecutionMs": 4.61,
+        "readbackMs": 6.8,
+        "gpuDispatchMs": 0.1,
         "samples": [
-          4.3,
-          5.5,
+          5.9,
+          7,
           7.2,
-          8.5,
-          8.9
+          7.4,
+          8.6
         ]
       },
       "gpuCold": {
-        "uploadMs": 47,
-        "totalMs": 69.7
+        "uploadMs": 46.6,
+        "totalMs": 57.5
       },
       "cpuParity": {
-        "medianMs": 3.3,
-        "p95Ms": 5.22,
-        "minMs": 1.8,
-        "maxMs": 5.3,
-        "meanMs": 3.66,
-        "samples": [
-          1.8,
-          3,
-          3.3,
-          4.9,
-          5.3
-        ]
-      },
-      "ufuzzy": {
-        "medianMs": 2.9,
-        "p95Ms": 3.66,
-        "minMs": 1.6,
+        "medianMs": 1.6,
+        "p95Ms": 3.52,
+        "minMs": 1.5,
         "maxMs": 3.8,
-        "meanMs": 2.84,
+        "meanMs": 2.16,
         "samples": [
+          1.5,
+          1.5,
           1.6,
-          2.8,
-          2.9,
-          3.1,
+          2.4,
           3.8
         ]
       },
-      "jsNative": {
-        "medianMs": 2.4,
-        "p95Ms": 3.92,
-        "minMs": 1.4,
-        "maxMs": 4.3,
-        "meanMs": 2.4,
+      "ufuzzy": {
+        "medianMs": 1.9,
+        "p95Ms": 2.7,
+        "minMs": 1.5,
+        "maxMs": 2.7,
+        "meanMs": 2.1,
         "samples": [
-          1.4,
           1.5,
-          2.4,
-          2.4,
-          4.3
+          1.7,
+          1.9,
+          2.7,
+          2.7
         ]
       },
-      "cpuParityMs": 3.3,
-      "ufuzzyMs": 2.9,
-      "jsNativeMs": 2.4,
-      "retainedVsUfuzzySpeedup": 0.4,
-      "retainedVsParitySpeedup": 0.46,
-      "retainedVsNativeSpeedup": 0.33,
-      "coldVsUfuzzySpeedup": 0.04,
+      "jsNative": {
+        "medianMs": 1.1,
+        "p95Ms": 2.24,
+        "minMs": 1,
+        "maxMs": 2.5,
+        "meanMs": 1.36,
+        "samples": [
+          1,
+          1,
+          1.1,
+          1.2,
+          2.5
+        ]
+      },
+      "cpuParityMs": 1.6,
+      "ufuzzyMs": 1.9,
+      "jsNativeMs": 1.1,
+      "retainedVsUfuzzySpeedup": 0.26,
+      "retainedVsParitySpeedup": 0.22,
+      "retainedVsNativeSpeedup": 0.15,
+      "coldVsUfuzzySpeedup": 0.03,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": false,
         "gpuRetainedBeatsParity": false,
@@ -105,11 +105,11 @@
       "hasOverflow": false,
       "uiTelemetry": {
         "workerFps": 120,
-        "mainThreadFps": 38,
-        "mainThreadJankMs": 33.4,
-        "droppedFrames": 3,
+        "mainThreadFps": 44,
+        "mainThreadJankMs": 50.1,
+        "droppedFrames": 5,
         "jankSpikes": 5,
-        "totalFrameCount": 7
+        "totalFrameCount": 13
       },
       "hardwareQualified": false,
       "qualificationStatus": "pending-hardware"
@@ -129,81 +129,81 @@
         "totalBytes": 17699256
       },
       "packing": {
-        "normalizeMs": 289.9,
-        "packMs": 101.4,
-        "uploadMs": 230.8,
-        "totalPipelineMs": 622.1
+        "normalizeMs": 238.1,
+        "packMs": 63.5,
+        "uploadMs": 91.6,
+        "totalPipelineMs": 393.2
       },
       "gpuRetained": {
-        "medianMs": 48.7,
-        "p95Ms": 55.16,
-        "totalMs": 48.7,
-        "queryUploadMs": 0,
-        "encodeSubmitMs": 0.2,
-        "gpuExecutionMs": 44.03,
-        "readbackMs": 48.5,
-        "gpuDispatchMs": 0.2,
+        "medianMs": 50.5,
+        "p95Ms": 55.4,
+        "totalMs": 50.5,
+        "queryUploadMs": 0.1,
+        "encodeSubmitMs": 0.1,
+        "gpuExecutionMs": 47.49,
+        "readbackMs": 50.1,
+        "gpuDispatchMs": 0.1,
         "samples": [
-          36.3,
-          47,
-          48.7,
-          50.6,
-          56.3
+          38.2,
+          46.9,
+          50.5,
+          53.8,
+          55.8
         ]
       },
       "gpuCold": {
-        "uploadMs": 230.8,
-        "totalMs": 266.6
+        "uploadMs": 91.6,
+        "totalMs": 126.2
       },
       "cpuParity": {
-        "medianMs": 22.8,
-        "p95Ms": 29.9,
-        "minMs": 20.9,
-        "maxMs": 30.5,
-        "meanMs": 24.82,
+        "medianMs": 20.1,
+        "p95Ms": 35.64,
+        "minMs": 15.5,
+        "maxMs": 38.4,
+        "meanMs": 23.72,
         "samples": [
-          20.9,
-          22.4,
-          22.8,
-          27.5,
-          30.5
+          15.5,
+          20,
+          20.1,
+          24.6,
+          38.4
         ]
       },
       "ufuzzy": {
-        "medianMs": 20.8,
-        "p95Ms": 24.4,
-        "minMs": 18.7,
-        "maxMs": 24.9,
-        "meanMs": 21.12,
+        "medianMs": 21.3,
+        "p95Ms": 42.76,
+        "minMs": 15.1,
+        "maxMs": 46.9,
+        "meanMs": 25.48,
         "samples": [
-          18.7,
-          18.8,
-          20.8,
-          22.4,
-          24.9
+          15.1,
+          17.9,
+          21.3,
+          26.2,
+          46.9
         ]
       },
       "jsNative": {
-        "medianMs": 16.4,
-        "p95Ms": 17.68,
-        "minMs": 12.3,
-        "maxMs": 17.8,
-        "meanMs": 15.64,
+        "medianMs": 21.1,
+        "p95Ms": 31.06,
+        "minMs": 10.5,
+        "maxMs": 31.8,
+        "meanMs": 20.62,
         "samples": [
-          12.3,
-          14.5,
-          16.4,
-          17.2,
-          17.8
+          10.5,
+          11.6,
+          21.1,
+          28.1,
+          31.8
         ]
       },
-      "cpuParityMs": 22.8,
-      "ufuzzyMs": 20.8,
-      "jsNativeMs": 16.4,
-      "retainedVsUfuzzySpeedup": 0.43,
-      "retainedVsParitySpeedup": 0.47,
-      "retainedVsNativeSpeedup": 0.34,
-      "coldVsUfuzzySpeedup": 0.08,
+      "cpuParityMs": 20.1,
+      "ufuzzyMs": 21.3,
+      "jsNativeMs": 21.1,
+      "retainedVsUfuzzySpeedup": 0.42,
+      "retainedVsParitySpeedup": 0.4,
+      "retainedVsNativeSpeedup": 0.42,
+      "coldVsUfuzzySpeedup": 0.17,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": false,
         "gpuRetainedBeatsParity": false,
@@ -219,11 +219,11 @@
       "hasOverflow": false,
       "uiTelemetry": {
         "workerFps": 120,
-        "mainThreadFps": 31,
-        "mainThreadJankMs": 83.4,
-        "droppedFrames": 25,
-        "jankSpikes": 16,
-        "totalFrameCount": 26
+        "mainThreadFps": 52,
+        "mainThreadJankMs": 50,
+        "droppedFrames": 8,
+        "jankSpikes": 19,
+        "totalFrameCount": 47
       },
       "hardwareQualified": false,
       "qualificationStatus": "pending-hardware"
@@ -245,81 +245,81 @@
         "totalBytes": 1789340
       },
       "packing": {
-        "normalizeMs": 30.7,
-        "packMs": 9.1,
-        "uploadMs": 31.5,
-        "totalPipelineMs": 71.3
+        "normalizeMs": 60.9,
+        "packMs": 18,
+        "uploadMs": 26.8,
+        "totalPipelineMs": 105.7
       },
       "gpuRetained": {
-        "medianMs": 14.6,
-        "p95Ms": 19.12,
-        "totalMs": 14.6,
+        "medianMs": 10.5,
+        "p95Ms": 12.84,
+        "totalMs": 10.5,
         "queryUploadMs": 0.1,
         "encodeSubmitMs": 0.1,
-        "gpuExecutionMs": 11.78,
-        "readbackMs": 14.4,
+        "gpuExecutionMs": 8.56,
+        "readbackMs": 10,
         "gpuDispatchMs": 0.1,
         "samples": [
-          11.6,
-          12.8,
-          14.6,
-          15.6,
-          20
+          9.5,
+          9.7,
+          10.5,
+          10.6,
+          13.4
         ]
       },
       "gpuCold": {
-        "uploadMs": 31.5,
-        "totalMs": 49.8
+        "uploadMs": 26.8,
+        "totalMs": 46.3
       },
       "cpuParity": {
-        "medianMs": 2.6,
-        "p95Ms": 3.46,
-        "minMs": 1.5,
-        "maxMs": 3.6,
-        "meanMs": 2.42,
+        "medianMs": 2.7,
+        "p95Ms": 5.52,
+        "minMs": 1.7,
+        "maxMs": 5.7,
+        "meanMs": 3.38,
         "samples": [
-          1.5,
-          1.5,
-          2.6,
-          2.9,
-          3.6
+          1.7,
+          2,
+          2.7,
+          4.8,
+          5.7
         ]
       },
       "ufuzzy": {
-        "medianMs": 2.8,
-        "p95Ms": 4.86,
-        "minMs": 1.5,
-        "maxMs": 5.2,
-        "meanMs": 2.9,
+        "medianMs": 3.2,
+        "p95Ms": 4.24,
+        "minMs": 1.6,
+        "maxMs": 4.3,
+        "meanMs": 3.08,
         "samples": [
-          1.5,
-          1.5,
-          2.8,
-          3.5,
-          5.2
+          1.6,
+          2.3,
+          3.2,
+          4,
+          4.3
         ]
       },
       "jsNative": {
-        "medianMs": 1.2,
-        "p95Ms": 2.9,
-        "minMs": 1,
-        "maxMs": 3.1,
-        "meanMs": 1.68,
+        "medianMs": 2,
+        "p95Ms": 2.74,
+        "minMs": 1.2,
+        "maxMs": 2.8,
+        "meanMs": 1.98,
         "samples": [
-          1,
-          1,
           1.2,
-          2.1,
-          3.1
+          1.4,
+          2,
+          2.5,
+          2.8
         ]
       },
-      "cpuParityMs": 2.6,
-      "ufuzzyMs": 2.8,
-      "jsNativeMs": 1.2,
-      "retainedVsUfuzzySpeedup": 0.19,
-      "retainedVsParitySpeedup": 0.18,
-      "retainedVsNativeSpeedup": 0.08,
-      "coldVsUfuzzySpeedup": 0.06,
+      "cpuParityMs": 2.7,
+      "ufuzzyMs": 3.2,
+      "jsNativeMs": 2,
+      "retainedVsUfuzzySpeedup": 0.3,
+      "retainedVsParitySpeedup": 0.26,
+      "retainedVsNativeSpeedup": 0.19,
+      "coldVsUfuzzySpeedup": 0.07,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": false,
         "gpuRetainedBeatsParity": false,
@@ -335,11 +335,11 @@
       "hasOverflow": false,
       "uiTelemetry": {
         "workerFps": 120,
-        "mainThreadFps": 47,
+        "mainThreadFps": 57,
         "mainThreadJankMs": 33.4,
-        "droppedFrames": 3,
+        "droppedFrames": 1,
         "jankSpikes": 4,
-        "totalFrameCount": 11
+        "totalFrameCount": 17
       },
       "hardwareQualified": false,
       "qualificationStatus": "pending-hardware"
@@ -359,81 +359,81 @@
         "totalBytes": 17699256
       },
       "packing": {
-        "normalizeMs": 320.6,
-        "packMs": 108.1,
-        "uploadMs": 295.8,
-        "totalPipelineMs": 724.5
+        "normalizeMs": 434.9,
+        "packMs": 106.1,
+        "uploadMs": 166.9,
+        "totalPipelineMs": 707.9
       },
       "gpuRetained": {
-        "medianMs": 98.5,
-        "p95Ms": 220.08,
-        "totalMs": 98.5,
+        "medianMs": 82.3,
+        "p95Ms": 95.58,
+        "totalMs": 82.3,
         "queryUploadMs": 0,
         "encodeSubmitMs": 0.2,
-        "gpuExecutionMs": 95.89,
-        "readbackMs": 98.4,
+        "gpuExecutionMs": 81.01,
+        "readbackMs": 82.1,
         "gpuDispatchMs": 0.2,
         "samples": [
-          92.5,
-          96.4,
-          98.5,
-          150.4,
-          237.5
+          78.8,
+          79.8,
+          82.3,
+          93.5,
+          96.1
         ]
       },
       "gpuCold": {
-        "uploadMs": 295.8,
-        "totalMs": 400.5
+        "uploadMs": 166.9,
+        "totalMs": 310
       },
       "cpuParity": {
-        "medianMs": 25.2,
-        "p95Ms": 33.36,
-        "minMs": 15.4,
-        "maxMs": 34.1,
-        "meanMs": 24.96,
+        "medianMs": 29,
+        "p95Ms": 36.62,
+        "minMs": 14.3,
+        "maxMs": 37.7,
+        "meanMs": 28.3,
         "samples": [
-          15.4,
-          19.7,
-          25.2,
-          30.4,
-          34.1
+          14.3,
+          28.2,
+          29,
+          32.3,
+          37.7
         ]
       },
       "ufuzzy": {
-        "medianMs": 21.5,
-        "p95Ms": 45.3,
-        "minMs": 20.4,
-        "maxMs": 46.5,
-        "meanMs": 30,
+        "medianMs": 26.3,
+        "p95Ms": 37.64,
+        "minMs": 15,
+        "maxMs": 38.4,
+        "meanMs": 25.94,
         "samples": [
-          20.4,
-          21.1,
-          21.5,
-          40.5,
-          46.5
+          15,
+          15.4,
+          26.3,
+          34.6,
+          38.4
         ]
       },
       "jsNative": {
-        "medianMs": 13.1,
-        "p95Ms": 26.66,
+        "medianMs": 15.2,
+        "p95Ms": 18.72,
         "minMs": 10.3,
-        "maxMs": 28.6,
-        "meanMs": 16.5,
+        "maxMs": 19,
+        "meanMs": 14.7,
         "samples": [
           10.3,
-          11.6,
-          13.1,
-          18.9,
-          28.6
+          11.4,
+          15.2,
+          17.6,
+          19
         ]
       },
-      "cpuParityMs": 25.2,
-      "ufuzzyMs": 21.5,
-      "jsNativeMs": 13.1,
-      "retainedVsUfuzzySpeedup": 0.22,
-      "retainedVsParitySpeedup": 0.26,
-      "retainedVsNativeSpeedup": 0.13,
-      "coldVsUfuzzySpeedup": 0.05,
+      "cpuParityMs": 29,
+      "ufuzzyMs": 26.3,
+      "jsNativeMs": 15.2,
+      "retainedVsUfuzzySpeedup": 0.32,
+      "retainedVsParitySpeedup": 0.35,
+      "retainedVsNativeSpeedup": 0.18,
+      "coldVsUfuzzySpeedup": 0.08,
       "crossover": {
         "gpuRetainedBeatsUfuzzy": false,
         "gpuRetainedBeatsParity": false,
@@ -449,11 +449,11 @@
       "hasOverflow": false,
       "uiTelemetry": {
         "workerFps": 120,
-        "mainThreadFps": 30,
-        "mainThreadJankMs": 99.9,
-        "droppedFrames": 45,
-        "jankSpikes": 27,
-        "totalFrameCount": 45
+        "mainThreadFps": 48,
+        "mainThreadJankMs": 49.9,
+        "droppedFrames": 16,
+        "jankSpikes": 21,
+        "totalFrameCount": 61
       },
       "hardwareQualified": false,
       "qualificationStatus": "pending-hardware"
@@ -475,5 +475,5 @@
     "maxComputeInvocationsPerWorkgroup": 256,
     "hasTimestampQuery": true
   },
-  "timestamp": "2026-09-18T19:13:09.304Z"
+  "timestamp": "2026-09-19T05:22:04.452Z"
 }

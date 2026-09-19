@@ -179,9 +179,13 @@ export function isPhysicalGpu(adapterInfo: AdapterInfo | null): boolean {
   if (
     desc.includes('swiftshader') ||
     desc.includes('llvmpipe') ||
-    desc.includes('software') ||
+    desc.includes('lavapipe') ||
+    desc.includes('softpipe') ||
+    desc.includes('basic render driver') ||
+    desc.includes('warp') ||
     desc.includes('mock') ||
-    desc.includes('cpu')
+    /\bsoftware\b/.test(desc) ||
+    /\bcpu (rasterizer|renderer|fallback)\b/.test(desc)
   ) {
     return false;
   }
@@ -218,7 +222,7 @@ export class FrameTelemetryTracker {
         this.frameCount++;
         if (delta > 16.7) {
           this.jankSpikes++;
-          const dropped = Math.max(0, Math.round(delta / 16.67) - 1);
+          const dropped = Math.max(0, Math.floor(delta / 16.67) - (delta % 16.67 > 4 ? 0 : 1));
           this.droppedFrames += dropped;
         }
         if (delta > this.maxFrameMs) {
@@ -355,7 +359,7 @@ export class BenchmarkRunner {
       let coldTotalMs = 0;
 
       if (this.gpuEngine.isReady) {
-        const cold = await this.gpuEngine.searchCold(dataset, query, { mode, maxResults: 1000 });
+        const cold = await this.gpuEngine.searchCold(dataset.serializedU2F2, query, { mode, maxResults: 1000 });
         coldUploadMs = Number(cold.datasetUploadMs.toFixed(2));
         coldTotalMs = Number(cold.coldTotalMs.toFixed(2));
       }
@@ -371,49 +375,7 @@ export class BenchmarkRunner {
       const frameTracker = new FrameTelemetryTracker();
       frameTracker.start();
 
-      // Engines for interleaved execution
-      const engines: EngineKey[] = ['webgpu', 'cpu-parity', 'ufuzzy', 'js-native'];
-
-      // 6. Warmup Phase (Randomized execution to eliminate JIT compilation outliers)
-      if (onProgress) {
-        onProgress({
-          currentStep: sIdx + 1,
-          totalSteps,
-          stepName: `[${sIdx + 1}/${totalSteps}] Warming up engines (${warmups} iterations)...`
-        });
-      }
-
-      for (let w = 0; w < warmups; w++) {
-        const shuffled = shuffleArray(engines);
-        for (const engine of shuffled) {
-          switch (engine) {
-            case 'webgpu':
-              if (this.gpuEngine.isReady) {
-                await this.gpuEngine.search(query, { mode, maxResults: 1000 });
-              }
-              break;
-            case 'cpu-parity':
-              searchCpuReference(dataset.recordTokens, normalizedQuery.tokens, mode, 1000, dataset.strings);
-              break;
-            case 'ufuzzy':
-              this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
-              break;
-            case 'js-native':
-              this.cpuEngine.searchNative(dataset.strings, query, 1000);
-              break;
-          }
-        }
-        await new Promise(r => setTimeout(r, 10));
-      }
-
-      // 7. Measurement Phase: Randomized / Interleaved Execution
-      if (onProgress) {
-        onProgress({
-          currentStep: sIdx + 1,
-          totalSteps,
-          stepName: `[${sIdx + 1}/${totalSteps}] Collecting ${samples} samples across interleaved engines...`
-        });
-      }
+      let uiTelemetry: UiTelemetry;
 
       const gpuSamples: number[] = [];
       const gpuQueryUploadSamples: number[] = [];
@@ -432,61 +394,109 @@ export class BenchmarkRunner {
       const jsNativeSamples: number[] = [];
       let jsNativeMatches = 0;
 
-      for (let s = 0; s < samples; s++) {
-        const shuffled = shuffleArray(engines);
+      try {
+        // Engines for interleaved execution
+        const engines: EngineKey[] = ['webgpu', 'cpu-parity', 'ufuzzy', 'js-native'];
 
-        for (const engine of shuffled) {
-          switch (engine) {
-            case 'webgpu':
-              if (this.gpuEngine.isReady) {
-                const res = await this.gpuEngine.search(query, { mode, maxResults: 1000 });
-                gpuSamples.push(res.timings.totalMs);
-                gpuQueryUploadSamples.push(res.timings.queryUploadMs);
-                gpuEncodeSubmitSamples.push(res.timings.encodeSubmitMs);
-                if (res.timings.gpuExecutionMs !== null) {
-                  gpuExecutionSamples.push(res.timings.gpuExecutionMs);
-                }
-                gpuReadbackSamples.push(res.timings.readbackMs);
-                gpuMatches = res.totalMatches;
-                if (res.hasOverflow) gpuHasOverflow = true;
-              }
-              break;
-
-            case 'cpu-parity': {
-              const res = searchCpuReference(
-                dataset.recordTokens,
-                normalizedQuery.tokens,
-                mode,
-                1000,
-                dataset.strings
-              );
-              paritySamples.push(res.durationMs);
-              parityMatches = res.totalMatches;
-              break;
-            }
-
-            case 'ufuzzy': {
-              const res = this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
-              ufuzzySamples.push(res.durationMs);
-              ufuzzyMatches = res.totalMatches;
-              break;
-            }
-
-            case 'js-native': {
-              const res = this.cpuEngine.searchNative(dataset.strings, query, 1000);
-              jsNativeSamples.push(res.durationMs);
-              jsNativeMatches = res.totalMatches;
-              break;
-            }
-          }
+        // 6. Warmup Phase (Randomized execution to eliminate JIT compilation outliers)
+        if (onProgress) {
+          onProgress({
+            currentStep: sIdx + 1,
+            totalSteps,
+            stepName: `[${sIdx + 1}/${totalSteps}] Warming up engines (${warmups} iterations)...`
+          });
         }
 
-        // Brief yield between rounds for GC stability
-        await new Promise(r => setTimeout(r, 10));
-      }
+        for (let w = 0; w < warmups; w++) {
+          const shuffled = shuffleArray(engines);
+          for (const engine of shuffled) {
+            switch (engine) {
+              case 'webgpu':
+                if (this.gpuEngine.isReady) {
+                  await this.gpuEngine.search(query, { mode, maxResults: 1000 });
+                }
+                break;
+              case 'cpu-parity':
+                searchCpuReference(dataset.recordTokens, normalizedQuery.tokens, mode, 1000, dataset.strings);
+                break;
+              case 'ufuzzy':
+                this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
+                break;
+              case 'js-native':
+                this.cpuEngine.searchNative(dataset.strings, query, 1000);
+                break;
+            }
+            await new Promise(r => setTimeout(r, 2));
+          }
+          await new Promise(r => setTimeout(r, 10));
+        }
 
-      // Stop frame tracker and retrieve genuine UI telemetry
-      const uiTelemetry = frameTracker.stop();
+        // 7. Measurement Phase: Randomized / Interleaved Execution
+        if (onProgress) {
+          onProgress({
+            currentStep: sIdx + 1,
+            totalSteps,
+            stepName: `[${sIdx + 1}/${totalSteps}] Collecting ${samples} samples across interleaved engines...`
+          });
+        }
+
+        for (let s = 0; s < samples; s++) {
+          const shuffled = shuffleArray(engines);
+
+          for (const engine of shuffled) {
+            switch (engine) {
+              case 'webgpu':
+                if (this.gpuEngine.isReady) {
+                  const res = await this.gpuEngine.search(query, { mode, maxResults: 1000 });
+                  gpuSamples.push(res.timings.totalMs);
+                  gpuQueryUploadSamples.push(res.timings.queryUploadMs);
+                  gpuEncodeSubmitSamples.push(res.timings.encodeSubmitMs);
+                  if (res.timings.gpuExecutionMs !== null) {
+                    gpuExecutionSamples.push(res.timings.gpuExecutionMs);
+                  }
+                  gpuReadbackSamples.push(res.timings.readbackMs);
+                  gpuMatches = res.totalMatches;
+                  if (res.hasOverflow) gpuHasOverflow = true;
+                }
+                break;
+
+              case 'cpu-parity': {
+                const res = searchCpuReference(
+                  dataset.recordTokens,
+                  normalizedQuery.tokens,
+                  mode,
+                  1000,
+                  dataset.strings
+                );
+                paritySamples.push(res.durationMs);
+                parityMatches = res.totalMatches;
+                break;
+              }
+
+              case 'ufuzzy': {
+                const res = this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
+                ufuzzySamples.push(res.durationMs);
+                ufuzzyMatches = res.totalMatches;
+                break;
+              }
+
+              case 'js-native': {
+                const res = this.cpuEngine.searchNative(dataset.strings, query, 1000);
+                jsNativeSamples.push(res.durationMs);
+                jsNativeMatches = res.totalMatches;
+                break;
+              }
+            }
+            await new Promise(r => setTimeout(r, 2));
+          }
+
+          // Brief yield between rounds for GC stability
+          await new Promise(r => setTimeout(r, 10));
+        }
+      } finally {
+        // Stop frame tracker and retrieve genuine UI telemetry
+        uiTelemetry = frameTracker.stop();
+      }
 
       // Compute statistics (median, p95, min, max, mean)
       const gpuStats = calcLatencyStats(gpuSamples);
