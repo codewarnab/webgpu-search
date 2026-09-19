@@ -251,7 +251,7 @@ export function searchMultiFieldCpuReference(
   }>();
 
   for (let r = 0; r < rowTokens.length; r++) {
-    if (tombstonedRows && tombstonedRows.has(r)) continue;
+    if (tombstonedRows && tombstonedRows.size > 0 && tombstonedRows.has(r)) continue;
     const fIdx = rowToFieldIndex[r];
     if (allowedFieldIndices && !allowedFieldIndices.has(fIdx)) continue;
     const dIdx = rowToDocIndex[r];

@@ -16,10 +16,12 @@ export {
   deserializeUnicodeDataset,
   validatePackedOffsets,
   checkMemoryBudget,
+  computeClampedHeadroomBytes,
   type PackedGPUBuffer,
   type PackedUnicodeBufferV2,
   type UnicodePackOptions,
-  type MemoryBudgetCheck
+  type MemoryBudgetCheck,
+  type ClampedHeadroomOptions
 } from './buffer';
 
 // Unified Types

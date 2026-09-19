@@ -3,6 +3,7 @@ import FUZZY_WGSL from './shaders/fuzzy.wgsl';
 import { WebGPUContextManager } from './context-manager';
 import {
   checkMemoryBudget,
+  computeClampedHeadroomBytes,
   deserializeUnicodeDataset,
   packUnicodeToGPUBuffer,
   validatePackedOffsets,
@@ -124,6 +125,36 @@ export class WebGPUEngine {
     return this.currentDatasetSize;
   }
 
+  private allocatedOffsetsByteLength: number = 0;
+  private allocatedRecordsByteLength: number = 0;
+
+  get allocatedOffsetsBytes(): number {
+    return this.allocatedOffsetsByteLength;
+  }
+
+  get allocatedRecordsBytes(): number {
+    return this.allocatedRecordsByteLength;
+  }
+
+  get vramAllocatedBytes(): number {
+    return this.allocatedOffsetsByteLength + this.allocatedRecordsByteLength;
+  }
+
+  canFitHeadroom(requiredRows: number, requiredTokens: number): boolean {
+    const needOffsets = (requiredRows + 1) * 4;
+    const needRecords = requiredTokens * 4;
+    return (
+      this.offsetsBuffer !== null &&
+      this.recordsBuffer !== null &&
+      needOffsets <= this.allocatedOffsetsByteLength &&
+      needRecords <= this.allocatedRecordsByteLength
+    );
+  }
+
+  isHeadroomExhausted(requiredRows: number, requiredTokens: number): boolean {
+    return !this.canFitHeadroom(requiredRows, requiredTokens);
+  }
+
   async init(customDevice?: GPUDevice): Promise<boolean> {
     // Guard re-entry: dispose existing GPU buffers before re-creating so
     // init() twice does not leak the first set (benchmark/power users).
@@ -200,6 +231,8 @@ export class WebGPUEngine {
       this.querySet = null;
     }
     this.substringPipeline = this.fuzzyPipeline = null;
+    this.allocatedOffsetsByteLength = 0;
+    this.allocatedRecordsByteLength = 0;
   }
 
   private async setupPipelinesAndBuffers(): Promise<boolean> {
@@ -349,8 +382,11 @@ export class WebGPUEngine {
     return p;
   }
 
-  async loadDataset(dataset: EngineDataset): Promise<{ uploadTimeMs: number }> {
-    return this.queued(() => this.loadDatasetInternal(dataset));
+  async loadDataset(
+    dataset: EngineDataset,
+    options?: { rowCapacity?: number; tokenCapacity?: number; growthFactor?: number }
+  ): Promise<{ uploadTimeMs: number }> {
+    return this.queued(() => this.loadDatasetInternal(dataset, options));
   }
 
   private resolvePacked(dataset: EngineDataset): { packed: PackedUnicodeBufferV2; strings: string[] | null } {
@@ -419,7 +455,10 @@ export class WebGPUEngine {
     throw new IncompatibleIndexError(0x55324632, actual);
   }
 
-  private async loadDatasetInternal(dataset: EngineDataset): Promise<{ uploadTimeMs: number }> {
+  private async loadDatasetInternal(
+    dataset: EngineDataset,
+    options?: { rowCapacity?: number; tokenCapacity?: number; growthFactor?: number }
+  ): Promise<{ uploadTimeMs: number }> {
     this.generation++;
     const { packed, strings } = this.resolvePacked(dataset);
     const count = packed.rowCount;
@@ -470,33 +509,55 @@ export class WebGPUEngine {
       throw new Error(`[webgpu-search] ${budget.reason} Falling back to CPU.`);
     }
 
-    for (const b of [this.offsetsBuffer, this.recordsBuffer]) {
-      try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
-      try { b?.destroy(); } catch {}
-    }
-    this.offsetsBuffer = this.recordsBuffer = null;
+    const reqOffsets = Math.max(packed.offsetsByteLength, 16);
+    const reqRecords = Math.max(packed.recordsByteLength, 16);
+
+    const targetOffsets = computeClampedHeadroomBytes(
+      Math.max((options?.rowCapacity !== undefined ? options.rowCapacity + 1 : count + 1) * 4, reqOffsets),
+      { growthFactor: options?.growthFactor, device: this.device }
+    );
+    const targetRecords = computeClampedHeadroomBytes(
+      Math.max((options?.tokenCapacity !== undefined ? options.tokenCapacity : packed.tokenCount) * 4, reqRecords),
+      { growthFactor: options?.growthFactor, device: this.device }
+    );
+
+    const allocOffsets = Math.max(reqOffsets, targetOffsets);
+    const allocRecords = Math.max(reqRecords, targetRecords);
 
     const t0 = nowMs();
+    let newOffsetsBuffer: GPUBuffer | null = null;
+    let newRecordsBuffer: GPUBuffer | null = null;
 
     try {
-      this.offsetsBuffer = this.device.createBuffer({
+      newOffsetsBuffer = this.device.createBuffer({
         label: `Offsets (${count})`,
-        size: Math.max(packed.offsetsByteLength, 16),
+        size: allocOffsets,
         usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
       });
 
-      this.recordsBuffer = this.device.createBuffer({
+      newRecordsBuffer = this.device.createBuffer({
         label: `Records (${count})`,
-        size: Math.max(packed.recordsByteLength, 16),
+        size: allocRecords,
         usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
       });
 
-      this.device.queue.writeBuffer(this.offsetsBuffer, 0, packed.offsetsBufferData);
+      this.device.queue.writeBuffer(newOffsetsBuffer, 0, packed.offsetsBufferData);
       if (packed.recordsByteLength > 0) {
-        this.device.queue.writeBuffer(this.recordsBuffer, 0, packed.recordsBufferData);
+        this.device.queue.writeBuffer(newRecordsBuffer, 0, packed.recordsBufferData);
       }
-      await this.device.queue.onSubmittedWorkDone();
+
+      // Safe swap: only unmap/destroy previous buffers after new allocations succeed
+      for (const b of [this.offsetsBuffer, this.recordsBuffer]) {
+        try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
+        try { b?.destroy(); } catch {}
+      }
+      this.offsetsBuffer = newOffsetsBuffer;
+      this.recordsBuffer = newRecordsBuffer;
+      this.allocatedOffsetsByteLength = allocOffsets;
+      this.allocatedRecordsByteLength = allocRecords;
     } catch (allocErr) {
+      try { newOffsetsBuffer?.destroy(); } catch {}
+      try { newRecordsBuffer?.destroy(); } catch {}
       // Restore previous CPU metadata so stats don't lie after OOM.
       Object.assign(this, {
         currentDatasetSize: prev.size,
@@ -508,15 +569,51 @@ export class WebGPUEngine {
         unicodeVersion: prev.unicodeVersion,
         scoringVersion: prev.scoringVersion,
       });
-      try { this.offsetsBuffer?.destroy(); } catch {}
-      try { this.recordsBuffer?.destroy(); } catch {}
-      this.offsetsBuffer = this.recordsBuffer = null;
       throw allocErr;
     }
 
     const uploadTimeMs = nowMs() - t0;
 
     return { uploadTimeMs };
+  }
+
+  async appendRows(
+    newTokens: Uint32Array,
+    newOffsets: Uint32Array,
+    newTotalRows: number
+  ): Promise<void> {
+    return this.queued(async () => {
+      if (!this.device || !this.offsetsBuffer || !this.recordsBuffer) {
+        throw new Error('[webgpu-search] Cannot append rows: GPU buffers not initialized.');
+      }
+      const prevRows = this.currentDatasetSize;
+      const prevTokens = this.currentTokens ? this.currentTokens.length : 0;
+      const needOffsetsBytes = (prevRows + 1) * 4 + newOffsets.byteLength;
+      const needRecordsBytes = prevTokens * 4 + newTokens.byteLength;
+      if (needOffsetsBytes > this.allocatedOffsetsByteLength || needRecordsBytes > this.allocatedRecordsByteLength) {
+        throw new Error('[webgpu-search] appendRows exceeds allocated buffer headroom.');
+      }
+      this.generation++;
+
+      // Write new offsets: row offsets starting at (prevRows + 1) * 4
+      this.device.queue.writeBuffer(this.offsetsBuffer, (prevRows + 1) * 4, newOffsets);
+      // Write new tokens at prevTokens * 4
+      if (newTokens.byteLength > 0) {
+        this.device.queue.writeBuffer(this.recordsBuffer, prevTokens * 4, newTokens);
+      }
+
+      const combinedTokens = new Uint32Array(prevTokens + newTokens.length);
+      if (this.currentTokens) combinedTokens.set(this.currentTokens, 0);
+      combinedTokens.set(newTokens, prevTokens);
+      this.currentTokens = combinedTokens;
+
+      const combinedOffsets = new Uint32Array(newTotalRows + 1);
+      if (this.currentOffsets) combinedOffsets.set(this.currentOffsets, 0);
+      combinedOffsets.set(newOffsets, prevRows + 1);
+      this.currentOffsets = combinedOffsets;
+
+      this.currentDatasetSize = newTotalRows;
+    });
   }
 
   async search(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
@@ -840,6 +937,8 @@ export class WebGPUEngine {
     this.currentTokens = null;
     this.currentOffsets = null;
     this.currentDatasetSize = 0;
+    this.allocatedOffsetsByteLength = 0;
+    this.allocatedRecordsByteLength = 0;
     if (this.device && !this.deviceReleased) {
       this.deviceReleased = true;
       try {
