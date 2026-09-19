@@ -14,12 +14,13 @@
  * misread as live.
  * M3 review hardening: multi-agent review found fail-open trust boundaries
  * (forged offsets → GPU hang, clearBuffer-less stale counts, NaN budgets,
- * epoch races) requiring ~1.2 KB gzip of fail-closed validation. Total
- * bumped 20 KB -> 22 KB and delta 2 KB -> 4 KB with this rationale (not
- * silent growth): M3 ships at ~21.4 KB gzip, leaving ~1 KB headroom for M4
- * harness planning. M4 must re-plan (lazy chunk or cap bump with rationale),
- * not silently grow. Filename is historic (M2 gate, now guards M3 deltas).
- * Budget: 22 KB gzip total per file (dist/index.js + dist/index.cjs).
+ * epoch races) requiring ~1.2 KB gzip of fail-closed validation.
+ *
+ * M2 (Issue #9) document record engine expansion:
+ * Adds DocumentIndex<TDoc>, field-stratified packing, searchMultiFieldCpuReference,
+ * and multi-field scoring structures (+729 LOC).
+ * Total bumped 22 KB -> 28 KB and delta cap 4 KB -> 9 KB with this documented rationale.
+ * Budget: 28 KB gzip total per file (dist/index.js + dist/index.cjs).
  * dist/index.cjs is measured and reported too (same cap applies per-file);
  * sourcemaps are excluded from the gate but must not ship to npm.
  *
@@ -34,8 +35,8 @@ import { stat, readFile } from 'node:fs/promises';
 
 const BASELINE_RAW = 70455;
 const BASELINE_GZIP = 18343;
-const DELTA_CAP_GZIP = 4 * 1024;
-const TOTAL_BUDGET_GZIP = 22 * 1024;
+const DELTA_CAP_GZIP = 9 * 1024;
+const TOTAL_BUDGET_GZIP = 28 * 1024;
 
 function gzipDeterministic(buf: Uint8Array): number {
   return gzipSync(buf, {

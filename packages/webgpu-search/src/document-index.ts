@@ -108,6 +108,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       let getter: (doc: TDoc) => string | string[] | undefined | null;
 
       if (typeof f === 'string') {
+        if (f.trim().length === 0) {
+          throw new TypeError('[webgpu-search] Field name string must not be empty.');
+        }
         name = f;
         getter = (doc: any) => doc[name];
       } else if (f && typeof f === 'object') {
@@ -192,9 +195,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         throw new TypeError(`[webgpu-search] Document at index ${i} must be an object.`);
       }
       const id = this.getId(doc);
-      if (id === null || id === undefined || (typeof id !== 'string' && typeof id !== 'number')) {
+      if (
+        id === null ||
+        id === undefined ||
+        (typeof id !== 'string' && typeof id !== 'number') ||
+        (typeof id === 'number' && !Number.isFinite(id))
+      ) {
         throw new TypeError(
-          `[webgpu-search] Document at index ${i} has invalid id: ${String(id)}. DocumentId must be string or number.`
+          `[webgpu-search] Document at index ${i} has invalid id: ${String(id)}. DocumentId must be a non-empty string or finite number.`
+        );
+      }
+      if (typeof id === 'string' && id.length === 0) {
+        throw new TypeError(
+          `[webgpu-search] Document at index ${i} has an empty string id. DocumentId must not be empty.`
         );
       }
       if (this.idToDocIndex.has(id)) {
@@ -206,9 +219,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     // Dynamic Candidate Pool Scaling (Section 3.1):
     // candidateCapacity = min(32768, max(8192, docCount * fieldCount * 0.1))
-    this.candidateCapacity = this.options.candidateCapacity !== undefined
-      ? Math.min(32768, Math.max(8192, Math.floor(this.options.candidateCapacity)))
-      : Math.min(32768, Math.max(8192, Math.floor(docCount * fieldCount * 0.1)));
+    const rawCap = this.options.candidateCapacity;
+    const validUserCap = typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0
+      ? Math.floor(rawCap)
+      : Math.floor(docCount * fieldCount * 0.1);
+    this.candidateCapacity = Math.min(32768, Math.max(8192, validUserCap));
 
     // Field-Stratified Row Packing:
     // Rows 0..N-1: Primary fields (highest weight).
@@ -266,14 +281,15 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     if (shouldAttemptGpu) {
       const measuredAvgBytes = totalRows > 0 ? (corpusTokens * 4) / totalRows : 0;
-      const budget = checkMemoryBudget(totalRows, measuredAvgBytes, this.options.device);
+      const budget = checkMemoryBudget(totalRows, measuredAvgBytes, this.options.device, this.candidateCapacity);
       if (!budget.allowed) {
         console.warn(`[webgpu-search] ${budget.reason} Falling back to CPU.`);
         this.engineType = 'cpu';
         this.fallbackReason = 'memory-budget-exceeded';
       } else {
+        let gpu: WebGPUEngine | null = null;
         try {
-          const gpu = new WebGPUEngine();
+          gpu = new WebGPUEngine();
           const initialized = await gpu.init(this.options.device);
 
           if (initialized && gpu.isReady) {
@@ -288,9 +304,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             this.engineType = 'webgpu';
             this.fallbackReason = undefined;
             this.vramAllocatedBytes = packed.recordsByteLength + packed.offsetsByteLength;
+            gpu = null; // Ownership transferred
 
             this.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
               console.warn('[webgpu-search] GPU device lost, falling back to CPU.');
+              if (this.gpuEngine) {
+                this.gpuEngine.destroy();
+                this.gpuEngine = null;
+              }
               this.engineType = 'cpu';
               this.fallbackReason = 'device-lost';
             });
@@ -302,6 +323,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           console.warn('[webgpu-search] WebGPU initialization failed, falling back to CPU:', gpuErr);
           this.engineType = 'cpu';
           this.fallbackReason = 'webgpu-unsupported';
+        } finally {
+          if (gpu) {
+            gpu.destroy();
+          }
         }
       }
     } else {
@@ -401,10 +426,23 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       return noHits(query);
     }
 
+    if (filter !== undefined && typeof filter !== 'function') {
+      throw new TypeError('[webgpu-search] options.filter must be a function.');
+    }
+
     let allowedFieldIndices: Set<number> | undefined = undefined;
-    if (searchFields && searchFields.length > 0) {
+    if (searchFields !== undefined) {
+      if (!Array.isArray(searchFields)) {
+        throw new TypeError('[webgpu-search] options.fields must be an array of string field names.');
+      }
+      if (searchFields.length === 0) {
+        return noHits(query);
+      }
       allowedFieldIndices = new Set<number>();
       for (const fName of searchFields) {
+        if (typeof fName !== 'string') {
+          throw new TypeError('[webgpu-search] options.fields elements must be strings.');
+        }
         const idx = this.fieldNameToIndex.get(fName);
         if (idx === undefined) {
           throw new Error(`[webgpu-search] Unknown search field: "${fName}".`);
@@ -413,9 +451,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       }
     }
 
+    // When field-restricted, route to CPU to prevent unselected high-priority
+    // fields from saturating GPU candidate buffer before low-priority allowed fields.
+    const isFieldRestricted = allowedFieldIndices !== undefined && allowedFieldIndices.size < this.sortedFields.length;
+
     // 1. WebGPU execution path
     const gpuHandle = this.gpuEngine;
     const useGpu = !forceCpu &&
+      !isFieldRestricted &&
       cpuAlgorithm !== 'ufuzzy' &&
       this.engineType === 'webgpu' &&
       gpuHandle !== null &&
@@ -431,6 +474,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           signal
         });
 
+        if (this.isDestroyed) {
+          throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+        }
         throwIfAborted(signal);
 
         // WebGPU candidate readback & fixed-point score enrichment
@@ -474,7 +520,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           }
         }
 
-        const hits: DocumentSearchResultItem<TDoc>[] = [];
+        interface RankedCandidate<TDoc> {
+          dIdx: number;
+          item: DocumentSearchResultItem<TDoc>;
+        }
+
+        const hits: RankedCandidate<TDoc>[] = [];
         for (const [dIdx, entry] of docMatches.entries()) {
           const primaryField = this.sortedFields[entry.bestFieldIdx];
           const auxMatches: Array<{ field: string; score: number }> = [];
@@ -486,31 +537,32 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           if (auxMatches.length > 1) {
             auxMatches.sort((a, b) => {
               if (b.score !== a.score) return b.score - a.score;
-              return a.field.localeCompare(b.field);
+              return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
             });
           }
 
           hits.push({
-            id: this.docIds[dIdx],
-            doc: this.records[dIdx],
-            score: entry.bestScore,
-            matchedField: primaryField.name,
-            matches: auxMatches.length > 0 ? auxMatches : undefined
+            dIdx,
+            item: {
+              id: this.docIds[dIdx],
+              doc: this.records[dIdx],
+              score: entry.bestScore,
+              matchedField: primaryField.name,
+              matches: auxMatches.length > 0 ? auxMatches : undefined
+            }
           });
         }
 
         // Two-key sort: score descending, docIndex ascending
         hits.sort((a, b) => {
-          if (b.score !== a.score) return b.score > a.score ? 1 : -1;
-          const aIdx = this.idToDocIndex.get(a.id) ?? 0;
-          const bIdx = this.idToDocIndex.get(b.id) ?? 0;
-          if (aIdx !== bIdx) return aIdx > bIdx ? 1 : -1;
+          if (b.item.score !== a.item.score) return b.item.score > a.item.score ? 1 : -1;
+          if (a.dIdx !== b.dIdx) return a.dIdx > b.dIdx ? 1 : -1;
           return 0;
         });
 
         const totalMatches = hits.length;
         const candidateCount = Math.min(totalMatches, this.candidateCapacity);
-        const results = hits.slice(0, clampedLimit);
+        const results = hits.slice(0, clampedLimit).map((h) => h.item);
 
         return {
           query: gpuResult.query,
@@ -579,7 +631,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         }
       }
 
-      const hits: DocumentSearchResultItem<TDoc>[] = [];
+      interface RankedLegacyCandidate<TDoc> {
+        dIdx: number;
+        item: DocumentSearchResultItem<TDoc>;
+      }
+
+      const hits: RankedLegacyCandidate<TDoc>[] = [];
       for (const [dIdx, entry] of docMatches.entries()) {
         const primaryField = this.sortedFields[entry.bestFieldIdx];
         const auxMatches: Array<{ field: string; score: number }> = [];
@@ -591,29 +648,30 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         if (auxMatches.length > 1) {
           auxMatches.sort((a, b) => {
             if (b.score !== a.score) return b.score - a.score;
-            return a.field.localeCompare(b.field);
+            return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
           });
         }
         hits.push({
-          id: this.docIds[dIdx],
-          doc: this.records[dIdx],
-          score: entry.bestScore,
-          matchedField: primaryField.name,
-          matches: auxMatches.length > 0 ? auxMatches : undefined
+          dIdx,
+          item: {
+            id: this.docIds[dIdx],
+            doc: this.records[dIdx],
+            score: entry.bestScore,
+            matchedField: primaryField.name,
+            matches: auxMatches.length > 0 ? auxMatches : undefined
+          }
         });
       }
 
       hits.sort((a, b) => {
-        if (b.score !== a.score) return b.score > a.score ? 1 : -1;
-        const aIdx = this.idToDocIndex.get(a.id) ?? 0;
-        const bIdx = this.idToDocIndex.get(b.id) ?? 0;
-        if (aIdx !== bIdx) return aIdx > bIdx ? 1 : -1;
+        if (b.item.score !== a.item.score) return b.item.score > a.item.score ? 1 : -1;
+        if (a.dIdx !== b.dIdx) return a.dIdx > b.dIdx ? 1 : -1;
         return 0;
       });
 
       const totalMatches = hits.length;
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
-      const results = hits.slice(0, clampedLimit);
+      const results = hits.slice(0, clampedLimit).map((h) => h.item);
       const durationMs = nowMs() - t0;
 
       return {

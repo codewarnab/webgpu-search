@@ -611,6 +611,113 @@ async function runM2Tests() {
     console.log('   ✅ DocumentIndexStats telemetry reporting verified');
   }
 
+  // =========================================================================
+  // 11. Multi-Agent Review Hardening: NaN Poisoning & Validation Guards
+  // =========================================================================
+  console.log('11. Testing multi-agent review hardening and validation guards...');
+  {
+    // 11a. candidateCapacity NaN / negative handling
+    const docs = [{ id: '1', title: 'Test Document', body: 'Content' }];
+    const nanCapIndex = await DocumentIndex.create(docs, {
+      fields: ['title', 'body'],
+      preferGpu: false,
+      candidateCapacity: NaN
+    });
+    // Internal candidate capacity safely clamped to default 8192
+    assert.strictEqual((nanCapIndex as any).candidateCapacity, 8192);
+    nanCapIndex.destroy();
+
+    // 11b. WebGPUEngine ensureCandidateCapacity NaN handling
+    const engine = new WebGPUEngine();
+    engine.ensureCandidateCapacity(NaN);
+    assert.strictEqual(engine.currentCandidateCapacity, 8192);
+    engine.ensureCandidateCapacity(50000);
+    assert.strictEqual(engine.currentCandidateCapacity, 32768);
+    engine.ensureCandidateCapacity(-100);
+    // Negative capacity safely clamps to 8192
+    assert.strictEqual(engine.currentCandidateCapacity, 8192);
+    engine.destroy();
+
+    // 11c. id: NaN rejected
+    let threwIdNan = false;
+    try {
+      await DocumentIndex.create([{ id: NaN, title: 'Invalid ID' }], {
+        fields: ['title'],
+        preferGpu: false
+      });
+    } catch (err: any) {
+      threwIdNan = err instanceof TypeError && err.message.includes('DocumentId');
+    }
+    assert(threwIdNan, 'Expected TypeError when document id is NaN');
+
+    // 11d. Empty string field definition rejected
+    let threwEmptyField = false;
+    try {
+      await DocumentIndex.create(docs, {
+        fields: [''],
+        preferGpu: false
+      });
+    } catch (err: any) {
+      threwEmptyField = err instanceof TypeError && err.message.includes('Field name string must not be empty');
+    }
+    assert(threwEmptyField, 'Expected TypeError for empty string field name');
+
+    // 11e. search options.fields: [] returns 0 matches
+    const searchIdx = await DocumentIndex.create(docs, {
+      fields: ['title', 'body'],
+      preferGpu: false
+    });
+    const emptyFieldsRes = await searchIdx.search('Test', { fields: [] });
+    assert.strictEqual(emptyFieldsRes.totalMatches, 0);
+    assert.strictEqual(emptyFieldsRes.results.length, 0);
+
+    // 11f. search options.fields non-array throws TypeError
+    let threwFieldsNonArray = false;
+    try {
+      await searchIdx.search('Test', { fields: 'title' as any });
+    } catch (err: any) {
+      threwFieldsNonArray = err instanceof TypeError && err.message.includes('options.fields must be an array');
+    }
+    assert(threwFieldsNonArray, 'Expected TypeError for non-array options.fields');
+
+    // 11g. search options.filter non-function throws TypeError
+    let threwFilterNonFn = false;
+    try {
+      await searchIdx.search('Test', { filter: 123 as any });
+    } catch (err: any) {
+      threwFilterNonFn = err instanceof TypeError && err.message.includes('options.filter must be a function');
+    }
+    assert(threwFilterNonFn, 'Expected TypeError for non-function options.filter');
+
+    // 11h. Field restriction on mock WebGPU routes to CPU to prevent candidate starvation
+    const mockAdapter = createMockAdapter();
+    const mockDeviceWrapper = await mockAdapter.requestDevice();
+    const mockDevice = mockDeviceWrapper.gpu;
+    const multiFieldDocs = [
+      { id: '1', title: 'WebGPU Search Title', tags: ['graphics', 'compute'] },
+      { id: '2', title: 'Database Indexing', tags: ['search', 'sql'] }
+    ];
+    const gpuDocIndex = await DocumentIndex.create(multiFieldDocs, {
+      fields: [
+        { name: 'title', weight: 2.0 },
+        { name: 'tags', weight: 1.0 }
+      ],
+      preferGpu: true,
+      device: mockDevice
+    });
+    // Search restricted to tags only
+    const restrictedRes = await gpuDocIndex.search('search', { fields: ['tags'] });
+    assert.strictEqual(restrictedRes.engine, 'cpu');
+    assert.strictEqual(restrictedRes.totalMatches, 1);
+    assert.strictEqual(restrictedRes.results[0].id, '2');
+    assert.strictEqual(restrictedRes.results[0].matchedField, 'tags');
+
+    gpuDocIndex.destroy();
+    searchIdx.destroy();
+
+    console.log('   ✅ Multi-agent review hardening and validation guards verified');
+  }
+
   console.log('\n--- All Milestone 2 Document Record Engine & Multi-Field Tests Passed! ✅ ---');
 }
 

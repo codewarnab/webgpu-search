@@ -299,7 +299,7 @@ export function searchMultiFieldCpuReference(
     if (auxMatches.length > 1) {
       auxMatches.sort((a, b) => {
         if (b.score !== a.score) return b.score - a.score;
-        return a.field.localeCompare(b.field);
+        return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
       });
     }
 

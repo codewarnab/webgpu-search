@@ -80,7 +80,7 @@ export interface IndexStats {
   scoringVersion: typeof SCORING_VERSION;
   tokenCount: number;             // M2: exact post-fold code-point total
   folded: boolean;
-  formatVersion: typeof FORMAT_VERSION;
+  formatVersion: typeof FORMAT_VERSION | typeof DOC_FORMAT_VERSION;
 }
 
 export interface AdapterInfo {
@@ -212,7 +212,7 @@ export interface MutationResult {
   durationMs: number;
 }
 
-export interface DocumentIndexStats extends Omit<IndexStats, 'formatVersion'> {
+export interface DocumentIndexStats extends IndexStats {
   formatVersion: typeof DOC_FORMAT_VERSION | typeof FORMAT_VERSION;
   docCount: number;
   rowCount: number;

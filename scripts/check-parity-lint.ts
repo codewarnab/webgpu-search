@@ -34,6 +34,7 @@ const strictTargets = [
   '../packages/webgpu-search/src/fold-table.ts',
   '../packages/webgpu-search/src/buffer.ts',
   '../packages/webgpu-search/src/webgpu-engine.ts',
+  '../packages/webgpu-search/src/document-index.ts',
 ];
 const legacyInfoTargets = [
   '../packages/webgpu-search/src/cpu-engine.ts',
