@@ -23,6 +23,7 @@ import {
   QueryTooLongError,
   type TextProfileId
 } from './text-profile';
+import { alignHighlights, renderHighlightedText } from './highlight';
 import type {
   AddOptions,
   DocumentId,
@@ -33,8 +34,10 @@ import type {
   DocumentSearchResultItem,
   EngineType,
   FallbackReason,
+  HighlightRange,
   MutationBatch,
   MutationResult,
+  SearchMode,
   SearchTimings
 } from './types';
 
@@ -563,6 +566,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         const totalMatches = hits.length;
         const candidateCount = Math.min(totalMatches, this.candidateCapacity);
         const results = hits.slice(0, clampedLimit).map((h) => h.item);
+        this.enrichHighlights(results, query, mode, options);
 
         return {
           query: gpuResult.query,
@@ -672,6 +676,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       const totalMatches = hits.length;
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
       const results = hits.slice(0, clampedLimit).map((h) => h.item);
+      this.enrichHighlights(results, query, mode, options);
       const durationMs = nowMs() - t0;
 
       return {
@@ -722,6 +727,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       matchedField: hit.matchedField,
       matches: hit.matches
     }));
+    this.enrichHighlights(enrichedResults, query, mode, options);
 
     const timings: SearchTimings = {
       queryUploadMs: 0,
@@ -753,6 +759,114 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       cpuAlgorithm,
       fallbackReason: effectiveFallbackReason
     };
+  }
+
+  private enrichHighlights(
+    results: DocumentSearchResultItem<TDoc>[],
+    query: string,
+    mode: SearchMode,
+    options: DocumentSearchOptions<TDoc>
+  ): void {
+    const shouldHighlight = options.highlightOptions?.highlight ?? options.highlight ?? true;
+    if (!shouldHighlight) return;
+
+    const tag = options.highlightOptions?.tag ?? options.tag;
+    const highlightFieldsRule = options.highlightOptions?.fields ?? options.highlightFields ?? 'all-matched';
+    const escapeHtml = options.highlightOptions?.escapeHtml ?? options.escapeHtml ?? false;
+
+    if (
+      typeof highlightFieldsRule === 'string' &&
+      highlightFieldsRule !== 'all-matched' &&
+      highlightFieldsRule !== 'matched-field' &&
+      highlightFieldsRule !== 'all-fields'
+    ) {
+      throw new TypeError(
+        `[webgpu-search] Invalid highlightFields option: "${highlightFieldsRule}". Must be 'all-matched', 'matched-field', 'all-fields', or an array of field names.`
+      );
+    }
+
+    const queryTokens = normalizeText(query, this.folded).tokens;
+    const alignOpts = { mode, folded: this.folded, queryTokens };
+
+    for (let i = 0; i < results.length; i++) {
+      const item = results[i];
+      const dIdx = this.idToDocIndex.get(item.id);
+      if (dIdx === undefined) continue;
+
+      const highlights: Record<string, HighlightRange[]> = {};
+      const highlightedText: Record<string, string> = {};
+
+      if (highlightFieldsRule === 'all-fields') {
+        for (let f = 0; f < this.sortedFields.length; f++) {
+          const fieldDef = this.sortedFields[f];
+          const rawStr = this.rawFieldStrings[dIdx][f] ?? '';
+          const ranges = alignHighlights(rawStr, query, alignOpts);
+          if (ranges.length > 0) {
+            highlights[fieldDef.name] = ranges;
+            if (tag) {
+              highlightedText[fieldDef.name] = renderHighlightedText(rawStr, ranges, tag, escapeHtml);
+            }
+          }
+        }
+      } else if (Array.isArray(highlightFieldsRule)) {
+        for (let k = 0; k < highlightFieldsRule.length; k++) {
+          const fName = highlightFieldsRule[k];
+          const fIdx = this.fieldNameToIndex.get(fName);
+          if (fIdx !== undefined) {
+            const rawStr = this.rawFieldStrings[dIdx][fIdx] ?? '';
+            const ranges = alignHighlights(rawStr, query, alignOpts);
+            if (ranges.length > 0) {
+              highlights[fName] = ranges;
+              if (tag) {
+                highlightedText[fName] = renderHighlightedText(rawStr, ranges, tag, escapeHtml);
+              }
+            }
+          }
+        }
+      } else {
+        // 'matched-field' or 'all-matched' (default)
+        const primaryFIdx = this.fieldNameToIndex.get(item.matchedField);
+        if (primaryFIdx !== undefined) {
+          const primaryRaw = this.rawFieldStrings[dIdx][primaryFIdx] ?? '';
+          const ranges = alignHighlights(primaryRaw, query, alignOpts);
+          highlights[item.matchedField] = ranges;
+          if (tag) {
+            highlightedText[item.matchedField] = renderHighlightedText(primaryRaw, ranges, tag, escapeHtml);
+          }
+        }
+
+        if (highlightFieldsRule === 'all-matched' && item.matches) {
+          for (let m = 0; m < item.matches.length; m++) {
+            const aux = item.matches[m];
+            const auxFIdx = this.fieldNameToIndex.get(aux.field);
+            if (auxFIdx !== undefined) {
+              const auxRaw = this.rawFieldStrings[dIdx][auxFIdx] ?? '';
+              const ranges = alignHighlights(auxRaw, query, alignOpts);
+              aux.highlights = ranges;
+              highlights[aux.field] = ranges;
+              if (tag) {
+                highlightedText[aux.field] = renderHighlightedText(auxRaw, ranges, tag, escapeHtml);
+              }
+            }
+          }
+        }
+      }
+
+      // Synchronize auxiliary match highlights across all modes if highlights exist
+      if (item.matches) {
+        for (let m = 0; m < item.matches.length; m++) {
+          const aux = item.matches[m];
+          if (highlights[aux.field] !== undefined) {
+            aux.highlights = highlights[aux.field];
+          }
+        }
+      }
+
+      item.highlights = highlights;
+      if (tag) {
+        item.highlightedText = highlightedText;
+      }
+    }
   }
 
   async add(_docs: TDoc | TDoc[], _options?: AddOptions): Promise<MutationResult> {
