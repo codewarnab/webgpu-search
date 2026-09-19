@@ -707,6 +707,118 @@ async function runM4Tests() {
     console.log('   ✅ Highlighting integrity on mutated documents verified');
   }
 
+  // =========================================================================
+  // 13. Multi-Agent Review Hardening & Edge Cases
+  // =========================================================================
+  console.log('13. Testing multi-agent review hardening and edge cases...');
+  {
+    // A. Empty batch no-op
+    const index = await DocumentIndex.create<ItemDoc>(
+      [{ id: '1', title: 'Test Document', content: 'Some body text' }],
+      { fields: ['title', 'content'], preferGpu: false }
+    );
+
+    const emptyRes = await index.applyBatch({});
+    assert.strictEqual(emptyRes.added, 0);
+    assert.strictEqual(emptyRes.updated, 0);
+    assert.strictEqual(emptyRes.removed, 0);
+    assert.strictEqual(emptyRes.compacted, false);
+
+    // B. Validation failure does not bump generation or corrupt state
+    const statsBefore = index.getStats();
+    let valThrew = false;
+    try {
+      await index.applyBatch({
+        update: [{ id: '999', title: 'Non-existent', content: 'Should fail' }]
+      });
+    } catch {
+      valThrew = true;
+    }
+    assert.strictEqual(valThrew, true, 'Updating non-existent doc must throw DocumentNotFoundError');
+    const statsAfter = index.getStats();
+    assert.strictEqual(statsAfter.mutationEpoch, statsBefore.mutationEpoch, 'Validation failure must not advance mutationEpoch');
+
+    // C. Duplicate IDs in batch.update are rejected in Phase 1
+    let dupUpdateThrew = false;
+    try {
+      await index.applyBatch({
+        update: [
+          { id: '1', title: 'First Update', content: 'A' },
+          { id: '1', title: 'Duplicate Update', content: 'B' }
+        ]
+      });
+    } catch {
+      dupUpdateThrew = true;
+    }
+    assert.strictEqual(dupUpdateThrew, true, 'Duplicate doc ID in batch.update must fail in Phase 1');
+
+    // D. Update followed by filtered search
+    await index.update({ id: '1', title: 'Active Document', content: 'Contains secret keyword' });
+    const filteredSearch = await index.search('secret', {
+      filter: (doc) => (doc as any).title === 'Active Document'
+    });
+    assert.strictEqual(filteredSearch.totalMatches, 1);
+    assert.strictEqual(filteredSearch.results[0].id, '1');
+
+    const rejectedSearch = await index.search('secret', {
+      filter: (doc) => (doc as any).title === 'Old Stale Title'
+    });
+    assert.strictEqual(rejectedSearch.totalMatches, 0);
+
+    // E. Update followed by highlight realignment
+    await index.update({ id: '1', title: 'Brand New Supercalifragilistic Title', content: 'Text' });
+    const hlRes = await index.search('Supercalifragilistic');
+    assert.strictEqual(hlRes.totalMatches, 1);
+    assert(hlRes.results[0].highlights?.title && hlRes.results[0].highlights.title.length > 0);
+    assert.strictEqual(hlRes.results[0].highlights.title[0].start, 10);
+    assert.strictEqual(hlRes.results[0].highlights.title[0].end, 30);
+
+    index.destroy();
+
+    // F. WebGPU 0-document compaction followed by add
+    const adapter = createMockAdapter({ features: ['timestamp-query'] as any });
+    const mockDeviceWrapper = await adapter.requestDevice();
+    const mockDevice = (mockDeviceWrapper as any).gpu ?? mockDeviceWrapper;
+
+    const gpuIndex = await DocumentIndex.create<ItemDoc>(
+      [{ id: 'g1', title: 'GPU Document One', content: 'First' }],
+      { fields: ['title', 'content'], device: mockDevice, preferGpu: true }
+    );
+    assert.strictEqual(gpuIndex.getStats().engine, 'webgpu');
+
+    // Remove all documents (triggers 0-doc compaction on WebGPU)
+    await gpuIndex.remove('g1');
+    assert.strictEqual(gpuIndex.getStats().docCount, 0);
+    const emptySearchResult = await gpuIndex.search('GPU');
+    assert.strictEqual(emptySearchResult.totalMatches, 0);
+
+    // Add new document to previously emptied WebGPU index
+    await gpuIndex.add({ id: 'g2', title: 'Revived GPU Index Document', content: 'Second' });
+    assert.strictEqual(gpuIndex.getStats().docCount, 1);
+    const revivedSearchResult = await gpuIndex.search('Revived');
+    assert.strictEqual(revivedSearchResult.engine, 'webgpu');
+
+    gpuIndex.destroy();
+
+    // G. CPU 0-document compaction followed by add and search match verification
+    const cpuZeroIndex = await DocumentIndex.create<ItemDoc>(
+      [{ id: 'c1', title: 'CPU Document One', content: 'First' }],
+      { fields: ['title', 'content'], preferGpu: false }
+    );
+    await cpuZeroIndex.remove('c1');
+    assert.strictEqual(cpuZeroIndex.getStats().docCount, 0);
+    assert.strictEqual((await cpuZeroIndex.search('CPU')).totalMatches, 0);
+
+    await cpuZeroIndex.add({ id: 'c2', title: 'Revived CPU Index Document', content: 'Second' });
+    assert.strictEqual(cpuZeroIndex.getStats().docCount, 1);
+    const cpuRevivedResult = await cpuZeroIndex.search('Revived');
+    assert.strictEqual(cpuRevivedResult.totalMatches, 1);
+    assert.strictEqual(cpuRevivedResult.results[0].id, 'c2');
+    cpuZeroIndex.destroy();
+
+    console.log('   ✅ Multi-agent review hardening and edge cases verified 100%');
+  }
+
   console.log('\n--- All Milestone 4 Batched Dynamic Mutations Tests Passed! ✅ ---');
 }
 

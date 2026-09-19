@@ -498,9 +498,9 @@ export class WebGPUEngine {
     if (!budget.allowed) {
       Object.assign(this, {
         currentDatasetSize: prev.size,
-        strings: prev.strings,
-        tokens: prev.tokens,
-        offsets: prev.offsets,
+        currentStrings: prev.strings,
+        currentTokens: prev.tokens,
+        currentOffsets: prev.offsets,
         folded: prev.folded,
         profileId: prev.profileId,
         unicodeVersion: prev.unicodeVersion,
@@ -524,54 +524,51 @@ export class WebGPUEngine {
     const allocOffsets = Math.max(reqOffsets, targetOffsets);
     const allocRecords = Math.max(reqRecords, targetRecords);
 
-    for (const b of [this.offsetsBuffer, this.recordsBuffer]) {
-      try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
-      try { b?.destroy(); } catch {}
-    }
-    this.offsetsBuffer = this.recordsBuffer = null;
-    this.allocatedOffsetsByteLength = 0;
-    this.allocatedRecordsByteLength = 0;
-
     const t0 = nowMs();
+    let newOffsetsBuffer: GPUBuffer | null = null;
+    let newRecordsBuffer: GPUBuffer | null = null;
 
     try {
-      this.offsetsBuffer = this.device.createBuffer({
+      newOffsetsBuffer = this.device.createBuffer({
         label: `Offsets (${count})`,
         size: allocOffsets,
         usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
       });
 
-      this.recordsBuffer = this.device.createBuffer({
+      newRecordsBuffer = this.device.createBuffer({
         label: `Records (${count})`,
         size: allocRecords,
         usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
       });
 
+      this.device.queue.writeBuffer(newOffsetsBuffer, 0, packed.offsetsBufferData);
+      if (packed.recordsByteLength > 0) {
+        this.device.queue.writeBuffer(newRecordsBuffer, 0, packed.recordsBufferData);
+      }
+
+      // Safe swap: only unmap/destroy previous buffers after new allocations succeed
+      for (const b of [this.offsetsBuffer, this.recordsBuffer]) {
+        try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
+        try { b?.destroy(); } catch {}
+      }
+      this.offsetsBuffer = newOffsetsBuffer;
+      this.recordsBuffer = newRecordsBuffer;
       this.allocatedOffsetsByteLength = allocOffsets;
       this.allocatedRecordsByteLength = allocRecords;
-
-      this.device.queue.writeBuffer(this.offsetsBuffer, 0, packed.offsetsBufferData);
-      if (packed.recordsByteLength > 0) {
-        this.device.queue.writeBuffer(this.recordsBuffer, 0, packed.recordsBufferData);
-      }
-      await this.device.queue.onSubmittedWorkDone();
     } catch (allocErr) {
+      try { newOffsetsBuffer?.destroy(); } catch {}
+      try { newRecordsBuffer?.destroy(); } catch {}
       // Restore previous CPU metadata so stats don't lie after OOM.
       Object.assign(this, {
         currentDatasetSize: prev.size,
-        strings: prev.strings,
-        tokens: prev.tokens,
-        offsets: prev.offsets,
+        currentStrings: prev.strings,
+        currentTokens: prev.tokens,
+        currentOffsets: prev.offsets,
         folded: prev.folded,
         profileId: prev.profileId,
         unicodeVersion: prev.unicodeVersion,
         scoringVersion: prev.scoringVersion,
       });
-      try { this.offsetsBuffer?.destroy(); } catch {}
-      try { this.recordsBuffer?.destroy(); } catch {}
-      this.offsetsBuffer = this.recordsBuffer = null;
-      this.allocatedOffsetsByteLength = 0;
-      this.allocatedRecordsByteLength = 0;
       throw allocErr;
     }
 
@@ -589,9 +586,14 @@ export class WebGPUEngine {
       if (!this.device || !this.offsetsBuffer || !this.recordsBuffer) {
         throw new Error('[webgpu-search] Cannot append rows: GPU buffers not initialized.');
       }
-      this.generation++;
       const prevRows = this.currentDatasetSize;
       const prevTokens = this.currentTokens ? this.currentTokens.length : 0;
+      const needOffsetsBytes = (prevRows + 1) * 4 + newOffsets.byteLength;
+      const needRecordsBytes = prevTokens * 4 + newTokens.byteLength;
+      if (needOffsetsBytes > this.allocatedOffsetsByteLength || needRecordsBytes > this.allocatedRecordsByteLength) {
+        throw new Error('[webgpu-search] appendRows exceeds allocated buffer headroom.');
+      }
+      this.generation++;
 
       // Write new offsets: row offsets starting at (prevRows + 1) * 4
       this.device.queue.writeBuffer(this.offsetsBuffer, (prevRows + 1) * 4, newOffsets);
@@ -599,7 +601,6 @@ export class WebGPUEngine {
       if (newTokens.byteLength > 0) {
         this.device.queue.writeBuffer(this.recordsBuffer, prevTokens * 4, newTokens);
       }
-      await this.device.queue.onSubmittedWorkDone();
 
       const combinedTokens = new Uint32Array(prevTokens + newTokens.length);
       if (this.currentTokens) combinedTokens.set(this.currentTokens, 0);

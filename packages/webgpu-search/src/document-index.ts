@@ -317,14 +317,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               folded: this.folded,
               totalTokens: corpusTokens
             });
-            const effectiveCap = this.initialCapacity > 0 ? this.initialCapacity : Math.max(16, Math.floor(docCount * 1.5));
+            const effectiveCap = this.initialCapacity > 0 ? this.initialCapacity : Math.max(16, docCount);
             const rowCap = effectiveCap * fieldCount;
             const avgTokens = totalRows > 0 ? corpusTokens / totalRows : 16;
             const tokenCap = Math.max(Math.floor(rowCap * avgTokens), 64);
             await gpu.loadDataset(packed, {
               rowCapacity: rowCap,
               tokenCapacity: tokenCap,
-              growthFactor: this.growthFactor
+              growthFactor: this.initialCapacity > 0 ? 1.0 : this.growthFactor
             });
 
             this.gpuEngine = gpu;
@@ -640,7 +640,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       for (let fIdx = 0; fIdx < this.sortedFields.length; fIdx++) {
         if (allowedFieldIndices && !allowedFieldIndices.has(fIdx)) continue;
         const fDef = this.sortedFields[fIdx];
-        const fieldStrings = this.records.map((_, dIdx) => this.rawFieldStrings[dIdx][fIdx]);
+        const fieldStrings = this.records.map((doc, dIdx) => (doc && this.rawFieldStrings[dIdx] ? this.rawFieldStrings[dIdx][fIdx] : ''));
         const legacyResult = mode === 'fuzzy'
           ? cpuEngine.searchUFuzzy(fieldStrings, query, this.records.length, caseSensitive)
           : cpuEngine.searchNative(fieldStrings, query, this.records.length, caseSensitive);
@@ -1003,7 +1003,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
       }
       const tStart = nowMs();
-      this.generation++;
       const upsert = options?.upsert ?? false;
 
       // PHASE 1: ATOMIC TWO-PHASE VALIDATION (State remains untouched on error)
@@ -1031,6 +1030,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         tokenCount: number;
       }
       const preparedUpdates: PreparedDocUpdate[] = [];
+      const updatedIdsInBatch = new Set<DocumentId>();
       if (batch.update !== undefined) {
         if (!Array.isArray(batch.update)) {
           throw new TypeError('[webgpu-search] batch.update must be an array of documents.');
@@ -1045,6 +1045,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           if (!this.idToDocIndex.has(id) || willRemoveSet.has(id)) {
             throw new DocumentNotFoundError(id);
           }
+          if (updatedIdsInBatch.has(id)) {
+            throw new DuplicateIdError(id);
+          }
+          updatedIdsInBatch.add(id);
           const prepared = this.prepareDocFields(doc, id);
           preparedUpdates.push(prepared);
         }
@@ -1088,6 +1092,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       }
 
       // PHASE 2: DETERMINISTIC EXECUTION (remove -> update -> add)
+      this.generation++;
       let removedCount = 0;
       let updatedCount = 0;
       let addedCount = 0;
@@ -1106,6 +1111,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           this.idToDocIndex.delete(id);
           this.records[d] = null as any;
           this.docIds[d] = null as any;
+          this.rawFieldStrings[d] = null as any;
+          this.docToRowIndices[d] = null as any;
           removedCount++;
         }
       }
@@ -1127,6 +1134,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         }
         this.records[oldD] = null as any;
         this.docIds[oldD] = null as any;
+        this.rawFieldStrings[oldD] = null as any;
+        this.docToRowIndices[oldD] = null as any;
 
         const newD = this.records.length;
         this.records.push(upd.doc);
@@ -1160,6 +1169,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           }
           this.records[oldD] = null as any;
           this.docIds[oldD] = null as any;
+          this.rawFieldStrings[oldD] = null as any;
+          this.docToRowIndices[oldD] = null as any;
           updatedCount++;
         } else {
           addedCount++;
@@ -1209,13 +1220,24 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.gpuEngine?.ensureCandidateCapacity(newCandidateCap);
       }
 
-      if (tombstoneRatio >= 0.25 || gpuHeadroomExhausted) {
-        await this.compact();
-        compacted = true;
-      } else if (isGpu && newRowTokensToAppend.length > 0) {
-        await this.syncAppendedRowsToGpu(newRowTokensToAppend, totalRows, newTokensToAppendCount);
-      } else if (!isGpu && (this.preferGpu || totalRows >= (this.options.threshold ?? 30_000)) && this.options.preferGpu !== false && activeDocCount > 0) {
-        await this.tryInitializeGpuEngine();
+      try {
+        if (tombstoneRatio >= 0.25 || gpuHeadroomExhausted) {
+          await this.compact();
+          compacted = true;
+        } else if (isGpu && newRowTokensToAppend.length > 0) {
+          await this.syncAppendedRowsToGpu(newRowTokensToAppend, totalRows, newTokensToAppendCount);
+        } else if (!isGpu && (this.preferGpu || totalRows >= (this.options.threshold ?? 30_000)) && this.options.preferGpu !== false && activeDocCount > 0) {
+          await this.tryInitializeGpuEngine();
+        }
+      } catch (err) {
+        console.warn('[webgpu-search] GPU sync failed during mutation; falling back to CPU:', err);
+        if (this.gpuEngine) {
+          try { this.gpuEngine.destroy(); } catch {}
+          this.gpuEngine = null;
+        }
+        this.engineType = 'cpu';
+        this.fallbackReason = 'gpu-execution-error';
+        this.vramAllocatedBytes = 0;
       }
 
       this.mutationEpoch++;
@@ -1333,8 +1355,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           folded: this.folded,
           totalTokens: this.totalTokens
         });
-        const rowCap = Math.max(Math.floor(totalRows * this.growthFactor), 16);
-        const tokenCap = Math.max(Math.floor(this.totalTokens * this.growthFactor), 64);
+        const rowCap = Math.max(totalRows, 16);
+        const tokenCap = Math.max(this.totalTokens, 64);
         await this.gpuEngine.loadDataset(packed, {
           rowCapacity: rowCap,
           tokenCapacity: tokenCap,
@@ -1369,8 +1391,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           folded: this.folded,
           totalTokens: this.totalTokens
         });
-        const rowCap = Math.max(Math.floor(totalRows * this.growthFactor), 16);
-        const tokenCap = Math.max(Math.floor(this.totalTokens * this.growthFactor), 64);
+        const rowCap = Math.max(totalRows, 16);
+        const tokenCap = Math.max(this.totalTokens, 64);
         await gpu.loadDataset(packed, {
           rowCapacity: rowCap,
           tokenCapacity: tokenCap,
