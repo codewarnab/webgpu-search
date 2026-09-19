@@ -10,6 +10,7 @@ import {
 import {
   clampLimit,
   throwIfAborted,
+  abortError,
   nowMs
 } from './runtime-guards';
 import {
@@ -18,6 +19,7 @@ import {
   SCORING_VERSION,
   UNICODE_VERSION,
   DuplicateIdError,
+  DocumentNotFoundError,
   IncompatibleOptionError,
   ProfileMismatchError,
   QueryTooLongError,
@@ -78,12 +80,18 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   private rowTokens: Uint32Array[] = [];
   private rowToDocIndex: number[] = [];
   private rowToFieldIndex: number[] = [];
+  private docToRowIndices: number[][] = []; // [docIndex][fieldIndex] -> row index
   private rawFieldStrings: string[][] = []; // [docIndex][fieldIndex]
   private totalTokens: number = 0;
   private candidateCapacity: number = 8192;
   private buildTimeMs: number = 0;
+  private lastMutationTimeMs?: number;
   private mutationEpoch: number = 0;
   private tombstones: Set<number> = new Set(); // M4 tombstone candidate filtering
+  private searchMutex: Promise<any> = Promise.resolve();
+  private generation: number = 0;
+  private readonly initialCapacity: number;
+  private readonly growthFactor: number;
 
   constructor(options: DocumentIndexOptions<TDoc>) {
     if (!options || !Array.isArray(options.fields) || options.fields.length === 0) {
@@ -92,6 +100,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.options = options;
     this.folded = !(options.caseSensitive ?? false);
     this.preferGpu = options.preferGpu ?? false;
+    this.initialCapacity = typeof options.initialCapacity === 'number' && Number.isFinite(options.initialCapacity) && options.initialCapacity > 0
+      ? Math.floor(options.initialCapacity)
+      : 0;
+    this.growthFactor = typeof options.growthFactor === 'number' && Number.isFinite(options.growthFactor) && options.growthFactor >= 1.0
+      ? options.growthFactor
+      : 1.5;
 
     if (typeof options.idField === 'function') {
       this.getId = options.idField;
@@ -235,6 +249,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.rowTokens = new Array(totalRows);
     this.rowToDocIndex = new Array(totalRows);
     this.rowToFieldIndex = new Array(totalRows);
+    this.docToRowIndices = Array.from({ length: docCount }, () => new Array(fieldCount));
     this.rawFieldStrings = Array.from({ length: docCount }, () => new Array(fieldCount));
 
     let corpusTokens = 0;
@@ -258,6 +273,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.rowTokens[rowIdx] = norm.tokens;
         this.rowToDocIndex[rowIdx] = d;
         this.rowToFieldIndex[rowIdx] = f;
+        this.docToRowIndices[d][f] = rowIdx;
         corpusTokens += norm.tokenCount;
         rowIdx++;
       }
@@ -301,12 +317,20 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               folded: this.folded,
               totalTokens: corpusTokens
             });
-            await gpu.loadDataset(packed);
+            const effectiveCap = this.initialCapacity > 0 ? this.initialCapacity : Math.max(16, Math.floor(docCount * 1.5));
+            const rowCap = effectiveCap * fieldCount;
+            const avgTokens = totalRows > 0 ? corpusTokens / totalRows : 16;
+            const tokenCap = Math.max(Math.floor(rowCap * avgTokens), 64);
+            await gpu.loadDataset(packed, {
+              rowCapacity: rowCap,
+              tokenCapacity: tokenCap,
+              growthFactor: this.growthFactor
+            });
 
             this.gpuEngine = gpu;
             this.engineType = 'webgpu';
             this.fallbackReason = undefined;
-            this.vramAllocatedBytes = packed.recordsByteLength + packed.offsetsByteLength;
+            this.vramAllocatedBytes = gpu.vramAllocatedBytes;
             gpu = null; // Ownership transferred
 
             this.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
@@ -347,6 +371,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
     }
     throwIfAborted(options.signal);
+    await this.searchMutex;
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    throwIfAborted(options.signal);
+    const gen = this.generation;
+
     if (typeof query !== 'string') {
       throw new TypeError(`[webgpu-search] search expects query: string, got ${typeof query}.`);
     }
@@ -425,7 +456,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     if (normalizedQuery.isEmpty) {
       return noHits('');
     }
-    if (this.records.length === 0) {
+    if (this.idToDocIndex.size === 0) {
       return noHits(query);
     }
 
@@ -477,8 +508,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           signal
         });
 
-        if (this.isDestroyed) {
-          throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+        if (this.isDestroyed || this.generation !== gen) {
+          throw abortError();
         }
         throwIfAborted(signal);
 
@@ -496,7 +527,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           const fIdx = this.rowToFieldIndex[r];
           if (allowedFieldIndices && !allowedFieldIndices.has(fIdx)) continue;
           const dIdx = this.rowToDocIndex[r];
-          if (filter && !filter(this.records[dIdx])) continue;
+          const doc = this.records[dIdx];
+          if (!doc) continue;
+          if (filter && !filter(doc)) continue;
 
           const rawScore = item.score;
           const fDef = this.sortedFields[fIdx];
@@ -590,6 +623,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
 
     // 2. CPU execution path
+    if (this.isDestroyed || this.generation !== gen) {
+      throw abortError();
+    }
     throwIfAborted(signal);
     const t0 = nowMs();
 
@@ -611,7 +647,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
         for (const hit of legacyResult.results) {
           const dIdx = hit.index;
-          if (filter && !filter(this.records[dIdx])) continue;
+          const doc = this.records[dIdx];
+          if (!doc) continue;
+          if (filter && !filter(doc)) continue;
           const weightedScore = Math.round(hit.score * fDef.weight);
           let entry = docMatches.get(dIdx);
           if (!entry) {
@@ -715,18 +753,31 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       this.candidateCapacity,
       allowedFieldIndices,
       this.tombstones,
-      filter ? (dIdx) => filter(this.records[dIdx]) : undefined
+      filter ? (dIdx) => {
+        const doc = this.records[dIdx];
+        return doc !== null && doc !== undefined && filter(doc);
+      } : undefined
     );
 
+    if (this.isDestroyed || this.generation !== gen) {
+      throw abortError();
+    }
     throwIfAborted(signal);
 
-    const enrichedResults: DocumentSearchResultItem<TDoc>[] = parityResult.results.map((hit) => ({
-      id: this.docIds[hit.docIndex],
-      doc: this.records[hit.docIndex],
-      score: hit.score,
-      matchedField: hit.matchedField,
-      matches: hit.matches
-    }));
+    const enrichedResults: DocumentSearchResultItem<TDoc>[] = [];
+    for (let i = 0; i < parityResult.results.length; i++) {
+      const hit = parityResult.results[i];
+      const doc = this.records[hit.docIndex];
+      const id = this.docIds[hit.docIndex];
+      if (doc === null || doc === undefined || id === null || id === undefined) continue;
+      enrichedResults.push({
+        id,
+        doc,
+        score: hit.score,
+        matchedField: hit.matchedField,
+        matches: hit.matches
+      });
+    }
     this.enrichHighlights(enrichedResults, query, mode, options);
 
     const timings: SearchTimings = {
@@ -869,20 +920,479 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
   }
 
-  async add(_docs: TDoc | TDoc[], _options?: AddOptions): Promise<MutationResult> {
-    throw new Error('DocumentIndex.add is scheduled for M4 implementation.');
+  private validateDocumentId(id: unknown, context: string): void {
+    if (
+      id === null ||
+      id === undefined ||
+      (typeof id !== 'string' && typeof id !== 'number') ||
+      (typeof id === 'number' && !Number.isFinite(id))
+    ) {
+      throw new TypeError(
+        `[webgpu-search] Invalid document ID in ${context}: ${String(id)}. DocumentId must be a non-empty string or finite number.`
+      );
+    }
+    if (typeof id === 'string' && id.length === 0) {
+      throw new TypeError(
+        `[webgpu-search] Document ID in ${context} must not be an empty string.`
+      );
+    }
   }
 
-  async update(_docs: TDoc | TDoc[]): Promise<MutationResult> {
-    throw new Error('DocumentIndex.update is scheduled for M4 implementation.');
+  private prepareDocFields(doc: TDoc, id: DocumentId): {
+    id: DocumentId;
+    doc: TDoc;
+    rawStrings: string[];
+    tokens: Uint32Array[];
+    tokenCount: number;
+  } {
+    const fieldCount = this.sortedFields.length;
+    const rawStrings = new Array<string>(fieldCount);
+    const tokens = new Array<Uint32Array>(fieldCount);
+    let tokenCount = 0;
+
+    for (let f = 0; f < fieldCount; f++) {
+      const field = this.sortedFields[f];
+      const rawVal = field.getter(doc);
+      let rawStr = '';
+      if (rawVal !== null && rawVal !== undefined) {
+        if (Array.isArray(rawVal)) {
+          rawStr = rawVal.filter((x) => x !== null && x !== undefined).join(' ');
+        } else {
+          rawStr = typeof rawVal === 'string' ? rawVal : String(rawVal);
+        }
+      }
+      rawStrings[f] = rawStr;
+      const norm = normalizeText(rawStr, this.folded);
+      tokens[f] = norm.tokens;
+      tokenCount += norm.tokenCount;
+    }
+
+    return { id, doc, rawStrings, tokens, tokenCount };
   }
 
-  async remove(_ids: DocumentId | DocumentId[]): Promise<MutationResult> {
-    throw new Error('DocumentIndex.remove is scheduled for M4 implementation.');
+  private queued<T>(fn: () => Promise<T>): Promise<T> {
+    const p = this.searchMutex.then(fn, fn);
+    this.searchMutex = p.catch(() => {});
+    return p;
   }
 
-  async applyBatch(_batch: MutationBatch<TDoc>, _options?: AddOptions): Promise<MutationResult> {
-    throw new Error('DocumentIndex.applyBatch is scheduled for M4 implementation.');
+  async add(docs: TDoc | TDoc[], options?: AddOptions): Promise<MutationResult> {
+    const list = Array.isArray(docs) ? docs : [docs];
+    return this.applyBatch({ add: list }, options);
+  }
+
+  async update(docs: TDoc | TDoc[]): Promise<MutationResult> {
+    const list = Array.isArray(docs) ? docs : [docs];
+    return this.applyBatch({ update: list });
+  }
+
+  async remove(ids: DocumentId | DocumentId[]): Promise<MutationResult> {
+    const list = Array.isArray(ids) ? ids : [ids];
+    return this.applyBatch({ remove: list });
+  }
+
+  async applyBatch(batch: MutationBatch<TDoc>, options?: AddOptions): Promise<MutationResult> {
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    if (!batch || typeof batch !== 'object') {
+      throw new TypeError('[webgpu-search] applyBatch expects batch object.');
+    }
+    return this.queued(async () => {
+      if (this.isDestroyed) {
+        throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+      }
+      const tStart = nowMs();
+      this.generation++;
+      const upsert = options?.upsert ?? false;
+
+      // PHASE 1: ATOMIC TWO-PHASE VALIDATION (State remains untouched on error)
+      const removeIds: DocumentId[] = [];
+      const willRemoveSet = new Set<DocumentId>();
+      if (batch.remove !== undefined) {
+        if (!Array.isArray(batch.remove)) {
+          throw new TypeError('[webgpu-search] batch.remove must be an array of document IDs.');
+        }
+        for (let i = 0; i < batch.remove.length; i++) {
+          const id = batch.remove[i];
+          this.validateDocumentId(id, `remove at index ${i}`);
+          removeIds.push(id);
+          if (this.idToDocIndex.has(id)) {
+            willRemoveSet.add(id);
+          }
+        }
+      }
+
+      interface PreparedDocUpdate {
+        id: DocumentId;
+        doc: TDoc;
+        rawStrings: string[];
+        tokens: Uint32Array[];
+        tokenCount: number;
+      }
+      const preparedUpdates: PreparedDocUpdate[] = [];
+      if (batch.update !== undefined) {
+        if (!Array.isArray(batch.update)) {
+          throw new TypeError('[webgpu-search] batch.update must be an array of documents.');
+        }
+        for (let i = 0; i < batch.update.length; i++) {
+          const doc = batch.update[i];
+          if (doc === null || typeof doc !== 'object') {
+            throw new TypeError(`[webgpu-search] batch.update document at index ${i} must be an object.`);
+          }
+          const id = this.getId(doc);
+          this.validateDocumentId(id, `update at index ${i}`);
+          if (!this.idToDocIndex.has(id) || willRemoveSet.has(id)) {
+            throw new DocumentNotFoundError(id);
+          }
+          const prepared = this.prepareDocFields(doc, id);
+          preparedUpdates.push(prepared);
+        }
+      }
+
+      interface PreparedDocAdd {
+        id: DocumentId;
+        doc: TDoc;
+        rawStrings: string[];
+        tokens: Uint32Array[];
+        tokenCount: number;
+      }
+      const preparedAdds: PreparedDocAdd[] = [];
+      const addedIdsInBatch = new Set<DocumentId>();
+
+      if (batch.add !== undefined) {
+        if (!Array.isArray(batch.add)) {
+          throw new TypeError('[webgpu-search] batch.add must be an array of documents.');
+        }
+        for (let i = 0; i < batch.add.length; i++) {
+          const doc = batch.add[i];
+          if (doc === null || typeof doc !== 'object') {
+            throw new TypeError(`[webgpu-search] batch.add document at index ${i} must be an object.`);
+          }
+          const id = this.getId(doc);
+          this.validateDocumentId(id, `add at index ${i}`);
+
+          const existsInIndex = this.idToDocIndex.has(id) && !willRemoveSet.has(id);
+          const existsInBatch = addedIdsInBatch.has(id);
+
+          if (existsInIndex || existsInBatch) {
+            if (!upsert) {
+              throw new DuplicateIdError(id);
+            }
+          }
+          addedIdsInBatch.add(id);
+
+          const prepared = this.prepareDocFields(doc, id);
+          preparedAdds.push(prepared);
+        }
+      }
+
+      // PHASE 2: DETERMINISTIC EXECUTION (remove -> update -> add)
+      let removedCount = 0;
+      let updatedCount = 0;
+      let addedCount = 0;
+
+      // A. Remove
+      for (let i = 0; i < removeIds.length; i++) {
+        const id = removeIds[i];
+        const d = this.idToDocIndex.get(id);
+        if (d !== undefined) {
+          const rows = this.docToRowIndices[d];
+          if (rows) {
+            for (let f = 0; f < rows.length; f++) {
+              this.tombstones.add(rows[f]);
+            }
+          }
+          this.idToDocIndex.delete(id);
+          this.records[d] = null as any;
+          this.docIds[d] = null as any;
+          removedCount++;
+        }
+      }
+
+      // B. Update
+      const newRowTokensToAppend: Uint32Array[] = [];
+      const newRowDocIndicesToAppend: number[] = [];
+      const newRowFieldIndicesToAppend: number[] = [];
+      let newTokensToAppendCount = 0;
+
+      for (let i = 0; i < preparedUpdates.length; i++) {
+        const upd = preparedUpdates[i];
+        const oldD = this.idToDocIndex.get(upd.id)!;
+        const oldRows = this.docToRowIndices[oldD];
+        if (oldRows) {
+          for (let f = 0; f < oldRows.length; f++) {
+            this.tombstones.add(oldRows[f]);
+          }
+        }
+        this.records[oldD] = null as any;
+        this.docIds[oldD] = null as any;
+
+        const newD = this.records.length;
+        this.records.push(upd.doc);
+        this.docIds.push(upd.id);
+        this.idToDocIndex.set(upd.id, newD);
+        this.rawFieldStrings.push(upd.rawStrings);
+
+        const docRows: number[] = new Array(this.sortedFields.length);
+        for (let f = 0; f < this.sortedFields.length; f++) {
+          const rowIdx = this.rowTokens.length + newRowTokensToAppend.length;
+          newRowTokensToAppend.push(upd.tokens[f]);
+          newRowDocIndicesToAppend.push(newD);
+          newRowFieldIndicesToAppend.push(f);
+          docRows[f] = rowIdx;
+          newTokensToAppendCount += upd.tokens[f].length;
+        }
+        this.docToRowIndices.push(docRows);
+        updatedCount++;
+      }
+
+      // C. Add
+      for (let i = 0; i < preparedAdds.length; i++) {
+        const ad = preparedAdds[i];
+        if (this.idToDocIndex.has(ad.id)) {
+          const oldD = this.idToDocIndex.get(ad.id)!;
+          const oldRows = this.docToRowIndices[oldD];
+          if (oldRows) {
+            for (let f = 0; f < oldRows.length; f++) {
+              this.tombstones.add(oldRows[f]);
+            }
+          }
+          this.records[oldD] = null as any;
+          this.docIds[oldD] = null as any;
+          updatedCount++;
+        } else {
+          addedCount++;
+        }
+
+        const newD = this.records.length;
+        this.records.push(ad.doc);
+        this.docIds.push(ad.id);
+        this.idToDocIndex.set(ad.id, newD);
+        this.rawFieldStrings.push(ad.rawStrings);
+
+        const docRows: number[] = new Array(this.sortedFields.length);
+        for (let f = 0; f < this.sortedFields.length; f++) {
+          const rowIdx = this.rowTokens.length + newRowTokensToAppend.length;
+          newRowTokensToAppend.push(ad.tokens[f]);
+          newRowDocIndicesToAppend.push(newD);
+          newRowFieldIndicesToAppend.push(f);
+          docRows[f] = rowIdx;
+          newTokensToAppendCount += ad.tokens[f].length;
+        }
+        this.docToRowIndices.push(docRows);
+      }
+
+      // Append newly prepared rows to rowTokens, rowToDocIndex, rowToFieldIndex
+      if (newRowTokensToAppend.length > 0) {
+        for (let r = 0; r < newRowTokensToAppend.length; r++) {
+          this.rowTokens.push(newRowTokensToAppend[r]);
+          this.rowToDocIndex.push(newRowDocIndicesToAppend[r]);
+          this.rowToFieldIndex.push(newRowFieldIndicesToAppend[r]);
+        }
+        this.totalTokens += newTokensToAppendCount;
+      }
+
+      // D. Check Compaction / GPU Headroom
+      const totalRows = this.rowTokens.length;
+      const tombstoneCount = this.tombstones.size;
+      const tombstoneRatio = totalRows > 0 ? tombstoneCount / totalRows : 0;
+
+      let compacted = false;
+      const isGpu = this.engineType === 'webgpu' && this.gpuEngine !== null && this.gpuEngine.isReady;
+      const gpuHeadroomExhausted = isGpu && !this.gpuEngine!.canFitHeadroom(totalRows, this.totalTokens);
+
+      const activeDocCount = this.idToDocIndex.size;
+      const newCandidateCap = Math.min(32768, Math.max(8192, Math.floor(activeDocCount * this.sortedFields.length * 0.1)));
+      if (newCandidateCap > this.candidateCapacity) {
+        this.candidateCapacity = newCandidateCap;
+        this.gpuEngine?.ensureCandidateCapacity(newCandidateCap);
+      }
+
+      if (tombstoneRatio >= 0.25 || gpuHeadroomExhausted) {
+        await this.compact();
+        compacted = true;
+      } else if (isGpu && newRowTokensToAppend.length > 0) {
+        await this.syncAppendedRowsToGpu(newRowTokensToAppend, totalRows, newTokensToAppendCount);
+      } else if (!isGpu && (this.preferGpu || totalRows >= (this.options.threshold ?? 30_000)) && this.options.preferGpu !== false && activeDocCount > 0) {
+        await this.tryInitializeGpuEngine();
+      }
+
+      this.mutationEpoch++;
+      const durationMs = nowMs() - tStart;
+      this.lastMutationTimeMs = durationMs;
+
+      return {
+        added: addedCount,
+        updated: updatedCount,
+        removed: removedCount,
+        mutationEpoch: this.mutationEpoch,
+        compacted,
+        durationMs
+      };
+    });
+  }
+
+  private async syncAppendedRowsToGpu(
+    newRows: Uint32Array[],
+    totalRows: number,
+    newTokensCount: number
+  ): Promise<void> {
+    if (!this.gpuEngine || !this.gpuEngine.isReady) return;
+    const numNewRows = newRows.length;
+    const oldTotalTokens = this.totalTokens - newTokensCount;
+
+    const newOffsets = new Uint32Array(numNewRows);
+    let runningOffset = oldTotalTokens;
+    for (let i = 0; i < numNewRows; i++) {
+      runningOffset += newRows[i].length;
+      newOffsets[i] = runningOffset;
+    }
+
+    const newTokens = new Uint32Array(newTokensCount);
+    let pos = 0;
+    for (let i = 0; i < numNewRows; i++) {
+      newTokens.set(newRows[i], pos);
+      pos += newRows[i].length;
+    }
+
+    await this.gpuEngine.appendRows(newTokens, newOffsets, totalRows);
+    this.vramAllocatedBytes = this.gpuEngine.vramAllocatedBytes;
+  }
+
+  private async compact(): Promise<void> {
+    const activeDocCount = this.idToDocIndex.size;
+    const fieldCount = this.sortedFields.length;
+    const totalRows = activeDocCount * fieldCount;
+
+    const activeOldDocIndices: number[] = [];
+    for (let d = 0; d < this.records.length; d++) {
+      const id = this.docIds[d];
+      if (id !== null && id !== undefined && this.idToDocIndex.get(id) === d) {
+        activeOldDocIndices.push(d);
+      }
+    }
+
+    const newRecords: TDoc[] = new Array(activeDocCount);
+    const newDocIds: DocumentId[] = new Array(activeDocCount);
+    const newIdToDocIndex = new Map<DocumentId, number>();
+    const newRawFieldStrings: string[][] = Array.from({ length: activeDocCount }, () => new Array(fieldCount));
+
+    for (let newD = 0; newD < activeDocCount; newD++) {
+      const oldD = activeOldDocIndices[newD];
+      const doc = this.records[oldD];
+      const id = this.docIds[oldD];
+      newRecords[newD] = doc;
+      newDocIds[newD] = id;
+      newIdToDocIndex.set(id, newD);
+      for (let f = 0; f < fieldCount; f++) {
+        newRawFieldStrings[newD][f] = this.rawFieldStrings[oldD][f];
+      }
+    }
+
+    const newRowTokens: Uint32Array[] = new Array(totalRows);
+    const newRowToDocIndex: number[] = new Array(totalRows);
+    const newRowToFieldIndex: number[] = new Array(totalRows);
+    const newDocToRowIndices: number[][] = Array.from({ length: activeDocCount }, () => new Array(fieldCount));
+
+    let corpusTokens = 0;
+    let rowIdx = 0;
+
+    for (let f = 0; f < fieldCount; f++) {
+      for (let newD = 0; newD < activeDocCount; newD++) {
+        const oldD = activeOldDocIndices[newD];
+        const oldRowIdx = this.docToRowIndices[oldD][f];
+        const tokens = this.rowTokens[oldRowIdx];
+        newRowTokens[rowIdx] = tokens;
+        newRowToDocIndex[rowIdx] = newD;
+        newRowToFieldIndex[rowIdx] = f;
+        newDocToRowIndices[newD][f] = rowIdx;
+        corpusTokens += tokens.length;
+        rowIdx++;
+      }
+    }
+
+    this.records = newRecords;
+    this.docIds = newDocIds;
+    this.idToDocIndex = newIdToDocIndex;
+    this.rawFieldStrings = newRawFieldStrings;
+    this.rowTokens = newRowTokens;
+    this.rowToDocIndex = newRowToDocIndex;
+    this.rowToFieldIndex = newRowToFieldIndex;
+    this.docToRowIndices = newDocToRowIndices;
+    this.totalTokens = corpusTokens;
+    this.tombstones.clear();
+
+    if (this.engineType === 'webgpu' && this.gpuEngine && this.gpuEngine.isReady) {
+      if (activeDocCount === 0) {
+        const packed = packUnicodeToGPUBuffer([], { folded: this.folded });
+        await this.gpuEngine.loadDataset(packed);
+        this.vramAllocatedBytes = this.gpuEngine.vramAllocatedBytes;
+      } else {
+        const packed = packUnicodeToGPUBuffer(this.rowTokens, {
+          folded: this.folded,
+          totalTokens: this.totalTokens
+        });
+        const rowCap = Math.max(Math.floor(totalRows * this.growthFactor), 16);
+        const tokenCap = Math.max(Math.floor(this.totalTokens * this.growthFactor), 64);
+        await this.gpuEngine.loadDataset(packed, {
+          rowCapacity: rowCap,
+          tokenCapacity: tokenCap,
+          growthFactor: this.growthFactor
+        });
+        this.vramAllocatedBytes = this.gpuEngine.vramAllocatedBytes;
+      }
+    }
+  }
+
+  private async tryInitializeGpuEngine(): Promise<void> {
+    const totalRows = this.rowTokens.length;
+    const threshold = this.options.threshold ?? 30_000;
+    const shouldAttempt = this.options.preferGpu === false
+      ? false
+      : this.preferGpu || totalRows >= threshold;
+    if (!shouldAttempt || this.gpuEngine) return;
+
+    const measuredAvgBytes = totalRows > 0 ? (this.totalTokens * 4) / totalRows : 0;
+    const budget = checkMemoryBudget(totalRows, measuredAvgBytes, this.options.device, this.candidateCapacity);
+    if (!budget.allowed) {
+      this.fallbackReason = 'memory-budget-exceeded';
+      return;
+    }
+
+    try {
+      const gpu = new WebGPUEngine();
+      const initialized = await gpu.init(this.options.device);
+      if (initialized && gpu.isReady) {
+        gpu.ensureCandidateCapacity(this.candidateCapacity);
+        const packed = packUnicodeToGPUBuffer(this.rowTokens, {
+          folded: this.folded,
+          totalTokens: this.totalTokens
+        });
+        const rowCap = Math.max(Math.floor(totalRows * this.growthFactor), 16);
+        const tokenCap = Math.max(Math.floor(this.totalTokens * this.growthFactor), 64);
+        await gpu.loadDataset(packed, {
+          rowCapacity: rowCap,
+          tokenCapacity: tokenCap,
+          growthFactor: this.growthFactor
+        });
+        this.gpuEngine = gpu;
+        this.engineType = 'webgpu';
+        this.fallbackReason = undefined;
+        this.vramAllocatedBytes = gpu.vramAllocatedBytes;
+        this.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
+          if (this.gpuEngine) {
+            this.gpuEngine.destroy();
+            this.gpuEngine = null;
+          }
+          this.engineType = 'cpu';
+          this.fallbackReason = 'device-lost';
+        });
+      }
+    } catch {
+      this.engineType = 'cpu';
+      this.fallbackReason = 'webgpu-unsupported';
+    }
   }
 
   serialize(): ArrayBuffer {
@@ -895,7 +1405,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
   getStats(): DocumentIndexStats {
     const adapter = this.gpuEngine?.adapterInfo;
-    const docCount = this.records.length;
+    const docCount = this.idToDocIndex.size;
     const rowCount = this.rowTokens.length;
     const tombstoneCount = this.tombstones.size;
     const tombstoneRatio = rowCount > 0 ? tombstoneCount / rowCount : 0;
@@ -918,6 +1428,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       tombstoneCount,
       tombstoneRatio,
       buildTimeMs: this.buildTimeMs,
+      lastMutationTimeMs: this.lastMutationTimeMs,
       mutationEpoch: this.mutationEpoch,
       memory: {
         vramBytes: this.vramAllocatedBytes,
@@ -930,6 +1441,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
   destroy(): void {
     this.isDestroyed = true;
+    this.generation++;
     if (this.unsubscribeDeviceLost) {
       this.unsubscribeDeviceLost();
       this.unsubscribeDeviceLost = undefined;
@@ -944,11 +1456,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.rowTokens = [];
     this.rowToDocIndex = [];
     this.rowToFieldIndex = [];
+    this.docToRowIndices = [];
     this.rawFieldStrings = [];
     this.totalTokens = 0;
     this.tombstones.clear();
     this.engineType = 'cpu';
     this.vramAllocatedBytes = 0;
+    const p = this.searchMutex.then(() => {}, () => {});
+    this.searchMutex = p.catch(() => {});
   }
 
   [Symbol.dispose](): void {

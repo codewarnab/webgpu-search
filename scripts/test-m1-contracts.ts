@@ -109,13 +109,11 @@ async function runM1Tests() {
     throw new Error('DocumentIndex.search should return valid empty response on empty index');
   }
 
-  let addThrew = false;
-  try {
-    await docIndex.add({ id: '1', title: 't', content: 'c' });
-  } catch (err: any) {
-    addThrew = err.message.includes('M4');
+  // Verify add returns valid MutationResult (implemented in M4)
+  const addRes = await docIndex.add({ id: '1', title: 't', content: 'c' });
+  if (addRes.added !== 1 || addRes.mutationEpoch !== 1) {
+    throw new Error('DocumentIndex.add should return valid MutationResult');
   }
-  if (!addThrew) throw new Error('DocumentIndex.add should throw descriptive M4 scheduled error');
 
   docIndex.destroy();
   console.log('   ✅ DocumentIndex public methods, signatures, and factory verified');
