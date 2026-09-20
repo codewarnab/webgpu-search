@@ -607,6 +607,139 @@ async function runM5Tests() {
     console.log('   ✅ Client teardown and Symbol.asyncDispose lifecycle verified');
   }
 
+  // =========================================================================
+  // 13. Multi-Agent Review Hardening & Regression Tests
+  // =========================================================================
+  console.log('13. Testing multi-agent review hardening & edge-cases...');
+  {
+    // A. Candidate Starvation in Predicate Filtering with Limit
+    {
+      const client = new SearchWorkerClient<{ id: string; title: string; category: string }>();
+      const docs = [
+        { id: '1', title: 'Rust Systems Programming 1', category: 'backend' },
+        { id: '2', title: 'Rust Systems Programming 2', category: 'backend' },
+        { id: '3', title: 'Rust Systems Programming 3', category: 'backend' },
+        { id: '4', title: 'Rust Systems Programming 4', category: 'backend' },
+        { id: '5', title: 'Rust Systems Programming 5', category: 'frontend' },
+        { id: '6', title: 'Rust Systems Programming 6', category: 'frontend' },
+      ];
+      await client.init(docs, {
+        fields: ['title'],
+        preferGpu: false
+      });
+
+      // Searching for 'Rust' with limit 2, filtering for 'frontend'
+      const res = await client.search('Rust', {
+        limit: 2,
+        filter: (d) => d.category === 'frontend'
+      });
+      assert.strictEqual(res.results.length, 2, 'Must not starve candidates when filter is active');
+      assert.strictEqual(res.results[0].id, '5');
+      assert.strictEqual(res.results[1].id, '6');
+      await client.destroy();
+    }
+
+    // B. Unhandled Filter Exception Promise Rejection
+    {
+      const client = new SearchWorkerClient<{ id: string; title: string }>();
+      await client.init([
+        { id: '1', title: 'Doc One' }
+      ], { fields: ['title'], preferGpu: false });
+
+      let threw = false;
+      try {
+        await client.search('Doc', {
+          filter: (_d) => {
+            throw new Error('Filter exploded deliberately');
+          }
+        });
+      } catch (err: any) {
+        threw = err?.message?.includes('Filter exploded') ?? false;
+      }
+      assert.strictEqual(threw, true, 'Filter exceptions must reject the search promise without hanging');
+      await client.destroy();
+    }
+
+    // C. Primary Key Collision with indexed 'id' field
+    {
+      interface ProductDoc {
+        id: string;
+        name: string;
+      }
+      const client = new SearchWorkerClient<ProductDoc>();
+      const prods: ProductDoc[] = [
+        { id: 'SKU-999', name: 'Super Widget' }
+      ];
+      await client.init(prods, {
+        idField: 'id',
+        fields: [
+          { name: 'id', weight: 2.0 },
+          { name: 'name', weight: 1.0 }
+        ],
+        preferGpu: false
+      });
+
+      const res = await client.search('SKU-999');
+      assert.strictEqual(res.results.length, 1);
+      assert.strictEqual(res.results[0].id, 'SKU-999');
+      assert.strictEqual(res.results[0].doc, prods[0], 'Document with indexed id field must enrich properly');
+      await client.destroy();
+    }
+
+    // D. Validation Parity
+    {
+      const client = new SearchWorkerClient<{ id: string; title: string }>();
+      // Invalid idField
+      let threwId = false;
+      try {
+        await client.init([{ id: '1', title: 'T' }], {
+          idField: 123 as any,
+          fields: ['title']
+        });
+      } catch (err: any) {
+        threwId = err instanceof TypeError;
+      }
+      assert.strictEqual(threwId, true, 'Invalid idField must throw TypeError');
+
+      // Invalid field weight
+      let threwWeight = false;
+      try {
+        await client.init([{ id: '1', title: 'T' }], {
+          fields: [{ name: 'title', weight: -5 }]
+        });
+      } catch (err: any) {
+        threwWeight = err instanceof RangeError;
+      }
+      assert.strictEqual(threwWeight, true, 'Invalid weight must throw RangeError');
+      await client.destroy();
+    }
+
+    // E. Custom Worker Listener Cleanup on destroy
+    {
+      let removedMessage = false;
+      let removedError = false;
+      const dummyWorker = {
+        postMessage: () => {},
+        addEventListener: (_type: string, _fn: any) => {},
+        removeEventListener: (type: string, _fn: any) => {
+          if (type === 'message') removedMessage = true;
+          if (type === 'error') removedError = true;
+        }
+      } as any;
+
+      const client = new SearchWorkerClient({
+        worker: dummyWorker
+      });
+      // Force getWorker to attach listeners
+      (client as any).getWorker();
+      await client.destroy();
+      assert.strictEqual(removedMessage, true, 'Custom worker message listener must be removed on destroy');
+      assert.strictEqual(removedError, true, 'Custom worker error listener must be removed on destroy');
+    }
+
+    console.log('   ✅ Multi-agent review hardening & edge-cases verified');
+  }
+
   console.log('\n--- All Milestone 5 First-Party Worker Client & Protocol Tests Passed! ✅ ---');
 }
 

@@ -22,6 +22,7 @@ const g = globalThis as any;
 export const isDedicatedWorker =
   typeof self !== 'undefined' &&
   typeof (self as any).postMessage === 'function' &&
+  !(typeof g.SharedWorkerGlobalScope !== 'undefined' && self instanceof g.SharedWorkerGlobalScope) &&
   (
     typeof (self as any).importScripts === 'function' ||
     (typeof g.DedicatedWorkerGlobalScope !== 'undefined' && self instanceof g.DedicatedWorkerGlobalScope) ||
@@ -33,6 +34,10 @@ export function startSearchWorker(customScope?: any): void {
   if (!scope || typeof scope.postMessage !== 'function') {
     return;
   }
+  if ((scope as any).__webgpu_search_worker_started) {
+    return;
+  }
+  (scope as any).__webgpu_search_worker_started = true;
 
   let index: DocumentIndex<any> | null = null;
   let activeAbortController: AbortController | null = null;
@@ -104,9 +109,7 @@ export function startSearchWorker(customScope?: any): void {
 
           // String-isolated enrichment: strip `doc` across thread boundary to eliminate structured-clone overhead
           if (payload.stringIsolated !== false && resp.results) {
-            for (let i = 0; i < resp.results.length; i++) {
-              (resp.results[i] as any).doc = undefined;
-            }
+            resp.results = resp.results.map((item) => ({ ...item, doc: undefined }));
           }
 
           scope.postMessage({
@@ -115,7 +118,7 @@ export function startSearchWorker(customScope?: any): void {
             result: resp
           } satisfies WorkerResponse);
         } catch (err: any) {
-          if (signal.aborted || queryId < latestQueryId || err?.name === 'AbortError') {
+          if (signal.aborted || queryId < latestQueryId) {
             break;
           }
           scope.postMessage({
@@ -260,8 +263,16 @@ export function startSearchWorker(customScope?: any): void {
         break;
       }
 
-      default:
+      default: {
+        scope.postMessage({
+          id: req.id,
+          success: false,
+          error: serializeError(
+            new Error(`[webgpu-search] Unknown worker request type: ${(req as any).type}`)
+          )
+        } satisfies WorkerResponse);
         break;
+      }
     }
   };
 

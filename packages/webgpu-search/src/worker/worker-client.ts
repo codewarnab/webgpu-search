@@ -33,6 +33,8 @@ interface PendingQuery<TDoc> {
   limit?: number;
 }
 
+export const INTERNAL_WORKER_ID_KEY = '__wgpu_id__';
+
 /**
  * First-party asynchronous client managing an off-thread search worker.
  *
@@ -50,6 +52,8 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
   private readonly docMap: Map<DocumentId, TDoc> = new Map();
   private getId: (doc: TDoc) => DocumentId = (doc: any) => doc?.id;
   private fieldDefinitions: InternalFieldDef<TDoc>[] = [];
+  private messageListener: ((event: MessageEvent) => void) | null = null;
+  private errorListener: ((err: any) => void) | null = null;
 
   private readonly pendingRequests = new Map<number, {
     resolve: (val: any) => void;
@@ -83,7 +87,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
   private createDefaultWorker(): Worker {
     if (typeof Worker === 'undefined') {
       throw new Error(
-        '[webgpu-search] Worker environment not detected. In Node.js, pass a custom worker or worker factory via options.worker.'
+        '[webgpu-search] Worker environment not detected. In Node.js or SSR environments, pass a custom worker or worker factory via options.worker.'
       );
     }
     try {
@@ -114,29 +118,33 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         if (!resp.success) {
           pendingQuery.reject(deserializeError(resp.error!));
         } else {
-          const searchResp = resp.result as DocumentSearchResponse<TDoc>;
-          if (searchResp && Array.isArray(searchResp.results)) {
-            // String-isolated enrichment: re-attach original doc
-            for (let i = 0; i < searchResp.results.length; i++) {
-              const item = searchResp.results[i];
-              if (item.doc === undefined || item.doc === null) {
-                const doc = this.docMap.get(item.id);
-                if (doc !== undefined) {
-                  item.doc = doc;
+          try {
+            const searchResp = resp.result as DocumentSearchResponse<TDoc>;
+            if (searchResp && Array.isArray(searchResp.results)) {
+              // String-isolated enrichment: re-attach original doc
+              for (let i = 0; i < searchResp.results.length; i++) {
+                const item = searchResp.results[i];
+                if (item.doc === undefined || item.doc === null) {
+                  const doc = this.docMap.get(item.id);
+                  if (doc !== undefined) {
+                    item.doc = doc;
+                  }
                 }
               }
-            }
 
-            // Apply predicate filter if configured
-            if (pendingQuery.filter) {
-              searchResp.results = searchResp.results.filter((item) => pendingQuery.filter!(item.doc));
-              if (pendingQuery.limit && searchResp.results.length > pendingQuery.limit) {
-                searchResp.results = searchResp.results.slice(0, pendingQuery.limit);
+              // Apply predicate filter if configured
+              if (pendingQuery.filter) {
+                searchResp.results = searchResp.results.filter((item) => pendingQuery.filter!(item.doc));
+                if (pendingQuery.limit && searchResp.results.length > pendingQuery.limit) {
+                  searchResp.results = searchResp.results.slice(0, pendingQuery.limit);
+                }
+                searchResp.totalMatches = searchResp.results.length;
               }
-              searchResp.totalMatches = searchResp.results.length;
             }
+            pendingQuery.resolve(searchResp);
+          } catch (err) {
+            pendingQuery.reject(err);
           }
-          pendingQuery.resolve(searchResp);
         }
         return;
       }
@@ -154,7 +162,8 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     };
 
     const handleError = (err: any) => {
-      const errorObj = new Error(err?.message || 'Web Worker error occurred.');
+      const errorObj = new Error(err?.message || 'Search worker encountered a fatal error.');
+      this.isDestroyed = true;
       for (const pending of this.pendingQueries.values()) {
         pending.signalCleanup?.();
         pending.reject(errorObj);
@@ -165,7 +174,18 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         pending.reject(errorObj);
       }
       this.pendingRequests.clear();
+
+      if (this.worker) {
+        this.removeWorkerListeners(this.worker);
+        if (this.ownsWorker && typeof this.worker.terminate === 'function') {
+          this.worker.terminate();
+        }
+        this.worker = null;
+      }
     };
+
+    this.messageListener = handleMessage;
+    this.errorListener = handleError;
 
     if (typeof w.addEventListener === 'function') {
       w.addEventListener('message', handleMessage);
@@ -173,6 +193,25 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     } else {
       w.onmessage = handleMessage;
       w.onerror = handleError;
+    }
+  }
+
+  private removeWorkerListeners(w: Worker): void {
+    if (this.messageListener) {
+      if (typeof w.removeEventListener === 'function') {
+        w.removeEventListener('message', this.messageListener);
+      } else {
+        w.onmessage = null;
+      }
+      this.messageListener = null;
+    }
+    if (this.errorListener) {
+      if (typeof w.removeEventListener === 'function') {
+        w.removeEventListener('error', this.errorListener);
+      } else {
+        w.onerror = null;
+      }
+      this.errorListener = null;
     }
   }
 
@@ -194,7 +233,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
   }
 
   private extractSerializableDoc(doc: TDoc, id: DocumentId): Record<string, unknown> {
-    const out: Record<string, unknown> = { id };
+    const out: Record<string, unknown> = { [INTERNAL_WORKER_ID_KEY]: id };
     for (let i = 0; i < this.fieldDefinitions.length; i++) {
       const f = this.fieldDefinitions[i];
       const val = f.getter(doc);
@@ -229,6 +268,10 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       throw new TypeError('[webgpu-search] init requires DocumentIndexOptions.');
     }
 
+    if (options.idField !== undefined && typeof options.idField !== 'string' && typeof options.idField !== 'function') {
+      throw new TypeError('[webgpu-search] idField must be a string property name or function.');
+    }
+
     if (typeof options.idField === 'function') {
       this.getId = options.idField;
     } else if (typeof options.idField === 'string') {
@@ -238,27 +281,52 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       this.getId = (doc: any) => doc.id;
     }
 
-    this.fieldDefinitions = (options.fields || []).map((f) => {
+    if (!Array.isArray(options.fields) || options.fields.length === 0) {
+      throw new TypeError('[webgpu-search] DocumentIndex expects options.fields to be a non-empty array.');
+    }
+
+    this.fieldDefinitions = options.fields.map((f) => {
       if (typeof f === 'string') {
+        if (!f) {
+          throw new TypeError('[webgpu-search] Field name cannot be an empty string.');
+        }
         return {
           name: f,
           weight: 1.0,
           getter: (doc: any) => doc[f]
         };
       }
+      if (!f || typeof f !== 'object' || typeof f.name !== 'string' || !f.name) {
+        throw new TypeError('[webgpu-search] Field definition requires non-empty name string.');
+      }
+      const weight = f.weight ?? 1.0;
+      if (typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0) {
+        throw new RangeError(`[webgpu-search] Field weight must be a positive finite number, got ${weight}.`);
+      }
       return {
         name: f.name,
-        weight: f.weight ?? 1.0,
+        weight,
         getter: f.getter ? f.getter : (doc: any) => doc[f.name]
       };
     });
 
-    this.docMap.clear();
+    if (!this.stringIsolated) {
+      if (typeof options.idField === 'function') {
+        throw new TypeError('[webgpu-search] stringIsolated: false does not support function idField across worker boundary.');
+      }
+      for (const f of options.fields) {
+        if (typeof f === 'object' && typeof f.getter === 'function') {
+          throw new TypeError('[webgpu-search] stringIsolated: false does not support custom getter functions across worker boundary.');
+        }
+      }
+    }
+
+    const nextDocMap = new Map<DocumentId, TDoc>();
     const serializableRecords: Record<string, unknown>[] = [];
     for (let i = 0; i < records.length; i++) {
       const doc = records[i];
       const id = this.getId(doc);
-      this.docMap.set(id, doc);
+      nextDocMap.set(id, doc);
       if (this.stringIsolated) {
         serializableRecords.push(this.extractSerializableDoc(doc, id));
       } else {
@@ -273,7 +341,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
 
     const workerOptions = {
       ...options,
-      idField: 'id',
+      idField: this.stringIsolated ? INTERNAL_WORKER_ID_KEY : (options.idField ?? 'id'),
       fields: workerFields
     };
 
@@ -281,6 +349,11 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       options: workerOptions,
       records: serializableRecords
     });
+
+    this.docMap.clear();
+    for (const [id, doc] of nextDocMap) {
+      this.docMap.set(id, doc);
+    }
   }
 
   async search(
@@ -311,7 +384,14 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       }
     }
 
-    const { filter, signal, ...workerOptions } = options || {};
+    const { filter, signal, limit, maxResults, ...restOptions } = options || {};
+    const requestedLimit = limit ?? maxResults ?? 50;
+
+    // Avoid candidate starvation when predicate filter is applied on main thread
+    const workerOptions = {
+      ...restOptions,
+      limit: filter ? ((options as any)?.candidateCapacity ?? 8192) : requestedLimit
+    };
 
     return new Promise<DocumentSearchResponse<TDoc>>((resolve, reject) => {
       let signalCleanup: (() => void) | undefined;
@@ -340,7 +420,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         reject,
         signalCleanup,
         filter,
-        limit: options?.limit ?? options?.maxResults ?? 50
+        limit: requestedLimit
       });
 
       const req: WorkerRequest = {
@@ -486,6 +566,8 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         };
         this.worker.postMessage(req);
       } catch {}
+
+      this.removeWorkerListeners(this.worker);
 
       if (this.ownsWorker && typeof this.worker.terminate === 'function') {
         this.worker.terminate();
