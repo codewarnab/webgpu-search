@@ -539,37 +539,59 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       throw new TypeError('[webgpu-search] restore expects an ArrayBuffer.');
     }
 
+    let stagedFieldDefs = this.fieldDefinitions;
+    let stagedGetId = this.getId;
+    const stagedDocMap = new Map<DocumentId, TDoc>();
+
     try {
       const header = deserializeDocumentSnapshotHeader(buffer);
-      // If client fieldDefinitions is empty, extract from schema
-      if (
-        this.fieldDefinitions.length === 0 &&
-        buffer.byteLength >= SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength
-      ) {
+      const userFields = options?.options?.fields;
+      const userFieldMap = new Map<string, any>();
+      if (Array.isArray(userFields)) {
+        for (const uf of userFields) {
+          if (typeof uf === 'string') {
+            userFieldMap.set(uf, uf);
+          } else if (uf && typeof uf === 'object' && typeof uf.name === 'string') {
+            userFieldMap.set(uf.name, uf);
+          }
+        }
+      }
+
+      if (buffer.byteLength >= SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength) {
         const schemaBytes = new Uint8Array(buffer, SERIALIZED_DOC_HEADER_BYTES, header.schemaByteLength);
         const schemaStr = new TextDecoder().decode(schemaBytes);
         const schema = JSON.parse(schemaStr);
         if (schema && Array.isArray(schema.fields)) {
-          this.fieldDefinitions = schema.fields.map((f: any) => ({
-            name: f.name,
-            weight: f.weight ?? 1.0,
-            getter: (doc: any) => doc[f.name]
-          }));
+          stagedFieldDefs = schema.fields.map((f: any) => {
+            const uf = userFieldMap.get(f.name);
+            const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
+              ? uf.getter
+              : (doc: any) => doc[f.name];
+            return {
+              name: f.name,
+              weight: f.weight ?? 1.0,
+              getter
+            };
+          });
         }
-        if (schema.idField && typeof schema.idField === 'string') {
+        if (typeof options?.options?.idField === 'function') {
+          stagedGetId = options.options.idField;
+        } else if (typeof options?.options?.idField === 'string') {
+          const prop = options.options.idField;
+          stagedGetId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+        } else if (schema.idField && typeof schema.idField === 'string') {
           const prop = schema.idField;
-          this.getId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+          stagedGetId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
         } else {
-          this.getId = (doc: any) => doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+          stagedGetId = (doc: any) => doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
         }
       }
 
-      // Repopulate docMap if documents are provided or embedded
-      this.docMap.clear();
+      // Repopulate stagedDocMap if documents are provided or embedded
       if (options?.documents && Array.isArray(options.documents)) {
         for (const doc of options.documents) {
-          const id = this.getId(doc);
-          this.docMap.set(id, doc);
+          const id = stagedGetId(doc);
+          stagedDocMap.set(id, doc);
         }
       } else if (header.docsByteLength > 0) {
         const docsOffset =
@@ -582,19 +604,43 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         const docs = JSON.parse(docsStr);
         if (Array.isArray(docs)) {
           for (const doc of docs) {
-            const id = this.getId(doc);
+            const id = stagedGetId(doc);
             if (doc && doc[INTERNAL_WORKER_ID_KEY] !== undefined && doc.id === undefined) {
               doc.id = doc[INTERNAL_WORKER_ID_KEY];
             }
-            this.docMap.set(id, doc);
+            stagedDocMap.set(id, doc);
           }
         }
       }
-    } catch {}
+    } catch {
+      // Allow worker to handle fail-closed validation and throw IncompatibleIndexError
+    }
+
+    // Sanitize options to avoid DataCloneError over postMessage
+    const sanitizedOptions: RestoreDocumentIndexOptions<TDoc> | undefined = options ? {
+      ...options,
+      device: undefined,
+      options: options.options ? {
+        ...options.options,
+        device: undefined,
+        fields: options.options.fields?.map((f) =>
+          typeof f === 'string' ? f : { name: f.name, weight: f.weight }
+        ),
+        idField: typeof options.options.idField === 'string' ? options.options.idField : undefined
+      } : undefined
+    } : undefined;
 
     const shouldTransfer = options?.transfer === true;
     const toSend = shouldTransfer ? buffer : buffer.slice(0);
-    await this.sendRequest('RESTORE', { buffer: toSend, options }, [toSend]);
+    await this.sendRequest('RESTORE', { buffer: toSend, options: sanitizedOptions }, [toSend]);
+
+    // Commit only after successful restore response from worker
+    this.fieldDefinitions = stagedFieldDefs;
+    this.getId = stagedGetId;
+    this.docMap.clear();
+    for (const [k, v] of stagedDocMap) {
+      this.docMap.set(k, v);
+    }
   }
 
   async getStats(): Promise<DocumentIndexStats> {

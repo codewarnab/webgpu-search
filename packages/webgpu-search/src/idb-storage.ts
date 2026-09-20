@@ -134,11 +134,7 @@ export async function saveIndexToIDB(
 
       if (decoupled && docsToStore && docsToStore.length > 0) {
         const docStore = tx.objectStore(docStoreName);
-        for (let i = 0; i < docsToStore.length; i++) {
-          const doc = docsToStore[i];
-          const docId = doc && typeof doc === 'object' && 'id' in doc ? doc.id : i;
-          docStore.put(doc, docId);
-        }
+        docStore.put(docsToStore, key);
       }
     });
   } finally {
@@ -196,14 +192,12 @@ export async function loadIndexFromIDB<TDoc = Record<string, unknown>>(
 
       if (shouldLoadDocs && db!.objectStoreNames.contains(docStoreName)) {
         const docStore = tx.objectStore(docStoreName);
-        if (typeof (docStore as any).getAll === 'function') {
-          const docReq = docStore.getAll();
-          docReq.onsuccess = () => {
-            if (Array.isArray(docReq.result) && docReq.result.length > 0) {
-              documentsResult = docReq.result as TDoc[];
-            }
-          };
-        }
+        const docReq = docStore.get(key);
+        docReq.onsuccess = () => {
+          if (Array.isArray(docReq.result) && docReq.result.length > 0) {
+            documentsResult = docReq.result as TDoc[];
+          }
+        };
       }
     });
   } finally {
@@ -218,13 +212,18 @@ export async function loadIndexFromIDB<TDoc = Record<string, unknown>>(
  */
 export async function deleteIndexFromIDB(options?: IDBStorageOptions): Promise<boolean> {
   const snapshotStoreName = options?.snapshotStoreName ?? DEFAULT_SNAPSHOT_STORE_NAME;
+  const docStoreName = options?.docStoreName ?? DEFAULT_DOCUMENT_STORE_NAME;
   const key = options?.key ?? DEFAULT_SNAPSHOT_KEY;
 
   let db: IDBDatabase | null = null;
   try {
     db = await openSearchDatabase(options);
     return await new Promise<boolean>((resolve, reject) => {
-      const tx = db!.transaction([snapshotStoreName], 'readwrite');
+      const storeNames = db!.objectStoreNames.contains(docStoreName)
+        ? [snapshotStoreName, docStoreName]
+        : [snapshotStoreName];
+
+      const tx = db!.transaction(storeNames, 'readwrite');
       tx.onerror = () => {
         reject(tx.error ?? new Error('[webgpu-search] IDB transaction failed during deleteIndexFromIDB.'));
       };
@@ -237,6 +236,11 @@ export async function deleteIndexFromIDB(options?: IDBStorageOptions): Promise<b
 
       const snapStore = tx.objectStore(snapshotStoreName);
       snapStore.delete(key);
+
+      if (db!.objectStoreNames.contains(docStoreName)) {
+        const docStore = tx.objectStore(docStoreName);
+        docStore.delete(key);
+      }
     });
   } finally {
     if (db) {

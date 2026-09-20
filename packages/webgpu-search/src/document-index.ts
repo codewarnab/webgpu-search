@@ -48,7 +48,8 @@ import type {
   RestoreDocumentIndexOptions,
   SearchMode,
   SearchTimings,
-  SerializeDocumentIndexOptions
+  SerializeDocumentIndexOptions,
+  DocumentIndexSchema
 } from './types';
 
 export interface InternalField<TDoc> extends FieldScoreDefinition {
@@ -64,24 +65,24 @@ export interface InternalField<TDoc> extends FieldScoreDefinition {
  */
 export class DocumentIndex<TDoc = Record<string, unknown>> {
   readonly options: DocumentIndexOptions<TDoc>;
-  private isDestroyed: boolean = false;
-  private engineType: EngineType = 'cpu';
-  private gpuEngine: WebGPUEngine | null = null;
-  private vramAllocatedBytes: number = 0;
-  private unsubscribeDeviceLost?: () => void;
-  private readonly profileId: TextProfileId = 'unicode-default';
   private readonly folded: boolean;
   private readonly preferGpu: boolean;
+  private gpuEngine: WebGPUEngine | null = null;
+  private engineType: EngineType = 'cpu';
   private fallbackReason?: FallbackReason;
+  private vramAllocatedBytes: number = 0;
+  private unsubscribeDeviceLost?: () => void;
+  private isDestroyed: boolean = false;
+  private readonly profileId: TextProfileId = 'unicode-default';
 
-  // Documents and IDs
+  // Active documents state
   private records: TDoc[] = [];
   private docIds: DocumentId[] = [];
   private idToDocIndex: Map<DocumentId, number> = new Map();
-  private readonly getId: (doc: TDoc) => DocumentId;
+  private getId: (doc: TDoc) => DocumentId;
 
   // Fields and weights (stratified: sorted by weight desc)
-  private readonly sortedFields: InternalField<TDoc>[];
+  private sortedFields: InternalField<TDoc>[] = [];
   private readonly fieldNameToIndex: Map<string, number> = new Map();
 
   // Tokens and row mapping
@@ -1356,9 +1357,29 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.tombstones.clear();
   }
 
+  private isStratified(): boolean {
+    const docCount = this.records.length;
+    if (docCount === 0) return true;
+    for (let r = 0; r < this.rowTokens.length; r++) {
+      if (
+        this.rowToFieldIndex[r] !== Math.floor(r / docCount) ||
+        this.rowToDocIndex[r] !== (r % docCount)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   compactSync(): void {
-    if (this.tombstones.size > 0) {
+    if (this.tombstones.size > 0 || !this.isStratified()) {
       this.compactCpu();
+      if (this.gpuEngine) {
+        this.gpuEngine.destroy();
+        this.gpuEngine = null;
+        this.engineType = 'cpu';
+        this.fallbackReason = 'prefer-cpu';
+      }
     }
   }
 
@@ -1460,13 +1481,37 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     options?: RestoreDocumentIndexOptions<TDoc>
   ): Promise<DocumentIndex<TDoc>> {
     const t0 = nowMs();
+    const userFields = options?.options?.fields;
+    const userFieldMap = new Map<string, any>();
+    if (Array.isArray(userFields)) {
+      for (const uf of userFields) {
+        if (typeof uf === 'string') {
+          userFieldMap.set(uf, uf);
+        } else if (uf && typeof uf === 'object' && typeof uf.name === 'string') {
+          userFieldMap.set(uf.name, uf);
+        }
+      }
+    }
+
+    const resolvedFields = snapshot.schema.fields.map((sf) => {
+      const uf = userFieldMap.get(sf.name);
+      const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
+        ? uf.getter
+        : undefined;
+      return {
+        name: sf.name,
+        weight: sf.weight,
+        getter
+      };
+    });
+
     const mergedOptions: DocumentIndexOptions<TDoc> = {
       ...(options?.options as any),
-      fields: snapshot.schema.fields,
+      fields: resolvedFields,
       idField: options?.options?.idField ?? snapshot.schema.idField ?? 'id',
       caseSensitive: options?.options?.caseSensitive ?? snapshot.schema.caseSensitive ?? !snapshot.header.folded,
       device: (options?.device ?? options?.options?.device) as GPUDevice | undefined,
-      preferGpu: options?.options?.preferGpu,
+      preferGpu: options?.options?.preferGpu ?? snapshot.schema.preferGpu,
       threshold: options?.options?.threshold ?? snapshot.schema.threshold,
       candidateCapacity: options?.options?.candidateCapacity ?? snapshot.schema.candidateCapacity,
       initialCapacity: options?.options?.initialCapacity ?? snapshot.schema.initialCapacity,
@@ -1479,10 +1524,65 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     return index;
   }
 
+  private configureFromSchema(
+    schema: DocumentIndexSchema,
+    options?: RestoreDocumentIndexOptions<TDoc>
+  ): void {
+    const userFields = options?.options?.fields;
+    const userFieldMap = new Map<string, any>();
+    if (Array.isArray(userFields)) {
+      for (const uf of userFields) {
+        if (typeof uf === 'string') {
+          userFieldMap.set(uf, uf);
+        } else if (uf && typeof uf === 'object' && typeof uf.name === 'string') {
+          userFieldMap.set(uf.name, uf);
+        }
+      }
+    }
+
+    const normalized: InternalField<TDoc>[] = schema.fields.map(
+      (f: { name: string; weight: number }, originalIndex: number) => {
+      const name = f.name;
+      const weight = f.weight ?? 1.0;
+      const uf = userFieldMap.get(name);
+      let getter: (doc: TDoc) => string | string[] | undefined | null;
+      if (uf && typeof uf === 'object' && typeof uf.getter === 'function') {
+        getter = uf.getter;
+      } else {
+        getter = (doc: any) => doc[name];
+      }
+      return { name, weight, getter, originalIndex };
+    });
+
+    this.sortedFields = [...normalized].sort((a, b) => {
+      if (b.weight !== a.weight) return b.weight - a.weight;
+      return a.originalIndex - b.originalIndex;
+    });
+
+    this.fieldNameToIndex.clear();
+    for (let i = 0; i < this.sortedFields.length; i++) {
+      this.fieldNameToIndex.set(this.sortedFields[i].name, i);
+    }
+
+    if (typeof options?.options?.idField === 'function') {
+      this.getId = options.options.idField;
+    } else if (typeof options?.options?.idField === 'string') {
+      const prop = options.options.idField;
+      this.getId = (doc: any) => doc[prop];
+    } else if (typeof schema.idField === 'string') {
+      const prop = schema.idField;
+      this.getId = (doc: any) => doc[prop];
+    } else if (options?.options?.idField === undefined && schema.idField === undefined) {
+      this.getId = (doc: any) => doc.id;
+    }
+  }
+
   private async applySnapshotData(
     snapshot: RestoredDocumentSnapshot<TDoc>,
     options?: RestoreDocumentIndexOptions<TDoc>
   ): Promise<void> {
+    this.configureFromSchema(snapshot.schema, options);
+
     if (this.unsubscribeDeviceLost) {
       this.unsubscribeDeviceLost();
       this.unsubscribeDeviceLost = undefined;
@@ -1511,6 +1611,29 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     } else {
       for (let i = 0; i < this.docIds.length; i++) {
         this.idToDocIndex.set(this.docIds[i], i);
+      }
+    }
+
+    // If both records and docIds are present, ensure exact ID correspondence alignment
+    if (this.records.length === docCount && this.docIds.length === docCount) {
+      const recMap = new Map<DocumentId, TDoc>();
+      for (const rec of this.records) {
+        recMap.set(this.getId(rec), rec);
+      }
+      if (recMap.size === docCount) {
+        const aligned: TDoc[] = new Array(docCount);
+        let allFound = true;
+        for (let i = 0; i < docCount; i++) {
+          const rec = recMap.get(this.docIds[i]);
+          if (rec === undefined) {
+            allFound = false;
+            break;
+          }
+          aligned[i] = rec;
+        }
+        if (allFound) {
+          this.records = aligned;
+        }
       }
     }
 

@@ -204,10 +204,10 @@ export function startSearchWorker(customScope?: any): void {
         try {
           const payload = req.payload as WorkerRestorePayload;
           if (index) {
-            await index.restore(payload.buffer, payload.options);
-          } else {
-            index = await restoreDocumentIndex(payload.buffer, payload.options);
+            index.destroy();
+            index = null;
           }
+          index = await restoreDocumentIndex(payload.buffer, payload.options);
           scope.postMessage({ id: req.id, success: true } satisfies WorkerResponse);
         } catch (err) {
           scope.postMessage({

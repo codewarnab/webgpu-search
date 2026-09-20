@@ -521,6 +521,38 @@ async function runM6Tests() {
       (err: any) => err instanceof IncompatibleIndexError
     );
 
+    // 6. Duck-typed non-ArrayBuffer ({ byteLength: 50 })
+    assert.throws(
+      () => deserializeDocumentSnapshotHeader({ byteLength: 50 } as any),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+
+    // 7. Tampered schema.docIds length mismatch
+    const badDocIdsBuf = validBuffer.slice(0);
+    const badDocIdsHeader = deserializeDocumentSnapshotHeader(badDocIdsBuf);
+    const schemaBytes = new Uint8Array(badDocIdsBuf, SERIALIZED_DOC_HEADER_BYTES, badDocIdsHeader.schemaByteLength);
+    const parsedSchema = JSON.parse(new TextDecoder().decode(schemaBytes));
+    parsedSchema.docIds = ['doc-1']; // length 1 instead of 3
+    const newSchemaBytes = new TextEncoder().encode(JSON.stringify(parsedSchema));
+    if (newSchemaBytes.length <= badDocIdsHeader.schemaByteLength) {
+      const padded = new Uint8Array(badDocIdsHeader.schemaByteLength);
+      padded.set(newSchemaBytes);
+      for (let p = newSchemaBytes.length; p < badDocIdsHeader.schemaByteLength; p++) {
+        padded[p] = 0x20;
+      }
+      schemaBytes.set(padded);
+      const tamperedDv2 = new DataView(badDocIdsBuf);
+      const newCrc2 = crc32Parts([
+        new Uint8Array(badDocIdsBuf, 0, 44),
+        new Uint8Array(badDocIdsBuf, SERIALIZED_DOC_HEADER_BYTES)
+      ]);
+      tamperedDv2.setUint32(44, newCrc2, true);
+      assert.rejects(
+        async () => restoreDocumentIndex(badDocIdsBuf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+
     console.log('   ✅ Fail-closed error hierarchy & tamper checks confirmed');
   }
 
@@ -578,6 +610,34 @@ async function runM6Tests() {
     assert.strictEqual(decoupledQRes.results[0].id, 'doc-1');
     assert.deepStrictEqual(decoupledQRes.results[0].doc, sampleArticles[0]);
 
+    // Test Multi-Index Decoupled Isolation in IDB
+    const index2 = await DocumentIndex.create([
+      { id: 'item-100', title: 'Rust Systems', content: 'Low level memory safety' }
+    ], {
+      fields: ['title', 'content']
+    });
+
+    await saveIndexToIDB(index2, {
+      indexedDB: mockIdb as any,
+      key: 'test_key_decoupled_2',
+      decoupled: true
+    });
+
+    // Ensure index 1 still loads ONLY index 1 docs, and index 2 loads ONLY index 2 docs
+    const restoredA = await restoreIndexFromIDB({
+      indexedDB: mockIdb as any,
+      key: 'test_key_decoupled'
+    });
+    assert.strictEqual(restoredA!.getStats().docCount, 3);
+
+    const restoredB = await restoreIndexFromIDB({
+      indexedDB: mockIdb as any,
+      key: 'test_key_decoupled_2'
+    });
+    assert.strictEqual(restoredB!.getStats().docCount, 1);
+    const bRes = await restoredB!.search('Rust');
+    assert.strictEqual(bRes.results[0].id, 'item-100');
+
     // Test delete from IDB
     const deleted = await deleteIndexFromIDB({
       indexedDB: mockIdb as any,
@@ -590,6 +650,17 @@ async function runM6Tests() {
       key: 'test_key_1'
     });
     assert.strictEqual(reloaded, null, 'Deleted snapshot must return null');
+
+    // Test delete decoupled index from IDB cleans up doc store
+    await deleteIndexFromIDB({
+      indexedDB: mockIdb as any,
+      key: 'test_key_decoupled_2'
+    });
+    const reloadedDecoupledB = await loadIndexFromIDB({
+      indexedDB: mockIdb as any,
+      key: 'test_key_decoupled_2'
+    });
+    assert.strictEqual(reloadedDecoupledB, null);
 
     console.log('   ✅ IndexedDB persistence: transaction safety, decoupled docs & cleanup confirmed');
   }
@@ -625,7 +696,15 @@ async function runM6Tests() {
       worker: clientWorker2
     });
 
-    await freshClient.restore(workerSnapshot);
+    // Restore with non-cloneable options (function getters, null device) - tests sanitization
+    await freshClient.restore(workerSnapshot, {
+      options: {
+        fields: [
+          { name: 'title', weight: 2.0, getter: (d: any) => d.title },
+          { name: 'content', weight: 1.0, getter: (d: any) => d.content }
+        ]
+      }
+    });
 
     const stats = await freshClient.getStats();
     assert.strictEqual(stats.docCount, 3);
@@ -652,6 +731,70 @@ async function runM6Tests() {
     await freshClientWithDocs.destroy();
 
     console.log('   ✅ SearchWorkerClient serialize & direct restore confirmed');
+  }
+
+  // =========================================================================
+  // 8. Dynamic Mutations (add) Stratification Parity & Custom Getters
+  // =========================================================================
+  console.log('8. Testing dynamic additions (unstratified rows) serialization & custom getters...');
+  {
+    interface CustomDoc {
+      docKey: string;
+      meta: {
+        headline: string;
+      };
+      body: string;
+    }
+
+    const initialDocs: CustomDoc[] = [
+      { docKey: 'k-1', meta: { headline: 'Apple Fruits' }, body: 'Red fruit with seeds' },
+      { docKey: 'k-2', meta: { headline: 'Banana Tropics' }, body: 'Yellow fruit peel' }
+    ];
+
+    const index = await DocumentIndex.create(initialDocs, {
+      fields: [
+        { name: 'headline', getter: (d) => d.meta.headline },
+        'body'
+      ],
+      idField: 'docKey'
+    });
+
+    // Dynamically append without tombstones
+    await index.add({
+      docKey: 'k-3',
+      meta: { headline: 'Carrot Veggies' },
+      body: 'Orange vegetable root'
+    });
+
+    // Serialize must re-stratify rows seamlessly
+    const snapshot = index.serialize();
+    const restored = await DocumentIndex.fromSnapshot<CustomDoc>(snapshot, {
+      options: {
+        fields: [
+          { name: 'headline', getter: (d) => d.meta.headline },
+          'body'
+        ],
+        idField: 'docKey'
+      }
+    });
+
+    assert.strictEqual(restored.getStats().docCount, 3);
+    assert.strictEqual(restored.getStats().rowCount, 6); // 3 docs * 2 fields
+
+    // Search in specific field (must not be scrambled!)
+    const titleRes = await restored.search('Carrot', { fields: ['headline'], highlight: true });
+    assert.strictEqual(titleRes.totalMatches, 1, 'Carrot must be matched in headline field');
+    assert.strictEqual(titleRes.results[0].id, 'k-3');
+    assert.strictEqual(titleRes.results[0].matchedField, 'headline');
+    assert(titleRes.results[0].highlights !== undefined);
+    assert(titleRes.results[0].highlights!.headline !== undefined && titleRes.results[0].highlights!.headline.length > 0);
+
+    const bodyRes = await restored.search('Orange', { fields: ['body'] });
+    assert.strictEqual(bodyRes.totalMatches, 1, 'Orange must be matched in body field');
+    assert.strictEqual(bodyRes.results[0].id, 'k-3');
+    assert.strictEqual(bodyRes.results[0].matchedField, 'body');
+
+    console.log('   ✅ Dynamic additions stratification parity & custom getters confirmed');
   }
 
   console.log('\n--- All Milestone 6 Persistence Tests Passed Successfully! ✅ ---');

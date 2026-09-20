@@ -34,7 +34,8 @@ const isLittleEndian = (() => {
 export function deserializeDocumentSnapshotHeader(buffer: ArrayBuffer): DocumentSnapshotHeader {
   const buf = buffer as unknown as { byteLength?: unknown; slice?: unknown };
   const byteLen = typeof buf?.byteLength === 'number' ? (buf.byteLength as number) : NaN;
-  if (!Number.isFinite(byteLen) || byteLen < SERIALIZED_DOC_HEADER_BYTES) {
+  const canSlice = typeof (buf as any)?.slice === 'function';
+  if (!Number.isFinite(byteLen) || byteLen < SERIALIZED_DOC_HEADER_BYTES || !canSlice) {
     throw new IncompatibleIndexError(SERIALIZED_DOC_MAGIC, 'neutered/short');
   }
 
@@ -140,6 +141,7 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
     idField: typeof index.options.idField === 'string' ? index.options.idField : undefined,
     docIds: docIds.slice(),
     caseSensitive: index.options.caseSensitive ?? !folded,
+    preferGpu: index.options.preferGpu,
     threshold: index.options.threshold,
     candidateCapacity: index.options.candidateCapacity,
     initialCapacity: index.options.initialCapacity,
@@ -164,15 +166,13 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
     docsByteLength = docsBytes.length;
   }
 
-  // Pack contiguous tokens and offsets
-  const tokens = new Uint32Array(tokenCount);
+  // Pack contiguous offsets
   const offsets = new Uint32Array(rowCount + 1);
   offsets[0] = 0;
   let currentTokenPos = 0;
 
   for (let r = 0; r < rowCount; r++) {
     const row = rowTokens[r];
-    tokens.set(row, currentTokenPos);
     currentTokenPos += row.length;
     offsets[r + 1] = currentTokenPos;
   }
@@ -208,14 +208,21 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
   new Uint8Array(out, cursor, schemaByteLength).set(schemaBytes);
   cursor += schemaByteLength;
 
-  // Copy Tokens
-  const tokensDst = new Uint8Array(out, cursor, tokensByteLength);
-  if (isLittleEndian) {
-    tokensDst.set(new Uint8Array(tokens.buffer, tokens.byteOffset, tokensByteLength));
-  } else {
-    for (let i = 0; i < tokenCount; i++) {
-      dv.setUint32(cursor + i * 4, tokens[i], true);
+  // Copy Tokens directly from rowTokens (eliminates intermediate tokens Uint32Array allocation)
+  let tokenCursor = cursor;
+  for (let r = 0; r < rowCount; r++) {
+    const row = rowTokens[r];
+    const rowBytes = row.byteLength;
+    if (isLittleEndian) {
+      new Uint8Array(out, tokenCursor, rowBytes).set(
+        new Uint8Array(row.buffer, row.byteOffset, rowBytes)
+      );
+    } else {
+      for (let i = 0; i < row.length; i++) {
+        dv.setUint32(tokenCursor + i * 4, row[i], true);
+      }
     }
+    tokenCursor += rowBytes;
   }
   cursor += tokensByteLength;
 
@@ -326,6 +333,13 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
     throw new IncompatibleIndexError('schema.fields non-empty array', typeof schema?.fields);
   }
 
+  for (let i = 0; i < schema.fields.length; i++) {
+    const f = schema.fields[i];
+    if (!f || typeof f !== 'object' || typeof f.name !== 'string' || f.name.trim().length === 0) {
+      throw new IncompatibleIndexError('valid-schema-fields', typeof f);
+    }
+  }
+
   // Validate row count matches field count * doc count
   const expectedRowCount = header.docCount * schema.fields.length;
   if (header.rowCount !== expectedRowCount) {
@@ -353,9 +367,20 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
 
   validatePackedOffsets(offsets, header.rowCount, header.tokenCount);
 
-  // Unpack Document Records
-  let records: TDoc[] = [];
+  // Unpack Document Records & IDs
   let docIds: DocumentId[] = [];
+
+  if (schema.docIds !== undefined) {
+    if (!Array.isArray(schema.docIds) || schema.docIds.length !== header.docCount) {
+      throw new IncompatibleIndexError(
+        `schema.docIds array length ${header.docCount}`,
+        Array.isArray(schema.docIds) ? schema.docIds.length : typeof schema.docIds
+      );
+    }
+    docIds = schema.docIds;
+  }
+
+  let records: TDoc[] = [];
 
   if (header.docsByteLength > 0) {
     try {
@@ -367,9 +392,6 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
     if (!Array.isArray(records) || records.length !== header.docCount) {
       throw new IncompatibleIndexError(`array of ${header.docCount} records`, records?.length);
     }
-    if (schema.docIds && Array.isArray(schema.docIds) && schema.docIds.length === header.docCount) {
-      docIds = schema.docIds;
-    }
   } else {
     // Decoupled document storage
     if (options?.documents && Array.isArray(options.documents)) {
@@ -380,8 +402,9 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
     } else {
       records = [];
     }
-    if (schema.docIds && Array.isArray(schema.docIds) && schema.docIds.length === header.docCount) {
-      docIds = schema.docIds;
+
+    if (header.docCount > 0 && docIds.length === 0 && records.length === 0) {
+      throw new IncompatibleIndexError('docIds or options.documents required for decoupled restore', 'missing');
     }
   }
 

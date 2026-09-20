@@ -285,6 +285,7 @@ export interface DocumentIndexSchema {
   idField?: string;
   docIds?: DocumentId[];
   caseSensitive?: boolean;
+  preferGpu?: boolean;
   threshold?: number;
   candidateCapacity?: number;
   initialCapacity?: number;
@@ -348,11 +349,11 @@ export interface IDBStorageOptions {
   indexedDB?: any;
 }
 
-export interface SaveIDBOptions extends IDBStorageOptions {
+export interface SaveIDBOptions<TDoc = Record<string, unknown>> extends IDBStorageOptions {
   /** Whether to store document records decoupled in the document store (default: false) */
   decoupled?: boolean;
   /** Optional decoupled documents to store if not extracted from index */
-  documents?: any[];
+  documents?: TDoc[];
 }
 
 export interface LoadIDBResult<TDoc = Record<string, unknown>> {
