@@ -30,7 +30,12 @@
  * Adds add, update, remove, applyBatch, clamped headroom buffer allocation,
  * partial writeBuffer GPU appends, and CPU-driven vacuum / compaction.
  * Total bumped 32 KB -> 36 KB and delta cap 12 KB -> 16 KB with this documented rationale.
- * Budget: 36 KB gzip total per file (dist/index.js + dist/index.cjs).
+ *
+ * M5 (Issue #9) first-party worker client & protocol expansion:
+ * Adds SearchWorkerClient with monotonic query sequencing, AbortError liveness,
+ * transferable buffer safety, string-isolated enrichment, and error class rehydration.
+ * Total bumped 36 KB -> 40 KB and delta cap 16 KB -> 20 KB with this documented rationale.
+ * Budget: 40 KB gzip total per file (dist/index.js + dist/index.cjs).
  * dist/index.cjs is measured and reported too (same cap applies per-file);
  * sourcemaps are excluded from the gate but must not ship to npm.
  *
@@ -45,8 +50,9 @@ import { stat, readFile } from 'node:fs/promises';
 
 const BASELINE_RAW = 70455;
 const BASELINE_GZIP = 18343;
-const DELTA_CAP_GZIP = 16 * 1024;
-const TOTAL_BUDGET_GZIP = 36 * 1024;
+const DELTA_CAP_GZIP = 20 * 1024;
+const TOTAL_BUDGET_GZIP = 40 * 1024;
+
 
 function gzipDeterministic(buf: Uint8Array): number {
   return gzipSync(buf, {
