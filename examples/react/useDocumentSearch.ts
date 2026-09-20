@@ -158,7 +158,14 @@ export function useDocumentSearch<TDoc = any>(
       optionsOverride?: DocumentSearchOptions<TDoc>
     ): Promise<DocumentSearchResponse<TDoc> | null> => {
       const q = queryOverride !== undefined ? queryOverride : queryRef.current;
-      const opts = { ...searchOptionsRef.current, ...optionsOverride };
+      const defaultSearchOpts: Partial<DocumentSearchOptions<TDoc>> = {
+        mode: 'fuzzy',
+        highlight: true,
+        tag: 'mark',
+        escapeHtml: true,
+        limit: 20,
+      };
+      const opts = { ...defaultSearchOpts, ...searchOptionsRef.current, ...optionsOverride };
 
       if (!indexRef.current && !workerClientRef.current) {
         return null;
@@ -316,6 +323,12 @@ export function useDocumentSearch<TDoc = any>(
       setError(null);
 
       try {
+        const defaultFields = (indexOptions?.fields ?? ['title', 'text']) as Array<DocumentField<TDoc>>;
+        const resolvedOptions: DocumentIndexOptions<TDoc> = {
+          ...indexOptions,
+          fields: defaultFields,
+        };
+
         if (externalWorkerClient) {
           workerClientRef.current = externalWorkerClient;
           isOwnedInstanceRef.current = false;
@@ -324,7 +337,7 @@ export function useDocumentSearch<TDoc = any>(
           isOwnedInstanceRef.current = false;
         } else if (worker) {
           const client = new SearchWorkerClient<TDoc>({ worker });
-          await client.init(indexOptions);
+          await client.init(resolvedOptions);
           if (initialDocs && initialDocs.length > 0) {
             await client.add(initialDocs);
           }
@@ -335,11 +348,7 @@ export function useDocumentSearch<TDoc = any>(
           workerClientRef.current = client;
           isOwnedInstanceRef.current = true;
         } else {
-          const defaultFields = (indexOptions?.fields ?? ['title', 'text']) as Array<DocumentField<TDoc>>;
-          const idx = await DocumentIndex.create(initialDocs ?? [], {
-            ...indexOptions,
-            fields: defaultFields,
-          });
+          const idx = await DocumentIndex.create(initialDocs ?? [], resolvedOptions);
           if (isCancelled) {
             idx.destroy();
             return;
@@ -352,9 +361,6 @@ export function useDocumentSearch<TDoc = any>(
           setIsReady(true);
           setIsIndexing(false);
           await refreshStats();
-          if (initialQuery.trim().length > 0) {
-            executeSearch(initialQuery);
-          }
         }
       } catch (err: any) {
         if (!isCancelled) {

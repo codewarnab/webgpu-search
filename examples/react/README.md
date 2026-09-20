@@ -56,6 +56,7 @@ export function FilePalette() {
       mode: 'fuzzy',
       highlight: true,
       tag: 'mark',
+      escapeHtml: true,
       limit: 20,
     },
   });
@@ -76,7 +77,11 @@ export function FilePalette() {
       <ul>
         {results.map((hit) => (
           <li key={String(hit.id)}>
-            <div dangerouslySetInnerHTML={{ __html: hit.highlightedText?.name || hit.doc.name }} />
+            {hit.highlightedText?.name ? (
+              <div dangerouslySetInnerHTML={{ __html: hit.highlightedText.name }} />
+            ) : (
+              <div>{hit.doc.name}</div>
+            )}
             <small>{hit.doc.path}</small>
           </li>
         ))}

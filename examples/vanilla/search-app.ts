@@ -216,14 +216,22 @@ export function createVanillaSearchApp<TDoc extends Record<string, any>>(
 
     try {
       let res: DocumentSearchResponse<TDoc>;
+      const defaultSearchOpts: Partial<DocumentSearchOptions<TDoc>> = {
+        highlight: true,
+        tag: 'mark',
+        escapeHtml: true,
+        limit: 50,
+      };
       if (workerClientInstance) {
         res = await workerClientInstance.search(query, {
+          ...defaultSearchOpts,
           ...searchOptions,
           mode: currentMode,
           signal: abortController.signal,
         });
       } else if (indexInstance) {
         res = await indexInstance.search(query, {
+          ...defaultSearchOpts,
           ...searchOptions,
           mode: currentMode,
           signal: abortController.signal,
@@ -272,21 +280,25 @@ export function createVanillaSearchApp<TDoc extends Record<string, any>>(
   };
 
   const handleAdd = async () => {
-    const epoch = currentStats ? currentStats.mutationEpoch : 0;
-    const newDoc = {
-      id: `doc-${Date.now()}`,
-      title: `Dynamic Document #${epoch + 1}`,
-      description: 'Added via createVanillaSearchApp runtime mutation.',
-    } as any;
+    try {
+      const epoch = currentStats ? currentStats.mutationEpoch : 0;
+      const newDoc = {
+        id: `doc-${Date.now()}`,
+        title: `Dynamic Document #${epoch + 1}`,
+        description: 'Added via createVanillaSearchApp runtime mutation.',
+      } as any;
 
-    if (workerClientInstance) {
-      await workerClientInstance.add(newDoc);
-    } else if (indexInstance) {
-      await indexInstance.add(newDoc);
-    }
-    await refreshStats();
-    if (inputEl.value.trim().length > 0) {
-      await executeSearch(inputEl.value);
+      if (workerClientInstance) {
+        await workerClientInstance.add(newDoc);
+      } else if (indexInstance) {
+        await indexInstance.add(newDoc);
+      }
+      await refreshStats();
+      if (inputEl.value.trim().length > 0) {
+        await executeSearch(inputEl.value);
+      }
+    } catch (err: any) {
+      statusLabel.textContent = `Add Error: ${err.message}`;
     }
   };
 
@@ -295,10 +307,18 @@ export function createVanillaSearchApp<TDoc extends Record<string, any>>(
   modeBtn.addEventListener('click', handleModeToggle);
   addBtn.addEventListener('click', handleAdd);
 
+  let isDestroyed = false;
+
   // Initialize
   (async () => {
     statusLabel.textContent = 'Initializing engine...';
     try {
+      const defaultFields = indexOptions?.fields ?? ['title', 'description'];
+      const resolvedOptions: DocumentIndexOptions<TDoc> = {
+        ...indexOptions,
+        fields: defaultFields,
+      };
+
       if (externalWorkerClient) {
         workerClientInstance = externalWorkerClient;
         isOwned = false;
@@ -307,21 +327,27 @@ export function createVanillaSearchApp<TDoc extends Record<string, any>>(
         isOwned = false;
       } else if (worker) {
         const client = new SearchWorkerClient<TDoc>({ worker });
-        await client.init(indexOptions);
+        await client.init(resolvedOptions);
         if (initialDocs.length > 0) {
           await client.add(initialDocs);
+        }
+        if (isDestroyed) {
+          client.destroy();
+          return;
         }
         workerClientInstance = client;
         isOwned = true;
       } else {
-        const defaultFields = indexOptions?.fields ?? ['title', 'description'];
-        const idx = await DocumentIndex.create(initialDocs, {
-          ...indexOptions,
-          fields: defaultFields,
-        });
+        const idx = await DocumentIndex.create(initialDocs, resolvedOptions);
+        if (isDestroyed) {
+          idx.destroy();
+          return;
+        }
         indexInstance = idx;
         isOwned = true;
       }
+
+      if (isDestroyed) return;
 
       statusLabel.textContent = 'Ready';
       await refreshStats();
@@ -329,11 +355,14 @@ export function createVanillaSearchApp<TDoc extends Record<string, any>>(
         executeSearch(inputEl.value);
       }
     } catch (err: any) {
-      statusLabel.textContent = `Init Error: ${err.message}`;
+      if (!isDestroyed) {
+        statusLabel.textContent = `Init Error: ${err.message}`;
+      }
     }
   })();
 
   function destroy(): void {
+    isDestroyed = true;
     inputEl.removeEventListener('input', handleInput);
     clearBtn.removeEventListener('click', handleClear);
     modeBtn.removeEventListener('click', handleModeToggle);

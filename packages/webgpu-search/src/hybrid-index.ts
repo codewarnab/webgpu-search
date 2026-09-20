@@ -102,6 +102,7 @@ export class SearchIndex {
     // Empty dataset fast path: zero allocation, route immediately to CPU
     if (ownedItems.length === 0) {
       index.engineType = 'cpu';
+      index.fallbackReason = options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
       return index;
     }
 
@@ -333,7 +334,12 @@ export class SearchIndex {
           throw err;
         }
         console.warn('[webgpu-search] GPU search failed, CPU fallback:', err);
-        // Fallthrough to CPU
+        this.engineType = 'cpu';
+        this.fallbackReason = 'gpu-execution-error';
+        if (this.gpuEngine) {
+          try { this.gpuEngine.destroy(); } catch {}
+          this.gpuEngine = null;
+        }
       }
     }
 

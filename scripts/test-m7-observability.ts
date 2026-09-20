@@ -67,6 +67,7 @@ async function runM7Tests() {
     assert.strictEqual(stats.memory.totalBytes, stats.memory.ramBytes);
     assert.strictEqual(stats.memory.tokenRamBytes, stats.tokenCount * 4);
     assert.strictEqual(stats.memory.offsetRamBytes, (stats.rowCount + 1) * 4);
+    assert.strictEqual(stats.memory.ramBytes, stats.memory.tokenRamBytes + stats.memory.offsetRamBytes);
 
     index.destroy();
     console.log('   ✅ DocumentIndexStats schema and memory breakdown verified');
@@ -275,13 +276,17 @@ async function runM7Tests() {
           threshold: 1
         });
         assert.strictEqual(idx.getStats().engine, 'webgpu');
+        assert(deviceLostHandler !== null, 'deviceLostHandler should be registered');
 
-        if (deviceLostHandler) {
-          deviceLostHandler();
-          const stats = idx.getStats();
-          assert.strictEqual(stats.engine, 'cpu');
-          assert.strictEqual(stats.fallbackReason, 'device-lost');
-        }
+        deviceLostHandler();
+        const stats = idx.getStats();
+        assert.strictEqual(stats.engine, 'cpu');
+        assert.strictEqual(stats.fallbackReason, 'device-lost');
+
+        const queryRes = await idx.search('pipeline');
+        assert.strictEqual(queryRes.engine, 'cpu');
+        assert.strictEqual(queryRes.fallbackReason, 'device-lost');
+
         idx.destroy();
         console.log('   ✅ FallbackReason 7/9: device-lost verified');
       } finally {
@@ -301,6 +306,11 @@ async function runM7Tests() {
       });
       assert.strictEqual(idx.getStats().fallbackReason, 'memory-budget-exceeded');
       assert.strictEqual(idx.getStats().engine, 'cpu');
+
+      const queryRes = await idx.search('pipeline');
+      assert.strictEqual(queryRes.engine, 'cpu');
+      assert.strictEqual(queryRes.fallbackReason, 'memory-budget-exceeded');
+
       idx.destroy();
       console.log('   ✅ FallbackReason 8/9: memory-budget-exceeded verified');
     }
@@ -373,6 +383,19 @@ async function runM7Tests() {
     const updatedStats = await client.getStats();
     assert.strictEqual(updatedStats.mutationEpoch, 1);
     assert.strictEqual(updatedStats.docCount, 5);
+
+    // Concurrency: simultaneous searches and getStats
+    let priorAborted = false;
+    const p1 = client.search('pipeline').catch((err) => {
+      if (err?.name === 'AbortError') priorAborted = true;
+    });
+    const p2 = client.search('Worker');
+    const p3 = client.getStats();
+
+    const [, res2, stats3] = await Promise.all([p1, p2, p3]);
+    assert.strictEqual(priorAborted, true, 'Superseded concurrent query should reject with AbortError');
+    assert(res2 && res2.results.length >= 1);
+    assert.strictEqual(stats3.docCount, 5);
 
     await client.destroy();
     console.log('   ✅ SearchWorkerClient telemetry and mutation forwarding verified');
@@ -481,6 +504,11 @@ async function runM7Tests() {
     assert.strictEqual(addRes.mutationEpoch, 1);
     assert.strictEqual(vueSearch.mutationEpoch.value, 1);
 
+    // Reactive typing watcher
+    vueSearch.query.value = 'Pipelines';
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.strictEqual(vueSearch.results.value[0]?.id, '1');
+
     vueSearch.destroy();
     idx.destroy();
     console.log('   ✅ Vue useSearch composable verified');
@@ -514,6 +542,11 @@ async function runM7Tests() {
     const addRes = await svelteStore.add({ id: 'svelte-1', title: 'Svelte Store Doc', category: 'Svelte', content: '' });
     assert.strictEqual(addRes.mutationEpoch, 1);
     assert.strictEqual(currentState.mutationEpoch, 1);
+
+    // Reactive typing watcher
+    svelteStore.setQuery('Pipelines');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.strictEqual(currentState.results[0]?.id, '1');
 
     unsub();
     svelteStore.destroy();

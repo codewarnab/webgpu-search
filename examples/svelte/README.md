@@ -28,6 +28,7 @@ npm install webgpu-search
 
 ```svelte
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { createDocumentSearch } from './documentSearchStore';
 
   interface PackageDoc {
@@ -48,7 +49,12 @@ npm install webgpu-search
       mode: 'fuzzy',
       highlight: true,
       tag: 'mark',
+      escapeHtml: true,
     },
+  });
+
+  onDestroy(() => {
+    search.destroy();
   });
 </script>
 
@@ -63,7 +69,11 @@ npm install webgpu-search
 <ul>
   {#each $search.results as item (item.id)}
     <li>
-      {@html item.highlightedText?.name || item.doc.name}
+      {#if item.highlightedText?.name}
+        {@html item.highlightedText.name}
+      {:else}
+        {item.doc.name}
+      {/if}
       <small>{item.doc.desc}</small>
     </li>
   {/each}

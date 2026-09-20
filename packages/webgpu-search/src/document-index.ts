@@ -293,6 +293,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     if (docCount === 0) {
       this.engineType = 'cpu';
+      this.fallbackReason = this.options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
       this.buildTimeMs = nowMs() - t0;
       return;
     }
@@ -635,6 +636,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           throw err;
         }
         console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
+        this.engineType = 'cpu';
+        this.fallbackReason = 'gpu-execution-error';
+        if (this.gpuEngine) {
+          try { this.gpuEngine.destroy(); } catch {}
+          this.gpuEngine = null;
+        }
       }
     }
 
@@ -811,6 +818,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       effectiveFallbackReason = 'query-too-long';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
+    } else if (isFieldRestricted && !effectiveFallbackReason) {
+      effectiveFallbackReason = 'cpu-algorithm-requested';
     }
 
     return {
@@ -1257,6 +1266,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.vramAllocatedBytes = 0;
       }
 
+      if (this.engineType === 'cpu' && !this.fallbackReason) {
+        this.fallbackReason = this.options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
+      }
+
       this.mutationEpoch++;
       const durationMs = nowMs() - tStart;
       this.lastMutationTimeMs = durationMs;
@@ -1384,7 +1397,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.gpuEngine.destroy();
         this.gpuEngine = null;
         this.engineType = 'cpu';
-        this.fallbackReason = 'prefer-cpu';
+        this.fallbackReason = this.options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
       }
     }
   }
@@ -1598,7 +1611,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       this.gpuEngine = null;
     }
     this.tombstones.clear();
-    this.mutationEpoch = typeof snapshot.schema.mutationEpoch === 'number' ? snapshot.schema.mutationEpoch : 0;
+    this.mutationEpoch =
+      typeof snapshot.schema.mutationEpoch === 'number' &&
+      Number.isFinite(snapshot.schema.mutationEpoch) &&
+      snapshot.schema.mutationEpoch >= 0
+        ? Math.floor(snapshot.schema.mutationEpoch)
+        : 0;
 
     const docCount = snapshot.header.docCount;
     const fieldCount = this.sortedFields.length;
@@ -1846,7 +1864,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const tombstoneRatio = rowCount > 0 ? tombstoneCount / rowCount : 0;
     const tokenRamBytes = this.totalTokens * 4;
     const offsetRamBytes = (rowCount + 1) * 4;
-    const ramBytes = tokenRamBytes;
+    const ramBytes = tokenRamBytes + offsetRamBytes;
 
     return {
       size: docCount,

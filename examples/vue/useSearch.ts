@@ -145,7 +145,14 @@ export function useSearch<TDoc = any>(options: UseSearchOptions<TDoc> = {}): Use
     optionsOverride?: DocumentSearchOptions<TDoc>
   ): Promise<DocumentSearchResponse<TDoc> | null> {
     const q = queryOverride !== undefined ? queryOverride : query.value;
-    const opts = { ...searchOptions, ...optionsOverride };
+    const defaultSearchOpts: Partial<DocumentSearchOptions<TDoc>> = {
+      mode: 'fuzzy',
+      highlight: true,
+      tag: 'mark',
+      escapeHtml: true,
+      limit: 20,
+    };
+    const opts = { ...defaultSearchOpts, ...searchOptions, ...optionsOverride };
 
     if (!indexInstance && !workerClientInstance) return null;
 
@@ -274,7 +281,10 @@ export function useSearch<TDoc = any>(options: UseSearchOptions<TDoc> = {}): Use
     }
   }
 
+  let isDestroyed = false;
+
   function destroy(): void {
+    isDestroyed = true;
     if (activeAbortController) {
       activeAbortController.abort();
       activeAbortController = null;
@@ -301,6 +311,12 @@ export function useSearch<TDoc = any>(options: UseSearchOptions<TDoc> = {}): Use
     isIndexing.value = true;
     error.value = null;
     try {
+      const defaultFields = (indexOptions?.fields ?? ['title', 'text']) as Array<DocumentField<TDoc>>;
+      const resolvedOptions: DocumentIndexOptions<TDoc> = {
+        ...indexOptions,
+        fields: defaultFields,
+      };
+
       if (externalWorkerClient) {
         workerClientInstance = externalWorkerClient;
         isOwned = false;
@@ -309,31 +325,42 @@ export function useSearch<TDoc = any>(options: UseSearchOptions<TDoc> = {}): Use
         isOwned = false;
       } else if (worker) {
         const client = new SearchWorkerClient<TDoc>({ worker });
-        await client.init(indexOptions);
+        await client.init(resolvedOptions);
         if (initialDocs && initialDocs.length > 0) {
           await client.add(initialDocs);
+        }
+        if (isDestroyed) {
+          client.destroy();
+          return;
         }
         workerClientInstance = client;
         isOwned = true;
       } else {
-        const defaultFields = (indexOptions?.fields ?? ['title', 'text']) as Array<DocumentField<TDoc>>;
-        const idx = await DocumentIndex.create(initialDocs ?? [], {
-          ...indexOptions,
-          fields: defaultFields,
-        });
+        const idx = await DocumentIndex.create(initialDocs ?? [], resolvedOptions);
+        if (isDestroyed) {
+          idx.destroy();
+          return;
+        }
         indexInstance = idx;
         isOwned = true;
       }
 
+      if (isDestroyed) return;
+
       isReady.value = true;
       isIndexing.value = false;
       await refreshStats();
-      if (initialQuery.trim().length > 0) {
+      const currentQ = query.value.trim();
+      if (currentQ.length > 0) {
+        search(currentQ);
+      } else if (initialQuery.trim().length > 0) {
         search(initialQuery);
       }
     } catch (err: any) {
-      error.value = err;
-      isIndexing.value = false;
+      if (!isDestroyed) {
+        error.value = err;
+        isIndexing.value = false;
+      }
     }
   })();
 

@@ -54,6 +54,7 @@ const { query, results, totalMatches, isSearching, engine, timings } = useSearch
     mode: 'fuzzy',
     highlight: true,
     tag: 'mark',
+    escapeHtml: true,
   },
 });
 </script>
@@ -64,7 +65,8 @@ const { query, results, totalMatches, isSearching, engine, timings } = useSearch
     <div v-if="isSearching">Scoring on {{ engine }}...</div>
     <ul>
       <li v-for="item in results" :key="item.id">
-        <span v-html="item.highlightedText?.title || item.doc.title" />
+        <span v-if="item.highlightedText?.title" v-html="item.highlightedText.title" />
+        <span v-else>{{ item.doc.title }}</span>
         <small>({{ item.doc.author }})</small>
       </li>
     </ul>
