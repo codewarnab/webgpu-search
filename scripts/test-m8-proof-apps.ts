@@ -1,4 +1,5 @@
 import assert from 'node:assert';
+import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -33,6 +34,11 @@ async function runM8Tests() {
   // =========================================================================
   console.log('1. Verifying Proof Applications monorepo structure and file contracts...');
   {
+    // Ensure dist builds exist on clean clones
+    if (!fs.existsSync(path.join(monacoDir, 'dist/index.html')) || !fs.existsSync(path.join(logViewerDir, 'dist/index.html'))) {
+      console.log('   ℹ️ Building apps on-demand for clean-clone distribution verification...');
+      execSync('bun run build', { cwd: rootDir, stdio: 'inherit' });
+    }
     // A. apps/monaco-palette files
     const monacoPkg = JSON.parse(fs.readFileSync(path.join(monacoDir, 'package.json'), 'utf8'));
     assert.strictEqual(monacoPkg.name, 'monaco-palette');
@@ -145,6 +151,27 @@ async function runM8Tests() {
     assert.strictEqual(stats.rowCount, 3208);
     assert.strictEqual(stats.tombstoneCount, 8);
 
+    // H. Security: XSS sanitization in highlightedText
+    const xssRecord: MonacoFileRecord = {
+      id: 'f-custom-xss',
+      filename: 'xss_payload_unique_<img src=x onerror=alert(1)>.ts',
+      path: 'src/<script>alert("xss")</script>/xss.ts',
+      symbols: 'UniqueXssSymbol, attack<T>',
+      type: 'class',
+      language: 'typescript',
+      description: 'Hostile test record with markup injection',
+      sizeBytes: 100,
+      lineCount: 10
+    };
+    await palette.addRecord(xssRecord);
+    const xssSearch = await palette.search('xss_payload_unique', { mode: 'fuzzy', highlight: true });
+    assert.strictEqual(xssSearch.totalMatches, 1);
+    assert.strictEqual(xssSearch.results[0]!.doc.id, 'f-custom-xss');
+    const hlFilename = xssSearch.results[0]!.highlightedText?.filename;
+    assert(hlFilename, 'Highlighted filename must exist');
+    assert(!hlFilename.includes('<img'), 'Raw HTML tag <img must be escaped');
+    assert(hlFilename.includes('&lt;img') || hlFilename.includes('&gt;'), 'HTML entities must be escaped');
+
     palette.destroy();
     console.log('   ✅ Monaco Palette multi-field search, highlights, and mutations verified');
   }
@@ -217,6 +244,24 @@ async function runM8Tests() {
     const statsAfterRemove = await logEngine.getStats();
     assert.strictEqual(statsAfterRemove?.docCount, 9900);
     assert(statsAfterRemove?.tombstoneCount! >= 200);
+
+    // D. Security: XSS sanitization in log search results
+    const hostileLog: StructuredLogRecord = {
+      id: 'log-xss-999',
+      timestamp: new Date().toISOString(),
+      level: 'ERROR',
+      service: '<script>alert(1)</script>',
+      message: 'UniqueFailureQuantum <img src=x onerror=alert(2)> module',
+      traceId: 'tr-" onfocus="alert(3)',
+      latencyMs: 120
+    };
+    await logEngine.appendLogs([hostileLog]);
+    const hostileSearch = await logEngine.search('UniqueFailureQuantum', { mode: 'fuzzy', highlight: true });
+    assert.strictEqual(hostileSearch.totalMatches, 1);
+    const hlMessage = hostileSearch.results[0]!.highlightedText?.message;
+    assert(hlMessage, 'Highlighted log message must exist');
+    assert(!hlMessage.includes('<img'), 'Raw HTML tag <img must be escaped in highlighted log message');
+    assert(hlMessage.includes('&lt;img') || hlMessage.includes('&gt;'), 'HTML entities must be escaped in highlighted log message');
 
     logEngine.destroy();
     console.log('   ✅ Log Viewer generation, search, filtering, and streaming mutations verified');

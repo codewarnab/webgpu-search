@@ -106,20 +106,22 @@ btnCloseDrawer.addEventListener('click', () => {
 
 async function performSearch(): Promise<void> {
   const query = searchInput.value.trim();
+  const mode = modeSelect.value as 'fuzzy' | 'substring';
+  const levelFilter = levelSelect.value;
 
   if (currentAbortController) {
     currentAbortController.abort();
   }
-  currentAbortController = new AbortController();
+  const controller = new AbortController();
+  currentAbortController = controller;
 
-  const mode = modeSelect.value as 'fuzzy' | 'substring';
-  const levelFilter = levelSelect.value;
-
-  if (!query && levelFilter === 'ALL') {
-    // Render raw items
-    const records = engine.getRecords();
+  if (!query) {
+    let records = engine.getRecords();
+    if (levelFilter !== 'ALL') {
+      records = records.filter((r) => r.level === levelFilter);
+    }
     const items: VirtualGridItem[] = records.map((r) => ({ record: r }));
-    grid.setItems(items);
+    grid.setItems(items, { resetScroll: false });
     hudMatches.textContent = records.length.toLocaleString();
     hudLatency.textContent = '0.00 ms';
     return;
@@ -131,8 +133,10 @@ async function performSearch(): Promise<void> {
       highlight: true,
       limit: 1000,
       levelFilter,
-      signal: currentAbortController.signal
+      signal: controller.signal
     });
+
+    if (controller !== currentAbortController) return;
 
     grid.setSearchResults(searchRes.results);
     hudMatches.textContent = searchRes.totalMatches.toLocaleString();
@@ -144,6 +148,7 @@ async function performSearch(): Promise<void> {
 }
 
 async function loadDataset(count: number): Promise<void> {
+  if (isStreaming) toggleStream();
   currentLogCount = count;
   nextLogId = count + 1;
   const initialLogs = generateStructuredLogs(count);
@@ -159,26 +164,50 @@ function toggleStream(): void {
     btnToggleStream.textContent = '⏸ Pause Live Stream';
     btnToggleStream.classList.add('btn-streaming');
 
-    streamTimer = window.setInterval(async () => {
-      const batchSize = 100;
-      const newLogs = generateStructuredLogs(batchSize, nextLogId);
-      nextLogId += batchSize;
-
-      await engine.appendLogs(newLogs);
-      await updateHUD();
-
-      // If user isn't searching, refresh grid
-      if (!searchInput.value.trim()) {
-        const records = engine.getRecords();
-        const items: VirtualGridItem[] = records.slice(-1000).map((r) => ({ record: r }));
-        grid.setItems(items);
+    let isIngesting = false;
+    async function streamTick() {
+      if (!isStreaming) return;
+      if (isIngesting) {
+        streamTimer = window.setTimeout(streamTick, 500);
+        return;
       }
-    }, 500);
+      isIngesting = true;
+      try {
+        const batchSize = 100;
+        const newLogs = generateStructuredLogs(batchSize, nextLogId);
+        nextLogId += batchSize;
+
+        await engine.appendLogs(newLogs);
+        await updateHUD();
+
+        // If user isn't searching, refresh grid with current level filter
+        if (!searchInput.value.trim()) {
+          let records = engine.getRecords();
+          const levelFilter = levelSelect.value;
+          if (levelFilter !== 'ALL') {
+            records = records.filter((r) => r.level === levelFilter);
+          }
+          const items: VirtualGridItem[] = records.slice(-1000).map((r) => ({ record: r }));
+          grid.setItems(items, { resetScroll: false });
+          hudMatches.textContent = records.length.toLocaleString();
+        } else {
+          // If searching, update matches
+          await performSearch();
+        }
+      } finally {
+        isIngesting = false;
+        if (isStreaming) {
+          streamTimer = window.setTimeout(streamTick, 500);
+        }
+      }
+    }
+
+    streamTimer = window.setTimeout(streamTick, 500);
   } else {
     btnToggleStream.textContent = '▶ Start Live Stream';
     btnToggleStream.classList.remove('btn-streaming');
     if (streamTimer !== null) {
-      clearInterval(streamTimer);
+      clearTimeout(streamTimer);
       streamTimer = null;
     }
   }
@@ -205,6 +234,7 @@ btnSaveIdb.addEventListener('click', async () => {
 });
 
 btnRestoreIdb.addEventListener('click', async () => {
+  if (isStreaming) toggleStream();
   btnRestoreIdb.disabled = true;
   try {
     const res = await engine.restoreSnapshotFromIDB();
@@ -224,8 +254,15 @@ btnClearIdb.addEventListener('click', async () => {
   hudIdb.textContent = 'Cleared';
 });
 
-// Controls Handlers
-searchInput.addEventListener('input', () => performSearch());
+// Controls Handlers with Debounce
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+searchInput.addEventListener('input', () => {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    performSearch();
+  }, 60);
+});
+
 levelSelect.addEventListener('change', () => performSearch());
 modeSelect.addEventListener('change', () => performSearch());
 

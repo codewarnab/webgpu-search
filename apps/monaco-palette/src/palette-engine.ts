@@ -19,7 +19,9 @@ export class PaletteEngine {
   private records: MonacoFileRecord[] = [];
   private useWorker: boolean = false;
   private preferGpu: boolean = true;
+  private candidateCapacity: number = 8192;
   private isDestroyed: boolean = false;
+  private rebuildGeneration: number = 0;
 
   private readonly fieldDefs = [
     { name: 'filename', weight: 3.0 },
@@ -31,6 +33,7 @@ export class PaletteEngine {
   constructor(options?: PaletteEngineOptions) {
     this.useWorker = options?.useWorker ?? false;
     this.preferGpu = options?.preferGpu ?? true;
+    this.candidateCapacity = options?.candidateCapacity ?? 8192;
   }
 
   async init(records: MonacoFileRecord[]): Promise<void> {
@@ -40,6 +43,7 @@ export class PaletteEngine {
 
   private async rebuildIndex(): Promise<void> {
     if (this.isDestroyed) return;
+    const currentGen = ++this.rebuildGeneration;
 
     if (this.mainIndex) {
       this.mainIndex.destroy();
@@ -56,24 +60,29 @@ export class PaletteEngine {
 
     if (this.useWorker && typeof Worker !== 'undefined') {
       try {
-        this.workerInstance = new Worker(
+        const worker = new Worker(
           new URL('./worker.ts', import.meta.url),
           { type: 'module' }
         );
-        this.workerClient = new SearchWorkerClient<MonacoFileRecord>({
-          worker: this.workerInstance
+        const client = new SearchWorkerClient<MonacoFileRecord>({
+          worker
         });
 
-        await this.workerClient.init({
+        await client.init(this.records, {
           idField: 'id',
           fields: this.fieldDefs,
           preferGpu: this.preferGpu,
-          candidateCapacity: 8192
+          candidateCapacity: this.candidateCapacity
         });
 
-        if (this.records.length > 0) {
-          await this.workerClient.add(this.records);
+        if (this.isDestroyed || this.rebuildGeneration !== currentGen) {
+          await client.destroy().catch(() => {});
+          worker.terminate();
+          return;
         }
+
+        this.workerInstance = worker;
+        this.workerClient = client;
         return;
       } catch (err) {
         console.warn('[PaletteEngine] Worker initialization failed, falling back to main thread:', err);
@@ -87,12 +96,19 @@ export class PaletteEngine {
     }
 
     // Main thread DocumentIndex
-    this.mainIndex = await DocumentIndex.create(this.records, {
+    const mainIdx = await DocumentIndex.create(this.records, {
       idField: 'id',
       fields: this.fieldDefs,
       preferGpu: this.preferGpu,
-      candidateCapacity: 8192
+      candidateCapacity: this.candidateCapacity
     });
+
+    if (this.isDestroyed || this.rebuildGeneration !== currentGen) {
+      mainIdx.destroy();
+      return;
+    }
+
+    this.mainIndex = mainIdx;
   }
 
   async setUseWorker(useWorker: boolean): Promise<void> {
@@ -134,6 +150,7 @@ export class PaletteEngine {
         mode,
         highlight,
         tag: 'mark',
+        escapeHtml: true,
         limit,
         signal: options?.signal
       });
@@ -142,6 +159,7 @@ export class PaletteEngine {
         mode,
         highlight,
         tag: 'mark',
+        escapeHtml: true,
         limit,
         signal: options?.signal
       });

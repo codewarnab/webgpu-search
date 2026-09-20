@@ -10,7 +10,7 @@ const wgslPlugin = {
   transform(code: string, id: string) {
     if (id.endsWith('.wgsl')) {
       return {
-        code: `export default ${JSON.stringify(code)}; export const SUBSTRING_WGSL = ${JSON.stringify(code)}; export const FUZZY_WGSL = ${JSON.stringify(code)};`,
+        code: `export default ${JSON.stringify(code)};`,
         map: { mappings: '' }
       };
     }
@@ -32,5 +32,8 @@ export default defineConfig({
   server: {
     port: 5174,
     open: false
+  },
+  preview: {
+    port: 5174
   }
 });

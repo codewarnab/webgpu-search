@@ -2,7 +2,7 @@ import {
   DocumentIndex,
   SearchWorkerClient,
   saveIndexToIDB,
-  restoreIndexFromIDB,
+  loadIndexFromIDB,
   serializeDocumentIndex,
   restoreDocumentIndex,
   deleteIndexFromIDB,
@@ -28,6 +28,7 @@ export class LogEngine {
   private useWorker: boolean = false;
   private preferGpu: boolean = true;
   private isDestroyed: boolean = false;
+  private rebuildGeneration: number = 0;
 
   private readonly fieldDefs = [
     { name: 'message', weight: 2.0 },
@@ -48,6 +49,7 @@ export class LogEngine {
 
   private async rebuildIndex(): Promise<void> {
     if (this.isDestroyed) return;
+    const currentGen = ++this.rebuildGeneration;
 
     if (this.mainIndex) {
       this.mainIndex.destroy();
@@ -64,24 +66,29 @@ export class LogEngine {
 
     if (this.useWorker && typeof Worker !== 'undefined') {
       try {
-        this.workerInstance = new Worker(
+        const worker = new Worker(
           new URL('./worker.ts', import.meta.url),
           { type: 'module' }
         );
-        this.workerClient = new SearchWorkerClient<StructuredLogRecord>({
-          worker: this.workerInstance
+        const client = new SearchWorkerClient<StructuredLogRecord>({
+          worker
         });
 
-        await this.workerClient.init({
+        await client.init(this.records, {
           idField: 'id',
           fields: this.fieldDefs,
           preferGpu: this.preferGpu,
           candidateCapacity: 32768
         });
 
-        if (this.records.length > 0) {
-          await this.workerClient.add(this.records);
+        if (this.isDestroyed || this.rebuildGeneration !== currentGen) {
+          await client.destroy().catch(() => {});
+          worker.terminate();
+          return;
         }
+
+        this.workerInstance = worker;
+        this.workerClient = client;
         return;
       } catch (err) {
         console.warn('[LogEngine] Worker init failed, using main thread:', err);
@@ -94,12 +101,19 @@ export class LogEngine {
       }
     }
 
-    this.mainIndex = await DocumentIndex.create(this.records, {
+    const mainIdx = await DocumentIndex.create(this.records, {
       idField: 'id',
       fields: this.fieldDefs,
       preferGpu: this.preferGpu,
       candidateCapacity: 32768
     });
+
+    if (this.isDestroyed || this.rebuildGeneration !== currentGen) {
+      mainIdx.destroy();
+      return;
+    }
+
+    this.mainIndex = mainIdx;
   }
 
   async setUseWorker(useWorker: boolean): Promise<void> {
@@ -147,15 +161,18 @@ export class LogEngine {
         mode,
         highlight,
         tag: 'mark',
+        escapeHtml: true,
         limit,
         filter,
-        signal: options?.signal
-      });
+        signal: options?.signal,
+        candidateCapacity: 32768
+      } as any);
     } else if (this.mainIndex) {
       response = await this.mainIndex.search(query, {
         mode,
         highlight,
         tag: 'mark',
+        escapeHtml: true,
         limit,
         filter,
         signal: options?.signal
@@ -224,7 +241,7 @@ export class LogEngine {
       await saveIndexToIDB(buf, {
         dbName: IDB_DATABASE_NAME,
         key: IDB_SNAPSHOT_KEY
-      }).catch(() => {});
+      });
     } else if (this.mainIndex) {
       const buf = serializeDocumentIndex(this.mainIndex);
       byteLength = buf.byteLength;
@@ -243,22 +260,16 @@ export class LogEngine {
   async restoreSnapshotFromIDB(): Promise<{ recordCount: number; durationMs: number }> {
     const start = performance.now();
 
-    const restored = await restoreIndexFromIDB<StructuredLogRecord>({
+    const loaded = await loadIndexFromIDB<StructuredLogRecord>({
       dbName: IDB_DATABASE_NAME,
-      key: IDB_SNAPSHOT_KEY,
-      options: {
-        preferGpu: this.preferGpu,
-        candidateCapacity: 32768
-      }
+      key: IDB_SNAPSHOT_KEY
     });
 
-    if (restored) {
-      if (this.mainIndex) {
-        this.mainIndex.destroy();
-      }
-      this.mainIndex = restored;
-      this.records = restored.getRecords();
+    if (!loaded) {
+      throw new Error('No snapshot found in IndexedDB');
     }
+
+    await this.restoreSnapshot(loaded.snapshot);
 
     return {
       recordCount: this.records.length,
@@ -282,6 +293,7 @@ export class LogEngine {
   async restoreSnapshot(buffer: ArrayBuffer): Promise<void> {
     if (this.useWorker && this.workerClient) {
       await this.workerClient.restore(buffer);
+      this.records = this.workerClient.getRecords();
     } else {
       const restored = await restoreDocumentIndex<StructuredLogRecord>(buffer, {
         options: {

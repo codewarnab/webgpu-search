@@ -57,6 +57,16 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[c] || c));
+}
+
 async function updateTelemetry(): Promise<void> {
   const stats = await engine.getStats();
   if (!stats) return;
@@ -128,20 +138,20 @@ function renderResults(): void {
     li.className = `result-item ${idx === selectedIndex ? 'selected' : ''}`;
 
     const kind = res.doc.type;
-    const kindLabel = kind.charAt(0).toUpperCase();
+    const kindLabel = escapeHtml(kind.charAt(0).toUpperCase());
 
-    const highlightedFilename = res.highlightedText?.filename || res.doc.filename;
-    const highlightedPath = res.highlightedText?.path || res.doc.path;
-    const highlightedSymbols = res.highlightedText?.symbols || res.doc.symbols;
+    const highlightedFilename = res.highlightedText?.filename || escapeHtml(res.doc.filename);
+    const highlightedPath = res.highlightedText?.path || escapeHtml(res.doc.path);
+    const highlightedSymbols = res.highlightedText?.symbols || escapeHtml(res.doc.symbols);
 
     li.innerHTML = `
       <div class="item-header">
         <div class="item-left">
-          <span class="kind-icon kind-${kind}">${kindLabel}</span>
+          <span class="kind-icon kind-${escapeHtml(kind)}">${kindLabel}</span>
           <span class="item-filename">${highlightedFilename}</span>
         </div>
         <div class="item-right">
-          <span class="field-badge">match: ${res.matchedField}</span>
+          <span class="field-badge">match: ${escapeHtml(res.matchedField)}</span>
           <span class="score-badge">${res.score}</span>
         </div>
       </div>
@@ -207,8 +217,12 @@ async function performSearch(): Promise<void> {
 }
 
 // Event Listeners
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 searchInput.addEventListener('input', () => {
-  performSearch();
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    performSearch();
+  }, 60);
 });
 
 searchInput.addEventListener('keydown', (e) => {
@@ -223,6 +237,13 @@ searchInput.addEventListener('keydown', (e) => {
     if (activeResults.length > 0) {
       selectedIndex = (selectedIndex - 1 + activeResults.length) % activeResults.length;
       renderSelection();
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const selected = activeResults[selectedIndex]?.doc;
+    if (selected) {
+      updatePreview(selected);
+      previewCode.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   } else if (e.key === 'Escape') {
     e.preventDefault();
@@ -259,32 +280,37 @@ btnModalCancel.addEventListener('click', () => {
 });
 
 btnModalSave.addEventListener('click', async () => {
-  const filename = formFilename.value.trim() || 'new_symbol.ts';
-  const path = formPath.value.trim() || `src/custom/${filename}`;
-  const symbols = formSymbols.value.trim() || 'CustomSymbol, execute';
-  const desc = formDesc.value.trim() || 'User created symbol record';
+  btnModalSave.disabled = true;
+  try {
+    const filename = formFilename.value.trim() || 'new_symbol.ts';
+    const path = formPath.value.trim() || `src/custom/${filename}`;
+    const symbols = formSymbols.value.trim() || 'CustomSymbol, execute';
+    const desc = formDesc.value.trim() || 'User created symbol record';
 
-  const newDoc: MonacoFileRecord = {
-    id: `custom-${Date.now()}`,
-    filename,
-    path,
-    symbols,
-    type: 'class',
-    language: 'typescript',
-    description: desc,
-    sizeBytes: 2048,
-    lineCount: 85
-  };
+    const newDoc: MonacoFileRecord = {
+      id: `custom-${Date.now()}`,
+      filename,
+      path,
+      symbols,
+      type: 'class',
+      language: 'typescript',
+      description: desc,
+      sizeBytes: 2048,
+      lineCount: 85
+    };
 
-  await engine.addRecord(newDoc);
-  addModal.style.display = 'none';
-  formFilename.value = '';
-  formPath.value = '';
-  formSymbols.value = '';
-  formDesc.value = '';
+    await engine.addRecord(newDoc);
+    addModal.style.display = 'none';
+    formFilename.value = '';
+    formPath.value = '';
+    formSymbols.value = '';
+    formDesc.value = '';
 
-  await updateTelemetry();
-  await performSearch();
+    await updateTelemetry();
+    await performSearch();
+  } finally {
+    btnModalSave.disabled = false;
+  }
 });
 
 btnBatchAdd.addEventListener('click', async () => {

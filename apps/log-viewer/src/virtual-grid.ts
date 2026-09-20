@@ -14,6 +14,16 @@ export interface VirtualGridOptions {
   onRowClick?: (item: VirtualGridItem) => void;
 }
 
+function escapeHtml(str: string): string {
+  return str.replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;'
+  }[c] || c));
+}
+
 export class VirtualGrid {
   private container: HTMLElement;
   private rowHeight: number;
@@ -25,13 +35,14 @@ export class VirtualGrid {
   private topSpacer: HTMLDivElement;
   private bottomSpacer: HTMLDivElement;
   private rowsContainer: HTMLDivElement;
+  private resizeObserver: ResizeObserver | null = null;
 
   private isTicking: boolean = false;
 
   constructor(options: VirtualGridOptions) {
     this.container = options.container;
     this.rowHeight = options.rowHeight ?? 36;
-    this.overscan = options.overscan ?? 6;
+    this.overscan = options.overscan ?? 10;
     this.onRowClick = options.onRowClick;
 
     this.container.innerHTML = '';
@@ -62,11 +73,38 @@ export class VirtualGrid {
         this.isTicking = true;
       }
     });
+
+    // Single delegated click listener for all grid rows
+    this.rowsContainer.addEventListener('click', (e) => {
+      if (!this.onRowClick) return;
+      const rowEl = (e.target as HTMLElement).closest('.log-grid-row');
+      if (!rowEl) return;
+      const idx = parseInt(rowEl.getAttribute('data-index') || '-1', 10);
+      if (idx >= 0 && this.items[idx]) {
+        this.onRowClick(this.items[idx]!);
+      }
+    });
+
+    // Observe container resizing to prevent blank viewport zones
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => {
+        if (!this.isTicking) {
+          requestAnimationFrame(() => {
+            this.render();
+            this.isTicking = false;
+          });
+          this.isTicking = true;
+        }
+      });
+      this.resizeObserver.observe(this.container);
+    }
   }
 
-  setItems(items: VirtualGridItem[]): void {
+  setItems(items: VirtualGridItem[], options?: { resetScroll?: boolean }): void {
     this.items = items;
-    this.container.scrollTop = 0;
+    if (options?.resetScroll ?? true) {
+      this.container.scrollTop = 0;
+    }
     this.render();
   }
 
@@ -109,10 +147,10 @@ export class VirtualGrid {
       const r = item.record;
       const rowIdx = startIndex + i;
 
-      const levelClass = `level-${r.level.toLowerCase()}`;
-      const msg = item.highlightedText?.message || r.message;
-      const svc = item.highlightedText?.service || r.service;
-      const trace = item.highlightedText?.traceId || r.traceId;
+      const levelClass = `level-${escapeHtml(r.level.toLowerCase())}`;
+      const msg = item.highlightedText?.message || escapeHtml(r.message);
+      const svc = item.highlightedText?.service || escapeHtml(r.service);
+      const trace = item.highlightedText?.traceId || escapeHtml(r.traceId);
 
       const scoreCol = item.score !== undefined
         ? `<span class="score-pill">${item.score}</span>`
@@ -120,11 +158,11 @@ export class VirtualGrid {
 
       html += `
         <div class="log-grid-row" data-index="${rowIdx}" style="height: ${this.rowHeight}px;">
-          <div class="grid-cell col-id">${r.id}</div>
-          <div class="grid-cell col-time">${r.timestamp.slice(11, 23)}</div>
-          <div class="grid-cell col-level"><span class="level-badge ${levelClass}">${r.level}</span></div>
+          <div class="grid-cell col-id">${escapeHtml(r.id)}</div>
+          <div class="grid-cell col-time">${escapeHtml(r.timestamp.slice(11, 23))}</div>
+          <div class="grid-cell col-level"><span class="level-badge ${levelClass}">${escapeHtml(r.level)}</span></div>
           <div class="grid-cell col-service">${svc}</div>
-          <div class="grid-cell col-message" title="${r.message}">${msg}</div>
+          <div class="grid-cell col-message" title="${escapeHtml(r.message)}">${msg}</div>
           <div class="grid-cell col-trace">${trace}</div>
           <div class="grid-cell col-score">${scoreCol}</div>
         </div>
@@ -132,21 +170,16 @@ export class VirtualGrid {
     }
 
     this.rowsContainer.innerHTML = html;
-
-    if (this.onRowClick) {
-      const rowElements = this.rowsContainer.querySelectorAll('.log-grid-row');
-      rowElements.forEach((el) => {
-        el.addEventListener('click', () => {
-          const idx = parseInt(el.getAttribute('data-index') || '-1', 10);
-          if (idx >= 0 && this.items[idx]) {
-            this.onRowClick!(this.items[idx]!);
-          }
-        });
-      });
-    }
   }
 
   getItemCount(): number {
     return this.items.length;
+  }
+
+  destroy(): void {
+    if (this.resizeObserver) {
+      this.resizeObserver.disconnect();
+      this.resizeObserver = null;
+    }
   }
 }
