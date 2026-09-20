@@ -13,6 +13,17 @@ import {
   SERIALIZED_DOC_HEADER_BYTES,
   DuplicateIdError,
   DocumentNotFoundError,
+  U2D4_MAGIC,
+  U2D4_FORMAT_VERSION,
+  FORMAT_VERSION_4,
+  DOC_FORMAT_VERSION_4,
+  U2D4_HEADER_BYTES,
+  WebGPUSearchError,
+  IncompatibleHookError,
+  CostBudgetExceededError,
+  InvalidFilterError,
+  serializeError,
+  deserializeError,
   type DocumentId,
   type DocumentRecord,
   type FieldDefinition,
@@ -31,7 +42,37 @@ import {
   type WorkerClientOptions,
   type WorkerMessageType,
   type WorkerRequest,
-  type WorkerResponse
+  type WorkerResponse,
+  type SearchMode,
+  type FilterValue,
+  type FieldComparison,
+  type FieldFilter,
+  type FilterExpression,
+  type FilterFieldType,
+  type FilterFieldDefinition,
+  type DocumentFilterField,
+  type TermsFacetRequest,
+  type RangeFacetBucket,
+  type RangeFacetRequest,
+  type FacetRequest,
+  type TermsFacetBucket,
+  type TermsFacetResult,
+  type RangeFacetBucketResult,
+  type RangeFacetResult,
+  type FacetResult,
+  type TypoToleranceOptions,
+  type TokenMatchOptions,
+  type PrefixSearchOptions,
+  type DeterministicRankingOptions,
+  type TieBreakerCriterion,
+  type SuggestOptions,
+  type SuggestionItem,
+  type SuggestResponse,
+  type MatchInfo,
+  type SearchExtensionHooks,
+  type CostBudgetOptions,
+  type QueryDiagnosticsTimings,
+  type QueryDiagnostics
 } from '../packages/webgpu-search/src/index';
 
 import { isDedicatedWorker, startSearchWorker } from '../packages/webgpu-search/src/worker/search-worker';
@@ -258,6 +299,202 @@ async function runM1Tests() {
     throw new Error('Type shapes failed to construct properly');
   }
   console.log('   ✅ Type shapes (DocumentSearchResultItem, DocumentSearchResponse, MutationBatch, MutationResult, DocumentIndexStats, WorkerRequest, WorkerResponse) verified');
+
+  // 8. Verifying v0.4 U2D4 persistence constants
+  console.log('8. Verifying v0.4 U2D4 persistence constants...');
+  if (U2D4_MAGIC !== 0x55324434) {
+    throw new Error(`U2D4_MAGIC must be 0x55324434 ('U2D4'), got ${U2D4_MAGIC}`);
+  }
+  if (U2D4_FORMAT_VERSION !== 4) {
+    throw new Error(`U2D4_FORMAT_VERSION must be 4, got ${U2D4_FORMAT_VERSION}`);
+  }
+  if (FORMAT_VERSION_4 !== 4 || DOC_FORMAT_VERSION_4 !== 4) {
+    throw new Error('FORMAT_VERSION_4 and DOC_FORMAT_VERSION_4 aliases must be 4');
+  }
+  if (U2D4_HEADER_BYTES !== 48) {
+    throw new Error(`U2D4_HEADER_BYTES must be 48, got ${U2D4_HEADER_BYTES}`);
+  }
+  console.log('   ✅ U2D4_MAGIC (0x55324434), U2D4_FORMAT_VERSION (4), and header size (48 B) verified');
+
+  // 9. Verifying v0.4 Error hierarchy & Worker serialization roundtrip
+  console.log('9. Verifying v0.4 Error hierarchy & Worker serialization roundtrip...');
+  const baseErr = new WebGPUSearchError('Base engine error');
+  if (!(baseErr instanceof Error) || !(baseErr instanceof WebGPUSearchError)) {
+    throw new Error('WebGPUSearchError inheritance failed');
+  }
+  if (baseErr.name !== 'WebGPUSearchError') throw new Error('WebGPUSearchError name mismatch');
+
+  const hookErr = new IncompatibleHookError('customTokenizer', 'missing hook definition in snapshot');
+  if (!(hookErr instanceof WebGPUSearchError) || !(hookErr instanceof Error)) {
+    throw new Error('IncompatibleHookError must inherit from WebGPUSearchError');
+  }
+  if (hookErr.name !== 'IncompatibleHookError') throw new Error('IncompatibleHookError name mismatch');
+  if (hookErr.hookId !== 'customTokenizer') throw new Error('IncompatibleHookError hookId mismatch');
+  if (!hookErr.message.includes('customTokenizer')) throw new Error('IncompatibleHookError message mismatch');
+
+  const budgetErr = new CostBudgetExceededError('time', 50, 120);
+  if (!(budgetErr instanceof WebGPUSearchError) || !(budgetErr instanceof Error)) {
+    throw new Error('CostBudgetExceededError must inherit from WebGPUSearchError');
+  }
+  if (budgetErr.name !== 'CostBudgetExceededError') throw new Error('CostBudgetExceededError name mismatch');
+  if (budgetErr.budgetType !== 'time' || budgetErr.limit !== 50 || budgetErr.actual !== 120) {
+    throw new Error('CostBudgetExceededError fields mismatch');
+  }
+
+  const filterErr = new InvalidFilterError('unsupported operator "$regex"', 'tags');
+  if (!(filterErr instanceof WebGPUSearchError) || !(filterErr instanceof Error)) {
+    throw new Error('InvalidFilterError must inherit from WebGPUSearchError');
+  }
+  if (filterErr.name !== 'InvalidFilterError') throw new Error('InvalidFilterError name mismatch');
+  if (filterErr.field !== 'tags' || !filterErr.message.includes('tags')) {
+    throw new Error('InvalidFilterError fields/message mismatch');
+  }
+
+  // Verify worker serialize/deserialize roundtrip
+  const serializedHookErr = serializeError(hookErr);
+  const rehydratedHookErr = deserializeError(serializedHookErr);
+  if (!(rehydratedHookErr instanceof IncompatibleHookError) || (rehydratedHookErr as IncompatibleHookError).hookId !== 'customTokenizer') {
+    throw new Error('IncompatibleHookError worker serialization roundtrip failed');
+  }
+
+  const serializedBudgetErr = serializeError(budgetErr);
+  const rehydratedBudgetErr = deserializeError(serializedBudgetErr);
+  if (!(rehydratedBudgetErr instanceof CostBudgetExceededError) || (rehydratedBudgetErr as CostBudgetExceededError).limit !== 50) {
+    throw new Error('CostBudgetExceededError worker serialization roundtrip failed');
+  }
+
+  const serializedFilterErr = serializeError(filterErr);
+  const rehydratedFilterErr = deserializeError(serializedFilterErr);
+  if (!(rehydratedFilterErr instanceof InvalidFilterError) || (rehydratedFilterErr as InvalidFilterError).field !== 'tags') {
+    throw new Error('InvalidFilterError worker serialization roundtrip failed');
+  }
+  console.log('   ✅ v0.4 Error classes and worker serialization roundtrips verified');
+
+  // 10. Verifying SearchMode extension ('token', 'prefix')
+  console.log('10. Verifying SearchMode extension (fuzzy, substring, token, prefix)...');
+  const modes: SearchMode[] = ['fuzzy', 'substring', 'token', 'prefix'];
+  if (modes.length !== 4) throw new Error('SearchMode should support all 4 modes');
+  console.log('   ✅ SearchMode extended to fuzzy | substring | token | prefix');
+
+  // 11. Verifying Filter AST schemas and Columnar types
+  console.log('11. Verifying Filter AST schemas and Columnar types...');
+  const comparison: FieldComparison = {
+    eq: 'active',
+    gte: 18,
+    in: ['admin', 'moderator'],
+    exists: true
+  };
+  const filterExpr: FilterExpression = {
+    and: [
+      { status: { eq: 'published' } },
+      { or: [{ role: { in: ['admin', 'editor'] } }, { views: { gte: 100 } }] },
+      { not: { archived: { eq: true } } }
+    ]
+  };
+  const filterFieldDef: FilterFieldDefinition<TestDoc> = {
+    name: 'tags',
+    type: 'string[]',
+    getter: (doc) => doc.tags
+  };
+  if (!filterExpr || !comparison || filterFieldDef.name !== 'tags') {
+    throw new Error('Filter AST types failed validation');
+  }
+  console.log('   ✅ Filter AST and columnar attribute schemas verified');
+
+  // 12. Verifying Facet Aggregations, Typo Tolerance, Ranking, Suggestions, Extensions, & Diagnostics
+  console.log('12. Verifying Facets, Typo Tolerance, Ranking, Suggestions, Extensions & Diagnostics...');
+  const termsFacetReq: TermsFacetRequest = { type: 'terms', field: 'category', limit: 5, sortBy: 'count' };
+  const rangeFacetReq: RangeFacetRequest = {
+    type: 'range',
+    field: 'price',
+    ranges: [{ to: 50 }, { from: 50, to: 100 }, { from: 100 }]
+  };
+  const termsFacetRes: TermsFacetResult = {
+    type: 'terms',
+    field: 'category',
+    isApproximate: false,
+    buckets: [{ value: 'electronics', count: 42 }]
+  };
+  const rangeFacetRes: RangeFacetResult = {
+    type: 'range',
+    field: 'price',
+    isApproximate: true,
+    buckets: [{ key: 'under-50', to: 50, count: 12 }]
+  };
+
+  const typoOpts: TypoToleranceOptions = {
+    enabled: true,
+    maxDistance: 1,
+    minWordLengthForOneTypo: 4,
+    minWordLengthForTwoTypos: 8,
+    prefixExactLength: 1
+  };
+  const tokenOpts: TokenMatchOptions = { operator: 'and', minMatchCount: 2 };
+  const prefixOpts: PrefixSearchOptions = { prefixLength: 3, exactCase: false };
+
+  const rankingOpts: DeterministicRankingOptions = {
+    tieBreakers: ['score', 'weight', 'exact', 'length', 'id']
+  };
+
+  const suggestOpts: SuggestOptions = { limit: 5, mode: 'prefix', fuzzyDistance: 0 };
+  const suggestItem: SuggestionItem<TestDoc> = {
+    text: 'AuthController',
+    score: 980,
+    type: 'completion',
+    matchedRanges: [{ start: 0, end: 4 }],
+    docId: '1'
+  };
+  const suggestResp: SuggestResponse<TestDoc> = {
+    suggestions: [suggestItem],
+    queryDurationMs: 0.45
+  };
+
+  const matchInfo: MatchInfo = {
+    query: 'auth',
+    matchedField: 'title',
+    rawScore: 900,
+    normalizedScore: 950
+  };
+  const extensions: SearchExtensionHooks<TestDoc> = {
+    tokenizer: (text) => text.split(/[\s_]+/),
+    scoringHook: (_doc, baseScore, _info) => baseScore + 50
+  };
+
+  const budgetOpts: CostBudgetOptions = { maxExecutionTimeMs: 100, maxCandidates: 5000 };
+  const diagTimings: QueryDiagnosticsTimings = {
+    filteringMs: 0.05,
+    scoringMs: 0.2,
+    highlightMs: 0.1,
+    facetingMs: 0.08,
+    totalMs: 0.43
+  };
+  const diagnostics: QueryDiagnostics = {
+    scannedCandidates: 250,
+    filterSelectivity: 0.85,
+    routedEngine: 'webgpu',
+    hasOverflow: false,
+    timings: diagTimings,
+    warnings: []
+  };
+
+  if (
+    termsFacetReq.type !== 'terms' ||
+    rangeFacetReq.ranges.length !== 3 ||
+    suggestOpts.limit !== 5 ||
+    termsFacetRes.buckets.length !== 1 ||
+    rangeFacetRes.isApproximate !== true ||
+    typoOpts.maxDistance !== 1 ||
+    tokenOpts.operator !== 'and' ||
+    prefixOpts.prefixLength !== 3 ||
+    rankingOpts.tieBreakers?.length !== 5 ||
+    suggestResp.suggestions.length !== 1 ||
+    extensions.scoringHook?.({ id: '1', title: 't', content: 'c' }, 100, matchInfo) !== 150 ||
+    budgetOpts.maxExecutionTimeMs !== 100 ||
+    diagnostics.scannedCandidates !== 250
+  ) {
+    throw new Error('v0.4 feature type shapes failed validation');
+  }
+  console.log('   ✅ Facets, Typo Tolerance, Ranking, Suggestions, Extensions, and Diagnostics verified');
 
   console.log('\n--- All Milestone 1 Public Contracts & Specifications Tests Passed! ✅ ---');
 }

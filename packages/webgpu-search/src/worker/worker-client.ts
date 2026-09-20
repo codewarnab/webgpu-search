@@ -9,7 +9,8 @@ import type {
   MutationResult,
   RestoreDocumentIndexOptions,
   SerializeDocumentIndexOptions,
-  WorkerClientOptions
+  WorkerClientOptions,
+  FilterExpression
 } from '../types';
 import {
   deserializeError,
@@ -25,7 +26,7 @@ import { SERIALIZED_DOC_HEADER_BYTES } from '../text-profile';
 interface InternalFieldDef<TDoc> {
   name: string;
   weight: number;
-  getter: (doc: TDoc) => any;
+  getter: (doc: TDoc) => string | string[] | undefined | null;
 }
 
 interface PendingQuery<TDoc> {
@@ -33,7 +34,7 @@ interface PendingQuery<TDoc> {
   resolve: (res: DocumentSearchResponse<TDoc>) => void;
   reject: (err: any) => void;
   signalCleanup?: () => void;
-  filter?: (doc: TDoc) => boolean;
+  filter?: ((doc: TDoc) => boolean) | FilterExpression;
   limit?: number;
 }
 
@@ -136,9 +137,10 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
                 }
               }
 
-              // Apply predicate filter if configured
-              if (pendingQuery.filter) {
-                searchResp.results = searchResp.results.filter((item) => pendingQuery.filter!(item.doc));
+              // Apply predicate filter if configured as a function
+              if (typeof pendingQuery.filter === 'function') {
+                const predicate = pendingQuery.filter;
+                searchResp.results = searchResp.results.filter((item) => predicate(item.doc));
                 if (pendingQuery.limit && searchResp.results.length > pendingQuery.limit) {
                   searchResp.results = searchResp.results.slice(0, pendingQuery.limit);
                 }

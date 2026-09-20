@@ -14,7 +14,7 @@
  * Portable: no DOM refs. Parity path uses scalar `===` only.
  */
 
-import type { SearchResultItem } from './types';
+import type { SearchResultItem, SearchMode } from './types';
 import { clampLimit, nowMs } from './runtime-guards';
 
 /**
@@ -154,7 +154,7 @@ export interface CpuReferenceOutput {
 export function searchCpuReference(
   recordTokens: readonly Uint32Array[],
   queryTokens: Uint32Array,
-  mode: 'fuzzy' | 'substring',
+  mode: SearchMode,
   limit: number,
   texts: readonly string[]
 ): CpuReferenceOutput {
@@ -224,7 +224,7 @@ export function searchMultiFieldCpuReference(
   rowToDocIndex: readonly number[],
   rowToFieldIndex: readonly number[],
   queryTokens: Uint32Array,
-  mode: 'fuzzy' | 'substring',
+  mode: SearchMode,
   limit: number,
   candidateCapacity: number = 8192,
   allowedFieldIndices?: ReadonlySet<number>,

@@ -5,10 +5,11 @@ import type {
   OnQueryTooLong,
   SCORING_VERSION,
   TextProfileId,
+  U2D4_FORMAT_VERSION,
   UNICODE_VERSION,
 } from './text-profile';
 
-export type SearchMode = 'fuzzy' | 'substring';
+export type SearchMode = 'fuzzy' | 'substring' | 'token' | 'prefix';
 export type EngineType = 'webgpu' | 'cpu';
 
 export interface SearchOptions {
@@ -81,7 +82,7 @@ export interface IndexStats {
   scoringVersion: typeof SCORING_VERSION;
   tokenCount: number;             // M2: exact post-fold code-point total
   folded: boolean;
-  formatVersion: typeof FORMAT_VERSION | typeof DOC_FORMAT_VERSION;
+  formatVersion: typeof FORMAT_VERSION | typeof DOC_FORMAT_VERSION | typeof U2D4_FORMAT_VERSION;
   fallbackReason?: FallbackReason;
   memory?: {
     vramBytes: number;
@@ -132,6 +133,10 @@ export interface DocumentIndexOptions<TDoc = Record<string, unknown>> extends In
   growthFactor?: number;
   /** Candidate pool capacity for multi-field search (default: 8192, up to 32768) */
   candidateCapacity?: number;
+  /** Attributes configured for columnar pre-filtering and facet aggregation */
+  filterFields?: Array<DocumentFilterField<TDoc>>;
+  /** Extension hooks for custom tokenization, scoring boosts, or predicates */
+  extensions?: SearchExtensionHooks<TDoc>;
 }
 
 export interface HighlightRange {
@@ -165,8 +170,29 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   highlightFields?: 'matched-field' | 'all-matched' | 'all-fields' | string[];
   /** Whether to HTML-escape special characters in snippet rendering (default: false) */
   escapeHtml?: boolean;
-  /** Predicate filter applied post-match */
-  filter?: (doc: TDoc) => boolean;
+  /**
+   * Predicate filter applied post-match or structured filter expression
+   * evaluated via columnar bitsets.
+   */
+  filter?: ((doc: TDoc) => boolean) | FilterExpression;
+  /** Facet aggregation requests to evaluate over matching candidates */
+  facets?: Record<string, FacetRequest> | FacetRequest[];
+  /** Faceting mode: force exact CPU candidate evaluation even if GPU buffer overflowed */
+  faceting?: 'auto' | 'force-exact';
+  /** Typo tolerance configuration */
+  typoTolerance?: TypoToleranceOptions | boolean;
+  /** Token mode matching options */
+  tokenMatch?: TokenMatchOptions;
+  /** Prefix mode matching options */
+  prefixMatch?: PrefixSearchOptions;
+  /** Deterministic ranking and tie-breaking options */
+  ranking?: DeterministicRankingOptions;
+  /** Per-query search extension overrides */
+  extensions?: SearchExtensionHooks<TDoc>;
+  /** Cost budget controls and deadlines */
+  budget?: CostBudgetOptions;
+  /** Whether to populate detailed diagnostics on the response */
+  diagnostics?: boolean;
 }
 
 export interface DocumentSearchResultItem<TDoc = any> {
@@ -206,6 +232,12 @@ export interface DocumentSearchResponse<TDoc = any> {
   scoringVersion: typeof SCORING_VERSION;
   cpuAlgorithm: CpuAlgorithm;
   fallbackReason?: FallbackReason;
+  /** Facet aggregation results keyed by facet name or field name */
+  facets?: Record<string, FacetResult>;
+  /** Detailed telemetry and diagnostic metrics (when requested) */
+  diagnostics?: QueryDiagnostics;
+  /** Autocomplete / did-you-mean suggestions if requested with query */
+  suggestions?: SuggestionItem<TDoc>[];
 }
 
 export interface AddOptions {
@@ -228,7 +260,7 @@ export interface MutationResult {
 }
 
 export interface DocumentIndexStats extends IndexStats {
-  formatVersion: typeof DOC_FORMAT_VERSION | typeof FORMAT_VERSION;
+  formatVersion: typeof DOC_FORMAT_VERSION | typeof FORMAT_VERSION | typeof U2D4_FORMAT_VERSION;
   docCount: number;
   rowCount: number;
   tombstoneCount: number;
@@ -300,6 +332,10 @@ export interface DocumentIndexSchema {
   initialCapacity?: number;
   growthFactor?: number;
   mutationEpoch?: number;
+  filterFields?: Array<{
+    name: string;
+    type?: FilterFieldType;
+  }>;
 }
 
 export interface SerializeDocumentIndexOptions {
@@ -343,6 +379,7 @@ export interface DocumentSnapshotHeader {
   folded: boolean;
   schemaByteLength: number;
   docsByteLength: number;
+  columnarByteLength?: number;
   checksum: number;
 }
 
@@ -374,4 +411,185 @@ export interface LoadIDBResult<TDoc = Record<string, unknown>> {
 export interface LoadIDBOptions extends IDBStorageOptions {
   /** Whether to load decoupled documents from the document store (default: true) */
   loadDocuments?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// v0.4 Structured Filters, Facets, Search Modes, Typo-Tolerance,
+// Deterministic Ranking, Autocomplete, Extensibility, & Cost Budgets
+// ---------------------------------------------------------------------------
+
+// 3.1 Structured Filters & Columnar Metadata
+export type FilterValue = string | number | boolean;
+
+export interface FieldComparison {
+  eq?: FilterValue;
+  neq?: FilterValue;
+  gt?: number | string;
+  gte?: number | string;
+  lt?: number | string;
+  lte?: number | string;
+  in?: FilterValue[];
+  nin?: FilterValue[];
+  exists?: boolean;
+}
+
+export type FieldFilter = {
+  [field: string]: FilterValue | FilterValue[] | FieldComparison;
+};
+
+export type FilterExpression =
+  | FieldFilter
+  | { and: FilterExpression[] }
+  | { or: FilterExpression[] }
+  | { not: FilterExpression };
+
+export type FilterFieldType = 'string' | 'number' | 'boolean' | 'string[]';
+
+export interface FilterFieldDefinition<TDoc = Record<string, unknown>> {
+  name: (keyof TDoc & string) | string;
+  type?: FilterFieldType;
+  getter?: (doc: TDoc) => FilterValue | FilterValue[] | undefined | null;
+}
+
+export type DocumentFilterField<TDoc> = (keyof TDoc & string) | FilterFieldDefinition<TDoc>;
+
+// 3.2 Facet Aggregations with Exact vs. Approximate Semantics
+export interface TermsFacetRequest {
+  type: 'terms';
+  field: string;
+  limit?: number; // default: 10
+  sortBy?: 'count' | 'value';
+}
+
+export interface RangeFacetBucket {
+  from?: number;
+  to?: number;
+  key?: string;
+}
+
+export interface RangeFacetRequest {
+  type: 'range';
+  field: string;
+  ranges: RangeFacetBucket[];
+}
+
+export type FacetRequest = TermsFacetRequest | RangeFacetRequest;
+
+export interface TermsFacetBucket {
+  value: string | number;
+  count: number;
+}
+
+export interface TermsFacetResult {
+  type: 'terms';
+  field: string;
+  isApproximate: boolean;
+  buckets: TermsFacetBucket[];
+}
+
+export interface RangeFacetBucketResult {
+  key: string;
+  from?: number;
+  to?: number;
+  count: number;
+}
+
+export interface RangeFacetResult {
+  type: 'range';
+  field: string;
+  isApproximate: boolean;
+  buckets: RangeFacetBucketResult[];
+}
+
+export type FacetResult = TermsFacetResult | RangeFacetResult;
+
+// 3.3 Expanded Search Modes & Typo Tolerance
+export interface TypoToleranceOptions {
+  enabled?: boolean;                // Default: false
+  maxDistance?: 1 | 2;              // Default: 1
+  minWordLengthForOneTypo?: number; // Default: 4
+  minWordLengthForTwoTypos?: number;// Default: 8
+  prefixExactLength?: number;       // Default: 1 (first N chars must match exactly)
+}
+
+export interface TokenMatchOptions {
+  operator?: 'and' | 'or';          // Default: 'and'
+  minMatchCount?: number;
+}
+
+export interface PrefixSearchOptions {
+  prefixLength?: number;
+  exactCase?: boolean;
+}
+
+// 3.4 Deterministic Ranking & Tie-Breaking
+export type TieBreakerCriterion = 'score' | 'weight' | 'exact' | 'length' | 'id';
+
+export interface DeterministicRankingOptions {
+  /**
+   * Tie-breaker order hierarchy evaluated when scores are tied.
+   * Default: ['score', 'weight', 'exact', 'length', 'id']
+   */
+  tieBreakers?: TieBreakerCriterion[];
+}
+
+// 3.5 Suggestions & Autocomplete Primitives
+export interface SuggestOptions {
+  limit?: number;                   // Default: 5
+  mode?: 'prefix' | 'fuzzy';        // Default: 'prefix'
+  fuzzyDistance?: number;           // Default: 0 (or 1 for typo-tolerant suggest)
+  field?: string;                   // Restrict to specific field
+}
+
+export interface SuggestionItem<TDoc = any> {
+  text: string;
+  score: number;
+  type: 'completion' | 'did-you-mean';
+  matchedRanges: HighlightRange[];
+  docId?: DocumentId;
+  doc?: TDoc;
+}
+
+export interface SuggestResponse<TDoc = any> {
+  suggestions: SuggestionItem<TDoc>[];
+  queryDurationMs: number;
+}
+
+// 3.6 Search Extension Pipeline
+export interface MatchInfo {
+  query: string;
+  matchedField: string;
+  rawScore: number;
+  normalizedScore: number;
+}
+
+export interface SearchExtensionHooks<TDoc = any> {
+  tokenizer?: (text: string) => string[];
+  scoringHook?: (doc: TDoc, baseScore: number, matchInfo: MatchInfo) => number;
+  filterPredicate?: (doc: TDoc) => boolean;
+  postProcess?: (results: DocumentSearchResultItem<TDoc>[]) => DocumentSearchResultItem<TDoc>[];
+}
+
+// 3.7 Cost Budgets & Query Diagnostics
+export interface CostBudgetOptions {
+  maxExecutionTimeMs?: number;      // Maximum execution wall-clock time in milliseconds
+  maxCandidates?: number;           // Ceiling on candidates scored
+  abortSignal?: AbortSignal;        // Caller abort signal
+}
+
+export interface QueryDiagnosticsTimings {
+  filteringMs: number;            // Time spent evaluating columnar bitsets
+  scoringMs: number;              // Time spent in compute kernel or CPU reference
+  highlightMs: number;            // Time spent extracting Unicode highlight ranges
+  facetingMs?: number;            // Time spent aggregating facet buckets
+  totalMs: number;                // End-to-end query latency
+}
+
+export interface QueryDiagnostics {
+  scannedCandidates: number;        // Total candidate rows evaluated
+  filterSelectivity: number;        // Ratio of candidates matching filter (0.0 - 1.0)
+  routedEngine: EngineType;         // Engine that processed the query
+  hasOverflow: boolean;             // Whether GPU candidate capacity was exceeded
+  timings: QueryDiagnosticsTimings;
+  warnings?: string[];              // Non-fatal advisory notices (e.g. broad-query fallback)
 }

@@ -52,10 +52,23 @@ export {
   SERIALIZED_DOC_HEADER_BYTES,
   DuplicateIdError,
   DocumentNotFoundError,
+  U2D4_MAGIC,
+  U2D4_FORMAT_VERSION,
+  FORMAT_VERSION_4,
+  DOC_FORMAT_VERSION_4,
+  U2D4_HEADER_BYTES,
   type CpuAlgorithm,
   type OnQueryTooLong,
   type TextProfileId,
 } from './text-profile';
+
+// v0.4 Error hierarchy
+export {
+  WebGPUSearchError,
+  IncompatibleHookError,
+  CostBudgetExceededError,
+  InvalidFilterError
+} from './errors';
 
 // v0.2 shared preprocessing + CPU reference (M2)
 export {

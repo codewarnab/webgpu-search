@@ -16,6 +16,13 @@ export const DOC_FORMAT_VERSION = 3 as const;
 export const SERIALIZED_DOC_MAGIC = 0x55324433 as const; // 'U2D3'
 export const SERIALIZED_DOC_HEADER_BYTES = 48 as const;
 
+// v0.4 Document persistence constants (U2D4)
+export const U2D4_MAGIC = 0x55324434 as const; // 'U2D4'
+export const U2D4_FORMAT_VERSION = 4 as const;
+export const FORMAT_VERSION_4 = 4 as const;
+export const DOC_FORMAT_VERSION_4 = 4 as const;
+export const U2D4_HEADER_BYTES = 48 as const;
+
 
 export type TextProfileId = 'unicode-default';
 
@@ -124,4 +131,12 @@ export class DocumentNotFoundError extends Error {
     this.id = id;
   }
 }
+
+// v0.4 Error classes re-exported for backwards-compatible imports
+export {
+  WebGPUSearchError,
+  IncompatibleHookError,
+  CostBudgetExceededError,
+  InvalidFilterError
+} from './errors';
 
