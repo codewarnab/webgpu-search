@@ -293,6 +293,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     if (docCount === 0) {
       this.engineType = 'cpu';
+      this.fallbackReason = this.options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
       this.buildTimeMs = nowMs() - t0;
       return;
     }
@@ -354,12 +355,18 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             });
           } else {
             this.engineType = 'cpu';
-            this.fallbackReason = 'device-request-failed';
+            this.fallbackReason =
+              typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+                ? 'webgpu-unsupported'
+                : 'device-request-failed';
           }
         } catch (gpuErr) {
           console.warn('[webgpu-search] WebGPU initialization failed, falling back to CPU:', gpuErr);
           this.engineType = 'cpu';
-          this.fallbackReason = 'webgpu-unsupported';
+          this.fallbackReason =
+            typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+              ? 'webgpu-unsupported'
+              : 'device-request-failed';
         } finally {
           if (gpu) {
             gpu.destroy();
@@ -629,6 +636,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           throw err;
         }
         console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
+        this.engineType = 'cpu';
+        this.fallbackReason = 'gpu-execution-error';
+        if (this.gpuEngine) {
+          try { this.gpuEngine.destroy(); } catch {}
+          this.gpuEngine = null;
+        }
       }
     }
 
@@ -805,6 +818,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       effectiveFallbackReason = 'query-too-long';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
+    } else if (isFieldRestricted && !effectiveFallbackReason) {
+      effectiveFallbackReason = 'cpu-algorithm-requested';
     }
 
     return {
@@ -1251,6 +1266,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.vramAllocatedBytes = 0;
       }
 
+      if (this.engineType === 'cpu' && !this.fallbackReason) {
+        this.fallbackReason = this.options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
+      }
+
       this.mutationEpoch++;
       const durationMs = nowMs() - tStart;
       this.lastMutationTimeMs = durationMs;
@@ -1378,7 +1397,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.gpuEngine.destroy();
         this.gpuEngine = null;
         this.engineType = 'cpu';
-        this.fallbackReason = 'prefer-cpu';
+        this.fallbackReason = this.options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
       }
     }
   }
@@ -1592,6 +1611,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       this.gpuEngine = null;
     }
     this.tombstones.clear();
+    this.mutationEpoch =
+      typeof snapshot.schema.mutationEpoch === 'number' &&
+      Number.isFinite(snapshot.schema.mutationEpoch) &&
+      snapshot.schema.mutationEpoch >= 0
+        ? Math.floor(snapshot.schema.mutationEpoch)
+        : 0;
 
     const docCount = snapshot.header.docCount;
     const fieldCount = this.sortedFields.length;
@@ -1753,7 +1778,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             }
           } catch {
             this.engineType = 'cpu';
-            this.fallbackReason = 'webgpu-unsupported';
+            this.fallbackReason =
+              typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+                ? 'webgpu-unsupported'
+                : 'device-request-failed';
           }
         }
       }
@@ -1768,7 +1796,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const shouldAttempt = this.options.preferGpu === false
       ? false
       : this.preferGpu || totalRows >= threshold;
-    if (!shouldAttempt || this.gpuEngine) return;
+
+    if (!shouldAttempt) {
+      this.engineType = 'cpu';
+      this.fallbackReason = this.options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
+      return;
+    }
 
     const measuredAvgBytes = totalRows > 0 ? (this.totalTokens * 4) / totalRows : 0;
     const budget = checkMemoryBudget(totalRows, measuredAvgBytes, this.options.device, this.candidateCapacity);
@@ -1786,8 +1819,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           folded: this.folded,
           totalTokens: this.totalTokens
         });
-        const rowCap = Math.max(totalRows, 16);
-        const tokenCap = Math.max(this.totalTokens, 64);
+        const effectiveCap = this.initialCapacity > 0 ? this.initialCapacity : Math.max(16, this.records.length);
+        const rowCap = effectiveCap * this.sortedFields.length;
+        const avgTokens = totalRows > 0 ? this.totalTokens / totalRows : 16;
+        const tokenCap = Math.max(Math.floor(rowCap * avgTokens), 64);
         await gpu.loadDataset(packed, {
           rowCapacity: rowCap,
           tokenCapacity: tokenCap,
@@ -1805,10 +1840,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           this.engineType = 'cpu';
           this.fallbackReason = 'device-lost';
         });
+      } else {
+        this.engineType = 'cpu';
+        this.fallbackReason =
+          typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+            ? 'webgpu-unsupported'
+            : 'device-request-failed';
       }
     } catch {
       this.engineType = 'cpu';
-      this.fallbackReason = 'webgpu-unsupported';
+      this.fallbackReason =
+        typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+          ? 'webgpu-unsupported'
+          : 'device-request-failed';
     }
   }
 
@@ -1818,7 +1862,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const rowCount = this.rowTokens.length;
     const tombstoneCount = this.tombstones.size;
     const tombstoneRatio = rowCount > 0 ? tombstoneCount / rowCount : 0;
-    const ramBytes = this.totalTokens * 4;
+    const tokenRamBytes = this.totalTokens * 4;
+    const offsetRamBytes = (rowCount + 1) * 4;
+    const ramBytes = tokenRamBytes + offsetRamBytes;
 
     return {
       size: docCount,
@@ -1843,7 +1889,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       memory: {
         vramBytes: this.vramAllocatedBytes,
         ramBytes,
-        totalBytes: this.vramAllocatedBytes + ramBytes
+        totalBytes: this.vramAllocatedBytes + ramBytes,
+        tokenRamBytes,
+        offsetRamBytes
       },
       fallbackReason: this.fallbackReason
     };

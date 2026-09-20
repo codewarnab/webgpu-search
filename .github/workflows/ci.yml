@@ -35,6 +35,9 @@ jobs:
       - name: Typecheck Workspaces
         run: bun run typecheck
 
+      - name: Typecheck Framework Examples
+        run: bun x tsc -p examples/tsconfig.json --noEmit
+
       - name: Production Build (Turborepo)
         run: bun run build
 
@@ -67,6 +70,9 @@ jobs:
 
       - name: Run Milestone 6 Snapshot Persistence & IndexedDB Tests
         run: bun run test:m6
+
+      - name: Run Milestone 7 Observability & Framework Recipe Tests
+        run: bun run test:m7
 
 
       - name: Run M4 Parity Harness (differential + fallback + worker)

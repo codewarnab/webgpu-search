@@ -145,7 +145,8 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
     threshold: index.options.threshold,
     candidateCapacity: index.options.candidateCapacity,
     initialCapacity: index.options.initialCapacity,
-    growthFactor: index.options.growthFactor
+    growthFactor: index.options.growthFactor,
+    mutationEpoch: index.getStats().mutationEpoch
   };
 
   const schemaJson = JSON.stringify(schema);
