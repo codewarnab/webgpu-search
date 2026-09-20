@@ -22,6 +22,7 @@ import {
   IncompatibleHookError,
   CostBudgetExceededError,
   InvalidFilterError,
+  IncompatibleOptionError,
   serializeError,
   deserializeError,
   type DocumentId,
@@ -75,6 +76,7 @@ import {
   type QueryDiagnostics
 } from '../packages/webgpu-search/src/index';
 
+import { searchCpuReference } from '../packages/webgpu-search/src/cpu-reference';
 import { isDedicatedWorker, startSearchWorker } from '../packages/webgpu-search/src/worker/search-worker';
 
 async function runM1Tests() {
@@ -311,10 +313,10 @@ async function runM1Tests() {
   if (FORMAT_VERSION_4 !== 4 || DOC_FORMAT_VERSION_4 !== 4) {
     throw new Error('FORMAT_VERSION_4 and DOC_FORMAT_VERSION_4 aliases must be 4');
   }
-  if (U2D4_HEADER_BYTES !== 48) {
-    throw new Error(`U2D4_HEADER_BYTES must be 48, got ${U2D4_HEADER_BYTES}`);
+  if (U2D4_HEADER_BYTES !== 56) {
+    throw new Error(`U2D4_HEADER_BYTES must be 56, got ${U2D4_HEADER_BYTES}`);
   }
-  console.log('   ✅ U2D4_MAGIC (0x55324434), U2D4_FORMAT_VERSION (4), and header size (48 B) verified');
+  console.log('   ✅ U2D4_MAGIC (0x55324434), U2D4_FORMAT_VERSION (4), and header size (56 B) verified');
 
   // 9. Verifying v0.4 Error hierarchy & Worker serialization roundtrip
   console.log('9. Verifying v0.4 Error hierarchy & Worker serialization roundtrip...');
@@ -368,13 +370,54 @@ async function runM1Tests() {
   if (!(rehydratedFilterErr instanceof InvalidFilterError) || (rehydratedFilterErr as InvalidFilterError).field !== 'tags') {
     throw new Error('InvalidFilterError worker serialization roundtrip failed');
   }
-  console.log('   ✅ v0.4 Error classes and worker serialization roundtrips verified');
+
+  // Verify custom message preservation across worker serialization
+  const customHookErr = new IncompatibleHookError('h1', 'r1', 'Custom descriptive hook failure message');
+  const rehydratedCustomHook = deserializeError(serializeError(customHookErr));
+  if (rehydratedCustomHook.message !== 'Custom descriptive hook failure message') {
+    throw new Error(`Expected custom hook message preserved, got "${rehydratedCustomHook.message}"`);
+  }
+
+  const customFilterErr = new InvalidFilterError('r2', 'f2', 'Custom descriptive filter failure message');
+  const rehydratedCustomFilter = deserializeError(serializeError(customFilterErr));
+  if (rehydratedCustomFilter.message !== 'Custom descriptive filter failure message') {
+    throw new Error(`Expected custom filter message preserved, got "${rehydratedCustomFilter.message}"`);
+  }
+
+  // Verify null and sparse details resilience
+  const nullDetailsErr = deserializeError({
+    name: 'InvalidFilterError',
+    message: 'Null details test',
+    details: null as any
+  });
+  if (!(nullDetailsErr instanceof InvalidFilterError) || nullDetailsErr.message !== 'Null details test') {
+    throw new Error('deserializeError failed with null details');
+  }
+  console.log('   ✅ v0.4 Error classes, custom message roundtrips, and null-safe deserialization verified');
 
   // 10. Verifying SearchMode extension ('token', 'prefix')
   console.log('10. Verifying SearchMode extension (fuzzy, substring, token, prefix)...');
   const modes: SearchMode[] = ['fuzzy', 'substring', 'token', 'prefix'];
   if (modes.length !== 4) throw new Error('SearchMode should support all 4 modes');
-  console.log('   ✅ SearchMode extended to fuzzy | substring | token | prefix');
+
+  // Verify DocumentIndex and CPU reference fail-fast on unimplemented M4 modes
+  let threwDocTokenMode = false;
+  try {
+    const testIdx = new DocumentIndex({ fields: ['title'] });
+    await testIdx.search('query', { mode: 'token' });
+  } catch (err: any) {
+    threwDocTokenMode = err instanceof IncompatibleOptionError && err.option === 'mode';
+  }
+  if (!threwDocTokenMode) throw new Error('DocumentIndex.search must throw IncompatibleOptionError on mode: "token"');
+
+  let threwCpuTokenMode = false;
+  try {
+    searchCpuReference([new Uint32Array([1, 2])], new Uint32Array([1]), 'token' as any, 10, ['test']);
+  } catch (err: any) {
+    threwCpuTokenMode = err instanceof IncompatibleOptionError && err.option === 'mode';
+  }
+  if (!threwCpuTokenMode) throw new Error('searchCpuReference must throw IncompatibleOptionError on mode: "token"');
+  console.log('   ✅ SearchMode extended to fuzzy | substring | token | prefix (with M4 fail-fast guards)');
 
   // 11. Verifying Filter AST schemas and Columnar types
   console.log('11. Verifying Filter AST schemas and Columnar types...');
@@ -399,7 +442,28 @@ async function runM1Tests() {
   if (!filterExpr || !comparison || filterFieldDef.name !== 'tags') {
     throw new Error('Filter AST types failed validation');
   }
-  console.log('   ✅ Filter AST and columnar attribute schemas verified');
+
+  // Verify fail-fast on FilterExpression in Milestone 1 for DocumentIndex & SearchWorkerClient
+  let threwDocFilterExpr = false;
+  try {
+    const testIdx = new DocumentIndex({ fields: ['title'] });
+    await testIdx.search('query', { filter: filterExpr });
+  } catch (err: any) {
+    threwDocFilterExpr = err instanceof InvalidFilterError && err.message.includes('Milestone 2');
+  }
+  if (!threwDocFilterExpr) throw new Error('DocumentIndex.search must throw InvalidFilterError on FilterExpression in M1');
+
+  let threwWorkerFilterExpr = false;
+  const workerForFilter = new SearchWorkerClient<TestDoc>();
+  try {
+    await workerForFilter.search('query', { filter: filterExpr });
+  } catch (err: any) {
+    threwWorkerFilterExpr = err instanceof InvalidFilterError && err.message.includes('Milestone 2');
+  } finally {
+    await workerForFilter.destroy();
+  }
+  if (!threwWorkerFilterExpr) throw new Error('SearchWorkerClient.search must throw InvalidFilterError on FilterExpression in M1');
+  console.log('   ✅ Filter AST schemas and M1 fail-closed guards verified');
 
   // 12. Verifying Facet Aggregations, Typo Tolerance, Ranking, Suggestions, Extensions, & Diagnostics
   console.log('12. Verifying Facets, Typo Tolerance, Ranking, Suggestions, Extensions & Diagnostics...');
@@ -477,6 +541,27 @@ async function runM1Tests() {
     warnings: []
   };
 
+  // Verify TermsFacetBucket accepts boolean FilterValue
+  const boolBucket: TermsFacetBucket = { value: true, count: 10 };
+  const nullValue: FilterValue = null;
+  const searchOptsWithSuggest: DocumentSearchOptions<TestDoc> = {
+    suggest: { limit: 5, mode: 'prefix' }
+  };
+
+  // Verify SearchWorkerClient fails fast on extensions across worker boundary
+  let threwWorkerExtensions = false;
+  const workerForExt = new SearchWorkerClient<TestDoc>();
+  try {
+    await workerForExt.search('query', { extensions: { scoringHook: () => 100 } });
+  } catch (err: any) {
+    threwWorkerExtensions = err instanceof IncompatibleHookError && err.hookId === 'extensions';
+  } finally {
+    await workerForExt.destroy();
+  }
+  if (!threwWorkerExtensions) {
+    throw new Error('SearchWorkerClient.search must throw IncompatibleHookError on non-cloneable extensions');
+  }
+
   if (
     termsFacetReq.type !== 'terms' ||
     rangeFacetReq.ranges.length !== 3 ||
@@ -490,7 +575,10 @@ async function runM1Tests() {
     suggestResp.suggestions.length !== 1 ||
     extensions.scoringHook?.({ id: '1', title: 't', content: 'c' }, 100, matchInfo) !== 150 ||
     budgetOpts.maxExecutionTimeMs !== 100 ||
-    diagnostics.scannedCandidates !== 250
+    diagnostics.scannedCandidates !== 250 ||
+    boolBucket.value !== true ||
+    nullValue !== null ||
+    !searchOptsWithSuggest.suggest
   ) {
     throw new Error('v0.4 feature type shapes failed validation');
   }

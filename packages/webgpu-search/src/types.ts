@@ -193,6 +193,8 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   budget?: CostBudgetOptions;
   /** Whether to populate detailed diagnostics on the response */
   diagnostics?: boolean;
+  /** Autocomplete / did-you-mean suggestion configuration if requested alongside search */
+  suggest?: SuggestOptions | boolean;
 }
 
 export interface DocumentSearchResultItem<TDoc = any> {
@@ -419,7 +421,7 @@ export interface LoadIDBOptions extends IDBStorageOptions {
 // ---------------------------------------------------------------------------
 
 // 3.1 Structured Filters & Columnar Metadata
-export type FilterValue = string | number | boolean;
+export type FilterValue = string | number | boolean | null;
 
 export interface FieldComparison {
   eq?: FilterValue;
@@ -437,6 +439,11 @@ export type FieldFilter = {
   [field: string]: FilterValue | FilterValue[] | FieldComparison;
 };
 
+/**
+ * Structured filter expression AST for pre-match columnar evaluation.
+ * - `{ and: [] }` evaluates to true (vacuous truth).
+ * - `{ or: [] }` evaluates to false (vacuous falsehood).
+ */
 export type FilterExpression =
   | FieldFilter
   | { and: FilterExpression[] }
@@ -446,7 +453,7 @@ export type FilterExpression =
 export type FilterFieldType = 'string' | 'number' | 'boolean' | 'string[]';
 
 export interface FilterFieldDefinition<TDoc = Record<string, unknown>> {
-  name: (keyof TDoc & string) | string;
+  name: (keyof TDoc & string) | (string & {});
   type?: FilterFieldType;
   getter?: (doc: TDoc) => FilterValue | FilterValue[] | undefined | null;
 }
@@ -462,8 +469,11 @@ export interface TermsFacetRequest {
 }
 
 export interface RangeFacetBucket {
+  /** Inclusive lower bound (`value >= from`) */
   from?: number;
+  /** Exclusive upper bound (`value < to`) */
   to?: number;
+  /** Custom bucket key identifier (defaults to "${from ?? '*'}-${to ?? '*'}") */
   key?: string;
 }
 
@@ -476,7 +486,7 @@ export interface RangeFacetRequest {
 export type FacetRequest = TermsFacetRequest | RangeFacetRequest;
 
 export interface TermsFacetBucket {
-  value: string | number;
+  value: FilterValue;
   count: number;
 }
 

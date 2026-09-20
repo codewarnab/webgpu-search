@@ -115,7 +115,11 @@ export function deserializeError(serialized: SerializedWorkerError): Error {
     return new Error('Unknown worker error');
   }
 
-  const { name, message, stack, details = {} } = serialized;
+  const { name, message, stack } = serialized;
+  const details =
+    serialized?.details && typeof serialized.details === 'object' && serialized.details !== null
+      ? (serialized.details as Record<string, unknown>)
+      : {};
   let error: Error;
 
   switch (name) {
@@ -151,7 +155,8 @@ export function deserializeError(serialized: SerializedWorkerError): Error {
     case 'IncompatibleHookError':
       error = new IncompatibleHookError(
         (details.hookId as string) ?? 'hook',
-        (details.reason as string) ?? message
+        (details.reason as string) ?? message,
+        message
       );
       break;
     case 'CostBudgetExceededError':
@@ -165,7 +170,8 @@ export function deserializeError(serialized: SerializedWorkerError): Error {
     case 'InvalidFilterError':
       error = new InvalidFilterError(
         (details.reason as string) ?? message,
-        details.field as string | undefined
+        details.field as string | undefined,
+        message
       );
       break;
     case 'AbortError':

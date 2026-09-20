@@ -16,6 +16,7 @@
 
 import type { SearchResultItem, SearchMode } from './types';
 import { clampLimit, nowMs } from './runtime-guards';
+import { IncompatibleOptionError } from './errors';
 
 /**
  * ASCII delimiter set shared with shaders/fuzzy.wgsl (documented v0.2
@@ -159,6 +160,12 @@ export function searchCpuReference(
   texts: readonly string[]
 ): CpuReferenceOutput {
   const t0: number = nowMs();
+  if (mode !== 'substring' && mode !== 'fuzzy') {
+    throw new IncompatibleOptionError(
+      'mode',
+      `CPU reference mode '${String(mode)}' is scheduled for Milestone 4. Only 'fuzzy' and 'substring' are supported in Milestone 1.`
+    );
+  }
   const hits: SearchResultItem[] = [];
   if (queryTokens.length !== 0) {
     for (let idx = 0; idx < recordTokens.length; idx++) {
@@ -232,6 +239,12 @@ export function searchMultiFieldCpuReference(
   filterDoc?: (docIndex: number) => boolean
 ): MultiFieldCpuReferenceOutput {
   const t0: number = nowMs();
+  if (mode !== 'substring' && mode !== 'fuzzy') {
+    throw new IncompatibleOptionError(
+      'mode',
+      `CPU reference mode '${String(mode)}' is scheduled for Milestone 4. Only 'fuzzy' and 'substring' are supported in Milestone 1.`
+    );
+  }
   if (queryTokens.length === 0 || docCount === 0 || rowTokens.length === 0) {
     return {
       totalMatches: 0,

@@ -27,7 +27,7 @@ Host applications will gain:
 ### 1.1 Non-Negotiable Acceptance Boundaries
 
 1. **Scoring & Ordering Parity**: WebGPU compute passes and CPU reference algorithms must either produce identical ordered result contracts or explicitly route unsupported features (e.g. non-linear custom scoring hooks or unindexed dynamic filters) to the CPU reference engine with a recorded `fallbackReason`.
-2. **Fail-Closed Persistence (U2D4)**: Columnar filter metadata, attribute schemas, and facet indexes serialize into the Little-Endian binary format with magic `0x55324434` (`U2D4`). Header CRC32 covers `[0..44)` plus all payload segments. Any version, profile, or checksum mismatch throws `IncompatibleIndexError`.
+2. **Fail-Closed Persistence (U2D4)**: Columnar filter metadata, attribute schemas, and facet indexes serialize into the Little-Endian binary format with magic `0x55324434` (`U2D4`). Header CRC32 covers `[0..52)` plus all payload segments. Any version, profile, or checksum mismatch throws `IncompatibleIndexError`.
 3. **Safe Extensibility**: Extension hooks (tokenizers, custom rankers, filter predicates) cannot silently invalidate index schemas or persistence formats. Custom scoring hooks that depend on arbitrary JavaScript closures are executed post-match and flagged if snapshot restore lacks their definitions.
 4. **Deterministic Tie-Breaking**: When multiple records achieve identical match scores, ordering is strictly deterministic across all browsers, workers, and engines, governed by explicit tie-breaker hierarchies.
 5. **Zero Framework Coupling & Zero Core Runtime Dependencies**: The core package `packages/webgpu-search` maintains zero external runtime dependencies. All DOM calls are strictly guarded for Web Worker and Node.js/SSR environments.
@@ -48,7 +48,7 @@ flowchart TD
     Host["Host Application Layer (Monaco Palette, Log Viewer, Data Grid, Docs)"]
     Options["Search Options (query, mode, filter, facets, typo, tie)"]
     Compiler["Query Compiler & Diagnostics Pipeline"]
-    
+
     subgraph QC ["Query Compiler & Planning"]
         Budget["1. Cost Budget & Timeout Check"]
         FilterComp["2. Filter AST to Columnar Bitset"]
@@ -305,20 +305,23 @@ export interface QueryDiagnostics {
 
 ### 3.8 Versioned Binary Persistence (U2D4)
 
-#### Header Specification & Layout (48 Bytes, Little-Endian)
-- `magic`: `0x55324434` (`'U2D4'` in ASCII)
-- `formatVersion`: `4`
-- `profileId`: `0x0001` (`'unicode-default'`)
-- `unicodeVersion`: `0x00100000` (16.0.0 packed)
-- `scoringVersion`: `0x00040000` (`'v0.4.0'`)
-- `docCount`: `u32`
-- `rowCount`: `u32`
-- `tokenCount`: `u32`
-- `schemaByteLength`: `u32`
-- `docsByteLength`: `u32` (0 for decoupled storage)
-- `columnarByteLength`: `u32` (serialized columnar attribute buffers and string dictionary)
-- `reserved`: `u32` (zero-padded)
-- `checksum`: `u32` (CRC32 over header bytes `0..44` followed by all payload segments)
+#### Header Specification & Layout (56 Bytes, Little-Endian)
+- `magic`: `0x55324434` (`'U2D4'` in ASCII, offset `0x00`)
+- `formatVersion`: `4` (offset `0x04`)
+- `profileId`: `0x0001` (`'unicode-default'`, offset `0x08`)
+- `unicodeVersion`: `0x00100000` (16.0.0 packed, offset `0x0C`)
+- `scoringVersion`: `0x00040000` (`'v0.4.0'`, offset `0x10`)
+- `docCount`: `u32` (offset `0x14`)
+- `rowCount`: `u32` (offset `0x18`)
+- `tokenCount`: `u32` (offset `0x1C`)
+- `folded`: `u32` (0 or 1, case-folding mode flag, offset `0x20`)
+- `schemaByteLength`: `u32` (offset `0x24`)
+- `docsByteLength`: `u32` (0 for decoupled storage, offset `0x28`)
+- `columnarByteLength`: `u32` (serialized columnar attribute buffers and string dictionary, offset `0x2C`)
+- `reserved`: `u32` (zero-padded for future extensions, offset `0x30`)
+- `checksum`: `u32` (CRC32 over header bytes `0..52` followed by all payload segments, offset `0x34`)
+
+> **8-Byte Alignment**: 56 bytes is evenly divisible by 8 (`56 % 8 === 0`), guaranteeing that subsequent 64-bit columnar typed arrays (`Float64Array`) and dictionary buffers in the payload remain aligned without requiring manual padding.
 
 #### Serialization & Restoration Invariants
 1. **Zero-Tombstone Precondition**: Serializing an index automatically flushes tombstones via compaction, ensuring optimal binary size.
@@ -568,7 +571,7 @@ M8: U2D4 Snapshot Persistence, Proof Apps & Benchmarks
   - `DocumentSnapshotHeader` extended with columnar schema byte lengths, filter field descriptors, and hook IDs.
   - Proof applications export updated schemas and UI control bindings.
 - **Implementation Specifications & Invariants**:
-  - Format integrity invariant: U2D4 files must contain Little-Endian encoded headers with CRC32 validating bytes `0..44` and all subsequent payload segments.
+  - Format integrity invariant: U2D4 files must contain Little-Endian encoded headers with CRC32 validating bytes `0..52` and all subsequent payload segments.
   - Proof app invariant: `apps/monaco-palette` supports symbol prefix search with live autocomplete and type filters; `apps/log-viewer` supports 100k log streaming with severity level filtering and timestamp range facets.
   - Benchmark invariant: Benchmarks cover IDE symbols, 100k data-grid rows, and logs without memory leaks.
   - Subagent verification rule: Work must be audited and verified by a dedicated subagent before final sign-off.
