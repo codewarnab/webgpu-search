@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>High-Throughput 100k Log Viewer (WebGPU Search)</title>
+  <link rel="stylesheet" href="./src/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="brand-icon">⚡</span>
+      <div class="brand-title">WebGPU High-Throughput Log Viewer</div>
+      <span id="engine-badge" class="badge-tag badge-gpu">WebGPU Ready</span>
+    </div>
+    <div class="header-actions">
+      <div class="dataset-presets">
+        <button id="btn-load-10k" class="btn">10k Logs</button>
+        <button id="btn-load-50k" class="btn">50k Logs</button>
+        <button id="btn-load-100k" class="btn btn-primary">100k Logs</button>
+      </div>
+      <div class="stream-actions">
+        <button id="btn-toggle-stream" class="btn">▶ Start Live Stream</button>
+      </div>
+      <div class="persistence-actions">
+        <button id="btn-save-idb" class="btn" title="Save snapshot to IndexedDB">💾 Save IDB</button>
+        <button id="btn-restore-idb" class="btn" title="Restore snapshot from IndexedDB">📂 Restore IDB</button>
+        <button id="btn-clear-idb" class="btn" title="Clear IndexedDB database">🗑️ Clear IDB</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Telemetry HUD Cards -->
+  <div class="hud-bar">
+    <div class="hud-card">
+      <span class="hud-label">Logs Indexed</span>
+      <span id="hud-total-logs" class="hud-value">100,000</span>
+    </div>
+    <div class="hud-card">
+      <span class="hud-label">GPU Rows</span>
+      <span id="hud-gpu-rows" class="hud-value">400,000</span>
+    </div>
+    <div class="hud-card">
+      <span class="hud-label">Matches</span>
+      <span id="hud-matches" class="hud-value">0</span>
+    </div>
+    <div class="hud-card">
+      <span class="hud-label">Search Latency</span>
+      <span id="hud-latency" class="hud-value">0.00 ms</span>
+    </div>
+    <div class="hud-card">
+      <span class="hud-label">VRAM</span>
+      <span id="hud-vram" class="hud-value">0 MB</span>
+    </div>
+    <div class="hud-card">
+      <span class="hud-label">RAM (Tokens+Off)</span>
+      <span id="hud-ram" class="hud-value">0 MB</span>
+    </div>
+    <div class="hud-card">
+      <span class="hud-label">Mutation Epoch</span>
+      <span id="hud-epoch" class="hud-value">0</span>
+    </div>
+    <div class="hud-card">
+      <span class="hud-label">IDB Snapshot</span>
+      <span id="hud-idb" class="hud-value">None</span>
+    </div>
+  </div>
+
+  <!-- Search & Filter Controls -->
+  <div class="controls-bar">
+    <div class="search-input-wrap">
+      <span class="search-icon">🔍</span>
+      <input
+        type="text"
+        id="search-input"
+        class="search-input"
+        placeholder="Live search 100k logs across message, service, level, traceId (e.g. 'timeout', 'deadlock', 'auth')..."
+        autocomplete="off"
+        spellcheck="false"
+      />
+    </div>
+
+    <div class="filter-group">
+      <div class="filter-item">
+        <label for="level-select">Level:</label>
+        <select id="level-select" class="select-ctrl">
+          <option value="ALL" selected>All Levels</option>
+          <option value="ERROR">ERROR</option>
+          <option value="WARN">WARN</option>
+          <option value="INFO">INFO</option>
+          <option value="DEBUG">DEBUG</option>
+        </select>
+      </div>
+
+      <div class="filter-item">
+        <label for="mode-select">Mode:</label>
+        <select id="mode-select" class="select-ctrl">
+          <option value="fuzzy" selected>Fuzzy (Weighted)</option>
+          <option value="substring">Substring (Exact)</option>
+        </select>
+      </div>
+
+      <div class="filter-item">
+        <label for="engine-select">Target:</label>
+        <select id="engine-select" class="select-ctrl">
+          <option value="webgpu" selected>WebGPU</option>
+          <option value="cpu">CPU Reference</option>
+        </select>
+      </div>
+
+      <div class="filter-item">
+        <label for="worker-select">Thread:</label>
+        <select id="worker-select" class="select-ctrl">
+          <option value="worker" selected>Worker Client</option>
+          <option value="main">Main Thread</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- Virtual Scrolling Data Grid -->
+  <div class="grid-container">
+    <div class="grid-header">
+      <div class="grid-cell col-id">ID</div>
+      <div class="grid-cell col-time">Timestamp</div>
+      <div class="grid-cell col-level">Level</div>
+      <div class="grid-cell col-service">Service</div>
+      <div class="grid-cell col-message">Message</div>
+      <div class="grid-cell col-trace">Trace ID</div>
+      <div class="grid-cell col-score">Score / Lat</div>
+    </div>
+
+    <div id="grid-viewport" class="grid-viewport">
+      <!-- Virtual rows rendered here -->
+    </div>
+  </div>
+
+  <!-- Detail Drawer for Inspecting Log -->
+  <div id="detail-drawer" class="detail-drawer">
+    <div class="drawer-header">
+      <span class="brand-title">Log Record Details</span>
+      <button id="btn-close-drawer" class="btn">✕</button>
+    </div>
+    <div class="drawer-body">
+      <div class="meta-field">
+        <span class="meta-key">Log ID</span>
+        <span id="detail-id" class="meta-val">-</span>
+      </div>
+      <div class="meta-field">
+        <span class="meta-key">Timestamp</span>
+        <span id="detail-time" class="meta-val">-</span>
+      </div>
+      <div class="meta-field">
+        <span class="meta-key">Level</span>
+        <span id="detail-level" class="meta-val">-</span>
+      </div>
+      <div class="meta-field">
+        <span class="meta-key">Service</span>
+        <span id="detail-service" class="meta-val">-</span>
+      </div>
+      <div class="meta-field">
+        <span class="meta-key">Message</span>
+        <span id="detail-message" class="meta-val">-</span>
+      </div>
+      <div class="meta-field">
+        <span class="meta-key">Trace ID</span>
+        <span id="detail-trace" class="meta-val">-</span>
+      </div>
+      <div class="meta-field">
+        <span class="meta-key">Latency</span>
+        <span id="detail-latency" class="meta-val">-</span>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

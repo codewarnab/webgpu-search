@@ -74,6 +74,9 @@ jobs:
       - name: Run Milestone 7 Observability & Framework Recipe Tests
         run: bun run test:m7
 
+      - name: Run Milestone 8 Proof Applications & Acceptance Tests
+        run: bun run test:m8
+
 
       - name: Run M4 Parity Harness (differential + fallback + worker)
         timeout-minutes: 10
