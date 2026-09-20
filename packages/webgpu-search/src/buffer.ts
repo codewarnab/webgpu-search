@@ -272,7 +272,7 @@ function crcTableLazy(): Uint32Array {
   return t;
 }
 
-function crc32Parts(parts: readonly Uint8Array[]): number {
+export function crc32Parts(parts: readonly Uint8Array[]): number {
   const t = crcTableLazy();
   let crc: number = 0xffffffff;
   for (let p = 0; p < parts.length; p++) {

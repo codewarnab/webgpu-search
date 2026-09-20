@@ -26,6 +26,12 @@ import {
   type TextProfileId
 } from './text-profile';
 import { alignHighlights, renderHighlightedText } from './highlight';
+import {
+  deserializeDocumentSnapshot,
+  restoreDocumentIndex,
+  serializeDocumentIndex,
+  type RestoredDocumentSnapshot
+} from './persistence';
 import type {
   AddOptions,
   DocumentId,
@@ -39,8 +45,11 @@ import type {
   HighlightRange,
   MutationBatch,
   MutationResult,
+  RestoreDocumentIndexOptions,
   SearchMode,
-  SearchTimings
+  SearchTimings,
+  SerializeDocumentIndexOptions,
+  DocumentIndexSchema
 } from './types';
 
 export interface InternalField<TDoc> extends FieldScoreDefinition {
@@ -56,24 +65,24 @@ export interface InternalField<TDoc> extends FieldScoreDefinition {
  */
 export class DocumentIndex<TDoc = Record<string, unknown>> {
   readonly options: DocumentIndexOptions<TDoc>;
-  private isDestroyed: boolean = false;
-  private engineType: EngineType = 'cpu';
-  private gpuEngine: WebGPUEngine | null = null;
-  private vramAllocatedBytes: number = 0;
-  private unsubscribeDeviceLost?: () => void;
-  private readonly profileId: TextProfileId = 'unicode-default';
   private readonly folded: boolean;
   private readonly preferGpu: boolean;
+  private gpuEngine: WebGPUEngine | null = null;
+  private engineType: EngineType = 'cpu';
   private fallbackReason?: FallbackReason;
+  private vramAllocatedBytes: number = 0;
+  private unsubscribeDeviceLost?: () => void;
+  private isDestroyed: boolean = false;
+  private readonly profileId: TextProfileId = 'unicode-default';
 
-  // Documents and IDs
+  // Active documents state
   private records: TDoc[] = [];
   private docIds: DocumentId[] = [];
   private idToDocIndex: Map<DocumentId, number> = new Map();
-  private readonly getId: (doc: TDoc) => DocumentId;
+  private getId: (doc: TDoc) => DocumentId;
 
   // Fields and weights (stratified: sorted by weight desc)
-  private readonly sortedFields: InternalField<TDoc>[];
+  private sortedFields: InternalField<TDoc>[] = [];
   private readonly fieldNameToIndex: Map<string, number> = new Map();
 
   // Tokens and row mapping
@@ -85,6 +94,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   private totalTokens: number = 0;
   private candidateCapacity: number = 8192;
   private buildTimeMs: number = 0;
+  private restoreTimeMs?: number;
   private lastMutationTimeMs?: number;
   private mutationEpoch: number = 0;
   private tombstones: Set<number> = new Set(); // M4 tombstone candidate filtering
@@ -764,12 +774,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
     throwIfAborted(signal);
 
+    const idProp = typeof this.options.idField === 'string' ? this.options.idField : 'id';
     const enrichedResults: DocumentSearchResultItem<TDoc>[] = [];
     for (let i = 0; i < parityResult.results.length; i++) {
       const hit = parityResult.results[i];
-      const doc = this.records[hit.docIndex];
       const id = this.docIds[hit.docIndex];
-      if (doc === null || doc === undefined || id === null || id === undefined) continue;
+      if (id === null || id === undefined) continue;
+      const doc = this.records[hit.docIndex] ?? ({ [idProp]: id } as any);
       enrichedResults.push({
         id,
         doc,
@@ -1282,7 +1293,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.vramAllocatedBytes = this.gpuEngine.vramAllocatedBytes;
   }
 
-  private async compact(): Promise<void> {
+  compactCpu(): void {
     const activeDocCount = this.idToDocIndex.size;
     const fieldCount = this.sortedFields.length;
     const totalRows = activeDocCount * fieldCount;
@@ -1344,8 +1355,40 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.docToRowIndices = newDocToRowIndices;
     this.totalTokens = corpusTokens;
     this.tombstones.clear();
+  }
+
+  private isStratified(): boolean {
+    const docCount = this.records.length;
+    if (docCount === 0) return true;
+    for (let r = 0; r < this.rowTokens.length; r++) {
+      if (
+        this.rowToFieldIndex[r] !== Math.floor(r / docCount) ||
+        this.rowToDocIndex[r] !== (r % docCount)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  compactSync(): void {
+    if (this.tombstones.size > 0 || !this.isStratified()) {
+      this.compactCpu();
+      if (this.gpuEngine) {
+        this.gpuEngine.destroy();
+        this.gpuEngine = null;
+        this.engineType = 'cpu';
+        this.fallbackReason = 'prefer-cpu';
+      }
+    }
+  }
+
+  private async compact(): Promise<void> {
+    this.compactCpu();
 
     if (this.engineType === 'webgpu' && this.gpuEngine && this.gpuEngine.isReady) {
+      const activeDocCount = this.idToDocIndex.size;
+      const totalRows = this.rowTokens.length;
       if (activeDocCount === 0) {
         const packed = packUnicodeToGPUBuffer([], { folded: this.folded });
         await this.gpuEngine.loadDataset(packed);
@@ -1365,6 +1408,358 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.vramAllocatedBytes = this.gpuEngine.vramAllocatedBytes;
       }
     }
+  }
+
+  getRecords(): TDoc[] {
+    return this.records.slice();
+  }
+
+  getDocIds(): DocumentId[] {
+    return this.docIds.slice();
+  }
+
+  getSortedFields(): InternalField<TDoc>[] {
+    return this.sortedFields;
+  }
+
+  getRowTokens(): Uint32Array[] {
+    return this.rowTokens;
+  }
+
+  getTotalTokens(): number {
+    return this.totalTokens;
+  }
+
+  getTombstoneCount(): number {
+    return this.tombstones.size;
+  }
+
+  isFolded(): boolean {
+    return this.folded;
+  }
+
+  getProfileId(): TextProfileId {
+    return this.profileId;
+  }
+
+  getUnicodeVersion(): string {
+    return UNICODE_VERSION;
+  }
+
+  getScoringVersion(): string {
+    return SCORING_VERSION;
+  }
+
+  serialize(options?: SerializeDocumentIndexOptions): ArrayBuffer {
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    return serializeDocumentIndex(this, options);
+  }
+
+  async restore(buffer: ArrayBuffer, options?: RestoreDocumentIndexOptions<TDoc>): Promise<void> {
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    const t0 = nowMs();
+    await this.queued(async () => {
+      const snapshot = deserializeDocumentSnapshot<TDoc>(buffer, options);
+      await this.applySnapshotData(snapshot, options);
+      this.restoreTimeMs = nowMs() - t0;
+    });
+  }
+
+  static async fromSnapshot<TDoc = Record<string, unknown>>(
+    buffer: ArrayBuffer,
+    options?: RestoreDocumentIndexOptions<TDoc>
+  ): Promise<DocumentIndex<TDoc>> {
+    return restoreDocumentIndex<TDoc>(buffer, options);
+  }
+
+  static async fromSnapshotData<TDoc = Record<string, unknown>>(
+    snapshot: RestoredDocumentSnapshot<TDoc>,
+    options?: RestoreDocumentIndexOptions<TDoc>
+  ): Promise<DocumentIndex<TDoc>> {
+    const t0 = nowMs();
+    const userFields = options?.options?.fields;
+    const userFieldMap = new Map<string, any>();
+    if (Array.isArray(userFields)) {
+      for (const uf of userFields) {
+        if (typeof uf === 'string') {
+          userFieldMap.set(uf, uf);
+        } else if (uf && typeof uf === 'object' && typeof uf.name === 'string') {
+          userFieldMap.set(uf.name, uf);
+        }
+      }
+    }
+
+    const resolvedFields = snapshot.schema.fields.map((sf) => {
+      const uf = userFieldMap.get(sf.name);
+      const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
+        ? uf.getter
+        : undefined;
+      return {
+        name: sf.name,
+        weight: sf.weight,
+        getter
+      };
+    });
+
+    const mergedOptions: DocumentIndexOptions<TDoc> = {
+      ...(options?.options as any),
+      fields: resolvedFields,
+      idField: options?.options?.idField ?? snapshot.schema.idField ?? 'id',
+      caseSensitive: options?.options?.caseSensitive ?? snapshot.schema.caseSensitive ?? !snapshot.header.folded,
+      device: (options?.device ?? options?.options?.device) as GPUDevice | undefined,
+      preferGpu: options?.options?.preferGpu ?? snapshot.schema.preferGpu,
+      threshold: options?.options?.threshold ?? snapshot.schema.threshold,
+      candidateCapacity: options?.options?.candidateCapacity ?? snapshot.schema.candidateCapacity,
+      initialCapacity: options?.options?.initialCapacity ?? snapshot.schema.initialCapacity,
+      growthFactor: options?.options?.growthFactor ?? snapshot.schema.growthFactor
+    };
+
+    const index = new DocumentIndex<TDoc>(mergedOptions);
+    await index.applySnapshotData(snapshot, options);
+    index.restoreTimeMs = nowMs() - t0;
+    return index;
+  }
+
+  private configureFromSchema(
+    schema: DocumentIndexSchema,
+    options?: RestoreDocumentIndexOptions<TDoc>
+  ): void {
+    const userFields = options?.options?.fields;
+    const userFieldMap = new Map<string, any>();
+    if (Array.isArray(userFields)) {
+      for (const uf of userFields) {
+        if (typeof uf === 'string') {
+          userFieldMap.set(uf, uf);
+        } else if (uf && typeof uf === 'object' && typeof uf.name === 'string') {
+          userFieldMap.set(uf.name, uf);
+        }
+      }
+    }
+
+    const normalized: InternalField<TDoc>[] = schema.fields.map(
+      (f: { name: string; weight: number }, originalIndex: number) => {
+      const name = f.name;
+      const weight = f.weight ?? 1.0;
+      const uf = userFieldMap.get(name);
+      let getter: (doc: TDoc) => string | string[] | undefined | null;
+      if (uf && typeof uf === 'object' && typeof uf.getter === 'function') {
+        getter = uf.getter;
+      } else {
+        getter = (doc: any) => doc[name];
+      }
+      return { name, weight, getter, originalIndex };
+    });
+
+    this.sortedFields = [...normalized].sort((a, b) => {
+      if (b.weight !== a.weight) return b.weight - a.weight;
+      return a.originalIndex - b.originalIndex;
+    });
+
+    this.fieldNameToIndex.clear();
+    for (let i = 0; i < this.sortedFields.length; i++) {
+      this.fieldNameToIndex.set(this.sortedFields[i].name, i);
+    }
+
+    if (typeof options?.options?.idField === 'function') {
+      this.getId = options.options.idField;
+    } else if (typeof options?.options?.idField === 'string') {
+      const prop = options.options.idField;
+      this.getId = (doc: any) => doc[prop];
+    } else if (typeof schema.idField === 'string') {
+      const prop = schema.idField;
+      this.getId = (doc: any) => doc[prop];
+    } else if (options?.options?.idField === undefined && schema.idField === undefined) {
+      this.getId = (doc: any) => doc.id;
+    }
+  }
+
+  private async applySnapshotData(
+    snapshot: RestoredDocumentSnapshot<TDoc>,
+    options?: RestoreDocumentIndexOptions<TDoc>
+  ): Promise<void> {
+    this.configureFromSchema(snapshot.schema, options);
+
+    if (this.unsubscribeDeviceLost) {
+      this.unsubscribeDeviceLost();
+      this.unsubscribeDeviceLost = undefined;
+    }
+    if (this.gpuEngine) {
+      this.gpuEngine.destroy();
+      this.gpuEngine = null;
+    }
+    this.tombstones.clear();
+
+    const docCount = snapshot.header.docCount;
+    const fieldCount = this.sortedFields.length;
+    const totalRows = snapshot.header.rowCount;
+
+    this.records = snapshot.records.slice();
+    this.docIds = snapshot.docIds.slice();
+    this.idToDocIndex.clear();
+
+    if (this.records.length > 0 && this.docIds.length === 0) {
+      this.docIds = new Array(docCount);
+      for (let i = 0; i < docCount; i++) {
+        const id = this.getId(this.records[i]);
+        this.docIds[i] = id;
+        this.idToDocIndex.set(id, i);
+      }
+    } else {
+      for (let i = 0; i < this.docIds.length; i++) {
+        this.idToDocIndex.set(this.docIds[i], i);
+      }
+    }
+
+    // If both records and docIds are present, ensure exact ID correspondence alignment
+    if (this.records.length === docCount && this.docIds.length === docCount) {
+      const recMap = new Map<DocumentId, TDoc>();
+      for (const rec of this.records) {
+        recMap.set(this.getId(rec), rec);
+      }
+      if (recMap.size === docCount) {
+        const aligned: TDoc[] = new Array(docCount);
+        let allFound = true;
+        for (let i = 0; i < docCount; i++) {
+          const rec = recMap.get(this.docIds[i]);
+          if (rec === undefined) {
+            allFound = false;
+            break;
+          }
+          aligned[i] = rec;
+        }
+        if (allFound) {
+          this.records = aligned;
+        }
+      }
+    }
+
+    if (this.records.length === 0 && docCount > 0) {
+      const idProp = typeof this.options.idField === 'string' ? this.options.idField : 'id';
+      this.records = new Array(docCount);
+      for (let i = 0; i < docCount; i++) {
+        this.records[i] = { [idProp]: this.docIds[i] } as any;
+      }
+    }
+
+    const rawCap = this.options.candidateCapacity;
+    const validUserCap = typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0
+      ? Math.floor(rawCap)
+      : Math.floor(docCount * fieldCount * 0.1);
+    this.candidateCapacity = Math.min(32768, Math.max(8192, validUserCap));
+
+    this.rowTokens = new Array(totalRows);
+    this.rowToDocIndex = new Array(totalRows);
+    this.rowToFieldIndex = new Array(totalRows);
+    this.docToRowIndices = Array.from({ length: docCount }, () => new Array(fieldCount));
+    this.rawFieldStrings = Array.from({ length: docCount }, () => new Array(fieldCount));
+
+    for (let r = 0; r < totalRows; r++) {
+      const start = snapshot.offsets[r];
+      const end = snapshot.offsets[r + 1];
+      this.rowTokens[r] = snapshot.tokens.subarray(start, end);
+
+      const f = fieldCount > 0 && docCount > 0 ? Math.floor(r / docCount) : 0;
+      const d = docCount > 0 ? r % docCount : 0;
+      this.rowToDocIndex[r] = d;
+      this.rowToFieldIndex[r] = f;
+      if (this.docToRowIndices[d]) {
+        this.docToRowIndices[d][f] = r;
+      }
+    }
+
+    this.totalTokens = snapshot.header.tokenCount;
+
+    if (this.records.length === docCount && docCount > 0) {
+      for (let d = 0; d < docCount; d++) {
+        const doc = this.records[d];
+        for (let f = 0; f < fieldCount; f++) {
+          const field = this.sortedFields[f];
+          const rawVal = field.getter(doc);
+          let rawStr = '';
+          if (rawVal !== null && rawVal !== undefined) {
+            if (Array.isArray(rawVal)) {
+              rawStr = rawVal.filter((x) => x !== null && x !== undefined).join(' ');
+            } else {
+              rawStr = typeof rawVal === 'string' ? rawVal : String(rawVal);
+            }
+          }
+          this.rawFieldStrings[d][f] = rawStr;
+        }
+      }
+    }
+
+    this.engineType = 'cpu';
+    this.vramAllocatedBytes = 0;
+
+    if (docCount > 0) {
+      const threshold = this.options.threshold ?? 30_000;
+      const shouldAttemptGpu = this.options.preferGpu === false
+        ? false
+        : this.preferGpu || totalRows >= threshold;
+
+      if (this.options.preferGpu === false) {
+        this.fallbackReason = 'prefer-cpu';
+      } else if (!this.preferGpu && totalRows < threshold) {
+        this.fallbackReason = 'below-threshold';
+      }
+
+      if (shouldAttemptGpu) {
+        const measuredAvgBytes = totalRows > 0 ? (this.totalTokens * 4) / totalRows : 0;
+        const deviceToUse = options?.device ?? this.options.device;
+        const budget = checkMemoryBudget(totalRows, measuredAvgBytes, deviceToUse, this.candidateCapacity);
+        if (!budget.allowed) {
+          this.engineType = 'cpu';
+          this.fallbackReason = 'memory-budget-exceeded';
+        } else {
+          try {
+            const gpu = new WebGPUEngine();
+            const initialized = await gpu.init(deviceToUse);
+            if (initialized && gpu.isReady) {
+              gpu.ensureCandidateCapacity(this.candidateCapacity);
+              const packed = packUnicodeToGPUBuffer(this.rowTokens, {
+                folded: this.folded,
+                totalTokens: this.totalTokens
+              });
+              const effectiveCap = this.initialCapacity > 0 ? this.initialCapacity : Math.max(16, docCount);
+              const rowCap = effectiveCap * fieldCount;
+              const avgTokens = totalRows > 0 ? this.totalTokens / totalRows : 16;
+              const tokenCap = Math.max(Math.floor(rowCap * avgTokens), 64);
+              await gpu.loadDataset(packed, {
+                rowCapacity: rowCap,
+                tokenCapacity: tokenCap,
+                growthFactor: this.initialCapacity > 0 ? 1.0 : this.growthFactor
+              });
+
+              this.gpuEngine = gpu;
+              this.engineType = 'webgpu';
+              this.fallbackReason = undefined;
+              this.vramAllocatedBytes = gpu.vramAllocatedBytes;
+
+              this.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
+                if (this.gpuEngine) {
+                  this.gpuEngine.destroy();
+                  this.gpuEngine = null;
+                }
+                this.engineType = 'cpu';
+                this.fallbackReason = 'device-lost';
+              });
+            } else {
+              this.engineType = 'cpu';
+              this.fallbackReason = 'device-request-failed';
+            }
+          } catch {
+            this.engineType = 'cpu';
+            this.fallbackReason = 'webgpu-unsupported';
+          }
+        }
+      }
+    }
+
+    this.generation++;
   }
 
   private async tryInitializeGpuEngine(): Promise<void> {
@@ -1417,14 +1812,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
   }
 
-  serialize(): ArrayBuffer {
-    throw new Error('DocumentIndex.serialize is scheduled for M6 implementation.');
-  }
-
-  restore(_buffer: ArrayBuffer, _options?: { transfer?: boolean }): void {
-    throw new Error('DocumentIndex.restore is scheduled for M6 implementation.');
-  }
-
   getStats(): DocumentIndexStats {
     const adapter = this.gpuEngine?.adapterInfo;
     const docCount = this.idToDocIndex.size;
@@ -1450,6 +1837,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       tombstoneCount,
       tombstoneRatio,
       buildTimeMs: this.buildTimeMs,
+      restoreTimeMs: this.restoreTimeMs,
       lastMutationTimeMs: this.lastMutationTimeMs,
       mutationEpoch: this.mutationEpoch,
       memory: {

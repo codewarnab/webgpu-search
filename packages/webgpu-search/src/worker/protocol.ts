@@ -3,6 +3,8 @@ import type {
   DocumentIndexOptions,
   DocumentSearchOptions,
   MutationBatch,
+  RestoreDocumentIndexOptions,
+  SerializeDocumentIndexOptions,
   WorkerClientOptions,
   WorkerMessageType,
   WorkerRequest,
@@ -53,9 +55,13 @@ export interface WorkerMutatePayload<TDoc = Record<string, unknown>> {
   options?: AddOptions;
 }
 
+export interface WorkerSerializePayload {
+  options?: SerializeDocumentIndexOptions;
+}
+
 export interface WorkerRestorePayload {
   buffer: ArrayBuffer;
-  options?: { transfer?: boolean };
+  options?: RestoreDocumentIndexOptions;
 }
 
 /**

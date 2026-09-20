@@ -273,4 +273,95 @@ export interface WorkerResponse {
   };
 }
 
+// ---------------------------------------------------------------------------
+// v0.3 Snapshot Persistence (U2D3) & IndexedDB Types (M6)
+// ---------------------------------------------------------------------------
 
+export interface DocumentIndexSchema {
+  fields: Array<{
+    name: string;
+    weight: number;
+  }>;
+  idField?: string;
+  docIds?: DocumentId[];
+  caseSensitive?: boolean;
+  preferGpu?: boolean;
+  threshold?: number;
+  candidateCapacity?: number;
+  initialCapacity?: number;
+  growthFactor?: number;
+}
+
+export interface SerializeDocumentIndexOptions {
+  /**
+   * If true, document records are not written to the snapshot (docsByteLength = 0).
+   * Useful for string-isolated worker or decoupled IndexedDB storage.
+   * Default: false.
+   */
+  decoupled?: boolean;
+}
+
+export interface RestoreDocumentIndexOptions<TDoc = Record<string, unknown>> {
+  /**
+   * Optional custom DocumentIndex options to override or extend schema options
+   * (e.g. custom getters, device, preferGpu, threshold).
+   */
+  options?: Partial<DocumentIndexOptions<TDoc>>;
+  /**
+   * Decoupled documents to rehydrate if the snapshot was serialized with decoupled: true.
+   */
+  documents?: TDoc[];
+  /**
+   * Optional GPUDevice for WebGPU initialization.
+   */
+  device?: GPUDevice | null;
+  /**
+   * Whether to transfer the input buffer.
+   */
+  transfer?: boolean;
+}
+
+export interface DocumentSnapshotHeader {
+  magic: number;
+  formatVersion: number;
+  profileId: TextProfileId;
+  unicodeVersion: string;
+  scoringVersion: string;
+  docCount: number;
+  rowCount: number;
+  tokenCount: number;
+  folded: boolean;
+  schemaByteLength: number;
+  docsByteLength: number;
+  checksum: number;
+}
+
+export interface IDBStorageOptions {
+  /** Database name (default: 'webgpu_search_db') */
+  dbName?: string;
+  /** Object store name for index binary snapshots (default: 'index_snapshots') */
+  snapshotStoreName?: string;
+  /** Object store name for decoupled documents (default: 'documents') */
+  docStoreName?: string;
+  /** Key identifying this index in snapshot store (default: 'default_index') */
+  key?: string;
+  /** Custom IDBFactory instance (defaults to globalThis.indexedDB) */
+  indexedDB?: any;
+}
+
+export interface SaveIDBOptions<TDoc = Record<string, unknown>> extends IDBStorageOptions {
+  /** Whether to store document records decoupled in the document store (default: false) */
+  decoupled?: boolean;
+  /** Optional decoupled documents to store if not extracted from index */
+  documents?: TDoc[];
+}
+
+export interface LoadIDBResult<TDoc = Record<string, unknown>> {
+  snapshot: ArrayBuffer;
+  documents?: TDoc[];
+}
+
+export interface LoadIDBOptions extends IDBStorageOptions {
+  /** Whether to load decoupled documents from the document store (default: true) */
+  loadDocuments?: boolean;
+}

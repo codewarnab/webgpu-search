@@ -15,6 +15,7 @@ export {
   serializeUnicodeDataset,
   deserializeUnicodeDataset,
   validatePackedOffsets,
+  crc32Parts,
   checkMemoryBudget,
   computeClampedHeadroomBytes,
   type PackedGPUBuffer,
@@ -121,7 +122,29 @@ export {
   type WorkerSearchPayload,
   type WorkerMutatePayload,
   type WorkerRestorePayload,
+  type WorkerSerializePayload,
   type WorkerAbortPayload,
 } from './worker/protocol';
+
+// v0.3 Versioned snapshot persistence & IndexedDB storage (M6)
+export {
+  serializeDocumentIndex,
+  deserializeDocumentSnapshot,
+  deserializeDocumentSnapshotHeader,
+  restoreDocumentIndex,
+  type RestoredDocumentSnapshot,
+} from './persistence';
+export {
+  DEFAULT_IDB_DATABASE_NAME,
+  DEFAULT_SNAPSHOT_STORE_NAME,
+  DEFAULT_DOCUMENT_STORE_NAME,
+  DEFAULT_SNAPSHOT_KEY,
+  openSearchDatabase,
+  saveIndexToIDB,
+  loadIndexFromIDB,
+  deleteIndexFromIDB,
+  restoreIndexFromIDB,
+} from './idb-storage';
+
 
 

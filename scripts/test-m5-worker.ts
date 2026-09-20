@@ -6,6 +6,7 @@ import {
   QueryTooLongError,
   DuplicateIdError,
   DocumentNotFoundError,
+  IncompatibleIndexError,
   serializeError,
   deserializeError,
   type WorkerClientOptions,
@@ -499,26 +500,22 @@ async function runM5Tests() {
       preferGpu: false
     });
 
-    // Test serialize (scheduled for M6)
-    let serializeThrewM6 = false;
-    try {
-      await client.serialize();
-    } catch (err: any) {
-      serializeThrewM6 = err?.message?.includes('M6') ?? false;
-    }
-    assert.strictEqual(serializeThrewM6, true, 'client.serialize() surfaces M6 scheduled error from worker');
+    // Test serialize (implemented in M6)
+    const serializedBuf = await client.serialize();
+    assert(serializedBuf instanceof ArrayBuffer, 'client.serialize() must return an ArrayBuffer');
+    assert(serializedBuf.byteLength >= 48, 'Serialized buffer must contain at least 48 bytes header');
 
     // Test restore non-transfer buffer preservation
     const dummyBuffer = new ArrayBuffer(64);
     assert.strictEqual(dummyBuffer.byteLength, 64);
 
-    let restoreThrewM6 = false;
+    let restoreThrewIncompatible = false;
     try {
       await client.restore(dummyBuffer); // default: transfer: false (clone)
     } catch (err: any) {
-      restoreThrewM6 = err?.message?.includes('M6') ?? false;
+      restoreThrewIncompatible = err instanceof IncompatibleIndexError || err?.name === 'IncompatibleIndexError';
     }
-    assert.strictEqual(restoreThrewM6, true);
+    assert.strictEqual(restoreThrewIncompatible, true, 'client.restore(dummyBuffer) must throw IncompatibleIndexError');
     // Crucial check: original dummyBuffer was NOT neutered/detached!
     assert.strictEqual(dummyBuffer.byteLength, 64, 'Caller buffer must remain intact without { transfer: true }');
 
