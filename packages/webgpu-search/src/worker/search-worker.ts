@@ -1,4 +1,5 @@
 import { DocumentIndex } from '../document-index';
+import { restoreDocumentIndex } from '../persistence';
 import {
   serializeError,
   type WorkerAbortPayload,
@@ -7,7 +8,8 @@ import {
   type WorkerRequest,
   type WorkerResponse,
   type WorkerRestorePayload,
-  type WorkerSearchPayload
+  type WorkerSearchPayload,
+  type WorkerSerializePayload
 } from './protocol';
 
 /**
@@ -182,7 +184,8 @@ export function startSearchWorker(customScope?: any): void {
           break;
         }
         try {
-          const buf = index.serialize();
+          const payload = req.payload as WorkerSerializePayload | undefined;
+          const buf = index.serialize(payload?.options);
           scope.postMessage(
             { id: req.id, success: true, result: buf } satisfies WorkerResponse,
             [buf]
@@ -198,19 +201,13 @@ export function startSearchWorker(customScope?: any): void {
       }
 
       case 'RESTORE': {
-        if (!index) {
-          scope.postMessage({
-            id: req.id,
-            success: false,
-            error: serializeError(
-              new Error('[webgpu-search] Worker search index is not initialized.')
-            )
-          } satisfies WorkerResponse);
-          break;
-        }
         try {
           const payload = req.payload as WorkerRestorePayload;
-          index.restore(payload.buffer, payload.options);
+          if (index) {
+            await index.restore(payload.buffer, payload.options);
+          } else {
+            index = await restoreDocumentIndex(payload.buffer, payload.options);
+          }
           scope.postMessage({ id: req.id, success: true } satisfies WorkerResponse);
         } catch (err) {
           scope.postMessage({

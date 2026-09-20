@@ -7,6 +7,8 @@ import type {
   DocumentSearchResponse,
   MutationBatch,
   MutationResult,
+  RestoreDocumentIndexOptions,
+  SerializeDocumentIndexOptions,
   WorkerClientOptions
 } from '../types';
 import {
@@ -17,6 +19,8 @@ import {
   type WorkerSearchPayload
 } from './protocol';
 import { abortError, throwIfAborted } from '../runtime-guards';
+import { deserializeDocumentSnapshotHeader } from '../persistence';
+import { SERIALIZED_DOC_HEADER_BYTES } from '../text-profile';
 
 interface InternalFieldDef<TDoc> {
   name: string;
@@ -516,20 +520,78 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     return this.applyBatch({ remove: list });
   }
 
-  async serialize(): Promise<ArrayBuffer> {
+  getRecords(): TDoc[] {
+    return Array.from(this.docMap.values());
+  }
+
+  async serialize(options?: SerializeDocumentIndexOptions): Promise<ArrayBuffer> {
     if (this.isDestroyed) {
       throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
     }
-    return this.sendRequest<ArrayBuffer>('SERIALIZE');
+    return this.sendRequest<ArrayBuffer>('SERIALIZE', { options });
   }
 
-  async restore(buffer: ArrayBuffer, options?: { transfer?: boolean }): Promise<void> {
+  async restore(buffer: ArrayBuffer, options?: RestoreDocumentIndexOptions<TDoc>): Promise<void> {
     if (this.isDestroyed) {
       throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
     }
     if (!buffer || typeof (buffer as any).byteLength !== 'number') {
       throw new TypeError('[webgpu-search] restore expects an ArrayBuffer.');
     }
+
+    try {
+      const header = deserializeDocumentSnapshotHeader(buffer);
+      // If client fieldDefinitions is empty, extract from schema
+      if (
+        this.fieldDefinitions.length === 0 &&
+        buffer.byteLength >= SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength
+      ) {
+        const schemaBytes = new Uint8Array(buffer, SERIALIZED_DOC_HEADER_BYTES, header.schemaByteLength);
+        const schemaStr = new TextDecoder().decode(schemaBytes);
+        const schema = JSON.parse(schemaStr);
+        if (schema && Array.isArray(schema.fields)) {
+          this.fieldDefinitions = schema.fields.map((f: any) => ({
+            name: f.name,
+            weight: f.weight ?? 1.0,
+            getter: (doc: any) => doc[f.name]
+          }));
+        }
+        if (schema.idField && typeof schema.idField === 'string') {
+          const prop = schema.idField;
+          this.getId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+        } else {
+          this.getId = (doc: any) => doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+        }
+      }
+
+      // Repopulate docMap if documents are provided or embedded
+      this.docMap.clear();
+      if (options?.documents && Array.isArray(options.documents)) {
+        for (const doc of options.documents) {
+          const id = this.getId(doc);
+          this.docMap.set(id, doc);
+        }
+      } else if (header.docsByteLength > 0) {
+        const docsOffset =
+          SERIALIZED_DOC_HEADER_BYTES +
+          header.schemaByteLength +
+          header.tokenCount * 4 +
+          (header.rowCount + 1) * 4;
+        const docsBytes = new Uint8Array(buffer, docsOffset, header.docsByteLength);
+        const docsStr = new TextDecoder().decode(docsBytes);
+        const docs = JSON.parse(docsStr);
+        if (Array.isArray(docs)) {
+          for (const doc of docs) {
+            const id = this.getId(doc);
+            if (doc && doc[INTERNAL_WORKER_ID_KEY] !== undefined && doc.id === undefined) {
+              doc.id = doc[INTERNAL_WORKER_ID_KEY];
+            }
+            this.docMap.set(id, doc);
+          }
+        }
+      }
+    } catch {}
+
     const shouldTransfer = options?.transfer === true;
     const toSend = shouldTransfer ? buffer : buffer.slice(0);
     await this.sendRequest('RESTORE', { buffer: toSend, options }, [toSend]);

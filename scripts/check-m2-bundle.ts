@@ -35,7 +35,12 @@
  * Adds SearchWorkerClient with monotonic query sequencing, AbortError liveness,
  * transferable buffer safety, string-isolated enrichment, and error class rehydration.
  * Total bumped 36 KB -> 40 KB and delta cap 16 KB -> 20 KB with this documented rationale.
- * Budget: 40 KB gzip total per file (dist/index.js + dist/index.cjs).
+ *
+ * M6 (Issue #9) snapshot persistence & IndexedDB storage expansion:
+ * Adds persistence.ts (U2D3 48-byte Little-Endian binary format, circular-dependency-free CRC32,
+ * decoupled document storage) and idb-storage.ts (transaction-safe IndexedDB helpers).
+ * Total bumped 40 KB -> 48 KB and delta cap 20 KB -> 30 KB with this documented rationale.
+ * Budget: 48 KB gzip total per file (dist/index.js + dist/index.cjs).
  * dist/index.cjs is measured and reported too (same cap applies per-file);
  * sourcemaps are excluded from the gate but must not ship to npm.
  *
@@ -50,8 +55,8 @@ import { stat, readFile } from 'node:fs/promises';
 
 const BASELINE_RAW = 70455;
 const BASELINE_GZIP = 18343;
-const DELTA_CAP_GZIP = 20 * 1024;
-const TOTAL_BUDGET_GZIP = 40 * 1024;
+const DELTA_CAP_GZIP = 30 * 1024;
+const TOTAL_BUDGET_GZIP = 48 * 1024;
 
 
 function gzipDeterministic(buf: Uint8Array): number {

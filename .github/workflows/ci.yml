@@ -65,6 +65,9 @@ jobs:
       - name: Run Milestone 5 Worker Client & Protocol Tests
         run: bun run test:m5
 
+      - name: Run Milestone 6 Snapshot Persistence & IndexedDB Tests
+        run: bun run test:m6
+
 
       - name: Run M4 Parity Harness (differential + fallback + worker)
         timeout-minutes: 10

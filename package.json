@@ -17,6 +17,7 @@
     "test:m3": "bun scripts/test-m3-highlight.ts",
     "test:m4": "bun scripts/test-m4-mutations.ts",
     "test:m5": "bun scripts/test-m5-worker.ts",
+    "test:m6": "bun scripts/test-m6-persistence.ts",
     "test:parity": "bun scripts/test-m4-parity.ts",
 
     "test:preprocess": "bun scripts/test-m2-preprocess.ts",
