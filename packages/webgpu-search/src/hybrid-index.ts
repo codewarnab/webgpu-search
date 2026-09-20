@@ -21,6 +21,7 @@ import {
 } from './text-profile';
 import type {
   EngineType,
+  FallbackReason,
   IndexOptions,
   IndexStats,
   SearchOptions,
@@ -33,6 +34,7 @@ export class SearchIndex {
   private items: string[];
   private isDestroyed: boolean = false;
   private engineType: EngineType = 'cpu';
+  private fallbackReason?: FallbackReason;
   private gpuEngine: WebGPUEngine | null = null;
   private cpuEngine: CPUEngine;
   private vramAllocatedBytes: number = 0;
@@ -111,6 +113,14 @@ export class SearchIndex {
         ? false
         : preferGpu || ownedItems.length >= threshold;
 
+    if (!shouldAttemptGpu) {
+      if (options.preferGpu === false) {
+        index.fallbackReason = 'prefer-cpu';
+      } else {
+        index.fallbackReason = 'below-threshold';
+      }
+    }
+
     if (shouldAttemptGpu) {
       // Phase 1 (fail-fast pre-init): exact post-fold tokenCount, no 64-B
       // fiction. Device usually undefined here (128 MB fiction stands), but
@@ -121,6 +131,7 @@ export class SearchIndex {
       if (!budget.allowed) {
         console.warn(`[webgpu-search] ${budget.reason} Falling back to CPU.`);
         index.engineType = 'cpu';
+        index.fallbackReason = 'memory-budget-exceeded';
         return index;
       }
 
@@ -138,18 +149,33 @@ export class SearchIndex {
 
           index.gpuEngine = gpu;
           index.engineType = 'webgpu';
+          index.fallbackReason = undefined;
           index.vramAllocatedBytes = packed.recordsByteLength + packed.offsetsByteLength;
 
           // Subscribe to device loss for automatic graceful fallback
           index.unsubscribeDeviceLost = WebGPUContextManager.onDeviceLost(() => {
             console.warn('[webgpu-search] GPU device lost, falling back to CPU.');
+            if (index.gpuEngine) {
+              index.gpuEngine.destroy();
+              index.gpuEngine = null;
+            }
             index.engineType = 'cpu';
+            index.fallbackReason = 'device-lost';
           });
 
           return index;
+        } else {
+          index.fallbackReason =
+            typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+              ? 'webgpu-unsupported'
+              : 'device-request-failed';
         }
       } catch (gpuErr) {
         console.warn('[webgpu-search] WebGPU initialization failed, falling back to CPU:', gpuErr);
+        index.fallbackReason =
+          typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+            ? 'webgpu-unsupported'
+            : 'device-request-failed';
       }
     }
 
@@ -249,6 +275,7 @@ export class SearchIndex {
       candidateCount: 0, hasOverflow: false,
       timings: { queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null, readbackMs: 0, totalMs: 0, gpuDispatchMs: 0 },
       profileId: this.profileId, scoringVersion: SCORING_VERSION, cpuAlgorithm,
+      fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
     });
     if (normalizedQuery.isEmpty) {
       return noHits('');
@@ -349,7 +376,8 @@ export class SearchIndex {
         timings,
         profileId: this.profileId,
         scoringVersion: SCORING_VERSION,
-        cpuAlgorithm
+        cpuAlgorithm,
+        fallbackReason: 'cpu-algorithm-requested'
       };
     }
 
@@ -372,6 +400,13 @@ export class SearchIndex {
       gpuDispatchMs: 0
     };
 
+    let effectiveFallbackReason = this.fallbackReason;
+    if (forceCpu) {
+      effectiveFallbackReason = 'query-too-long';
+    } else if (useGpu && gpuHandle !== null) {
+      effectiveFallbackReason = 'gpu-execution-error';
+    }
+
     return {
       query,
       mode,
@@ -383,7 +418,8 @@ export class SearchIndex {
       timings,
       profileId: this.profileId,
       scoringVersion: SCORING_VERSION,
-      cpuAlgorithm
+      cpuAlgorithm,
+      fallbackReason: effectiveFallbackReason
     };
   }
 
@@ -392,6 +428,7 @@ export class SearchIndex {
    */
   getStats(): IndexStats {
     const adapter = this.gpuEngine?.adapterInfo;
+    const ramBytes = this.tokenCount * 4;
     return {
       size: this.items.length,
       engine: this.engineType,
@@ -403,7 +440,13 @@ export class SearchIndex {
       scoringVersion: SCORING_VERSION,
       tokenCount: this.tokenCount,
       folded: this.folded,
-      formatVersion: FORMAT_VERSION
+      formatVersion: FORMAT_VERSION,
+      fallbackReason: this.fallbackReason,
+      memory: {
+        vramBytes: this.vramAllocatedBytes,
+        ramBytes,
+        totalBytes: this.vramAllocatedBytes + ramBytes
+      }
     };
   }
 

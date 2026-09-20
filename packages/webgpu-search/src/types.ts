@@ -57,6 +57,7 @@ export interface SearchResponse {
   profileId: TextProfileId;       // v0.2: text profile that served this query
   scoringVersion: typeof SCORING_VERSION; // v0.2: scoring contract version
   cpuAlgorithm: CpuAlgorithm;     // v0.2: requested CPU scorer (M2 serves parity)
+  fallbackReason?: FallbackReason; // Reason for CPU execution path if fallback occurred
 }
 
 export interface IndexOptions {
@@ -81,6 +82,12 @@ export interface IndexStats {
   tokenCount: number;             // M2: exact post-fold code-point total
   folded: boolean;
   formatVersion: typeof FORMAT_VERSION | typeof DOC_FORMAT_VERSION;
+  fallbackReason?: FallbackReason;
+  memory?: {
+    vramBytes: number;
+    ramBytes: number;
+    totalBytes: number;
+  };
 }
 
 export interface AdapterInfo {
@@ -234,6 +241,8 @@ export interface DocumentIndexStats extends IndexStats {
     vramBytes: number;
     ramBytes: number;
     totalBytes: number;
+    tokenRamBytes?: number;
+    offsetRamBytes?: number;
   };
   fallbackReason?: FallbackReason;
 }
@@ -290,6 +299,7 @@ export interface DocumentIndexSchema {
   candidateCapacity?: number;
   initialCapacity?: number;
   growthFactor?: number;
+  mutationEpoch?: number;
 }
 
 export interface SerializeDocumentIndexOptions {

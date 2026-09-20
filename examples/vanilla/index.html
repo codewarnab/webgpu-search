@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>webgpu-search Vanilla Recipe Demo</title>
+  <style>
+    body {
+      background-color: #f0f2f5;
+      color: #1a1a1a;
+      margin: 0;
+      padding: 40px 20px;
+    }
+    mark {
+      background-color: #ffe066;
+      color: inherit;
+      padding: 0 2px;
+      border-radius: 2px;
+    }
+  </style>
+</head>
+<body>
+  <div id="search-root"></div>
+
+  <script type="module">
+    import { createVanillaSearchApp } from './search-app.js';
+
+    const SAMPLE_DOCS = [
+      { id: '1', title: 'WebGPU Compute Pass', description: 'High-performance WGSL parallel prefix sums and scoring loops.' },
+      { id: '2', title: 'Unicode NFC Normalization', description: 'Canonical decomposition and composition adhering to Unicode 16.0.' },
+      { id: '3', title: 'IndexedDB U2D3 Persistence', description: 'Little-Endian snapshot serialization with CRC32 integrity verification.' },
+      { id: '4', title: 'SearchWorkerClient Protocol', description: 'Off-thread async search client with immediate AbortError rejection.' },
+    ];
+
+    const container = document.getElementById('search-root');
+    createVanillaSearchApp(container, {
+      initialDocs: SAMPLE_DOCS,
+      indexOptions: {
+        fields: ['title', 'description'],
+      },
+    });
+  </script>
+</body>
+</html>

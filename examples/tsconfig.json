@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react",
+    "noEmit": true,
+    "paths": {
+      "webgpu-search": ["../packages/webgpu-search/dist/index.d.ts"],
+      "webgpu-search/worker": ["../packages/webgpu-search/dist/worker.d.ts"]
+    },
+    "types": ["@webgpu/types"]
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.d.ts"
+  ]
+}

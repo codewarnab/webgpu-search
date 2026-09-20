@@ -18,8 +18,8 @@
     "test:m4": "bun scripts/test-m4-mutations.ts",
     "test:m5": "bun scripts/test-m5-worker.ts",
     "test:m6": "bun scripts/test-m6-persistence.ts",
+    "test:m7": "bun scripts/test-m7-observability.ts",
     "test:parity": "bun scripts/test-m4-parity.ts",
-
     "test:preprocess": "bun scripts/test-m2-preprocess.ts",
     "test:preprocess:tr": "LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun scripts/test-m2-preprocess.ts",
     "lint:parity": "bun scripts/check-parity-lint.ts",
@@ -39,11 +39,16 @@
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
+    "@types/react": "^19.3.0",
     "@webgpu/types": "^0.1.72",
     "puppeteer-core": "^25.10.0",
+    "react": "^19.3.0",
+    "svelte": "^5.57.1",
     "turbo": "^2.4.4",
     "typescript": "~6.0.2",
-    "vgpu": "^0.5.0"
+    "vgpu": "^0.5.0",
+    "vue": "^3.5.43",
+    "webgpu-search": "workspace:*"
   },
   "engines": {
     "node": ">=18.0.0",
