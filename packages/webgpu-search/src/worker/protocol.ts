@@ -16,8 +16,11 @@ import {
   ProfileMismatchError,
   IncompatibleOptionError,
   DuplicateIdError,
-  DocumentNotFoundError
-} from '../text-profile';
+  DocumentNotFoundError,
+  IncompatibleHookError,
+  CostBudgetExceededError,
+  InvalidFilterError
+} from '../errors';
 import { abortError } from '../runtime-guards';
 
 export type {
@@ -83,6 +86,9 @@ export function serializeError(err: unknown): SerializedWorkerError {
     if ('option' in e) details.option = e.option;
     if ('reason' in e) details.reason = e.reason;
     if ('id' in e) details.id = e.id;
+    if ('hookId' in e) details.hookId = e.hookId;
+    if ('budgetType' in e) details.budgetType = e.budgetType;
+    if ('field' in e) details.field = e.field;
     if (e.details && typeof e.details === 'object') {
       Object.assign(details, e.details);
     }
@@ -109,7 +115,11 @@ export function deserializeError(serialized: SerializedWorkerError): Error {
     return new Error('Unknown worker error');
   }
 
-  const { name, message, stack, details = {} } = serialized;
+  const { name, message, stack } = serialized;
+  const details =
+    serialized?.details && typeof serialized.details === 'object' && serialized.details !== null
+      ? (serialized.details as Record<string, unknown>)
+      : {};
   let error: Error;
 
   switch (name) {
@@ -141,6 +151,28 @@ export function deserializeError(serialized: SerializedWorkerError): Error {
       break;
     case 'DocumentNotFoundError':
       error = new DocumentNotFoundError(details.id as string | number, message);
+      break;
+    case 'IncompatibleHookError':
+      error = new IncompatibleHookError(
+        (details.hookId as string) ?? 'hook',
+        (details.reason as string) ?? message,
+        message
+      );
+      break;
+    case 'CostBudgetExceededError':
+      error = new CostBudgetExceededError(
+        (details.budgetType as 'time' | 'candidates') ?? 'time',
+        (details.limit as number) ?? 0,
+        (details.actual as number) ?? 0,
+        message
+      );
+      break;
+    case 'InvalidFilterError':
+      error = new InvalidFilterError(
+        (details.reason as string) ?? message,
+        details.field as string | undefined,
+        message
+      );
       break;
     case 'AbortError':
       error = abortError();

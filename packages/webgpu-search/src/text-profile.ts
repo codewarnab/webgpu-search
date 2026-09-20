@@ -16,6 +16,13 @@ export const DOC_FORMAT_VERSION = 3 as const;
 export const SERIALIZED_DOC_MAGIC = 0x55324433 as const; // 'U2D3'
 export const SERIALIZED_DOC_HEADER_BYTES = 48 as const;
 
+// v0.4 Document persistence constants (U2D4)
+export const U2D4_MAGIC = 0x55324434 as const; // 'U2D4'
+export const U2D4_FORMAT_VERSION = 4 as const;
+export const FORMAT_VERSION_4 = 4 as const;
+export const DOC_FORMAT_VERSION_4 = 4 as const;
+export const U2D4_HEADER_BYTES = 56 as const;
+
 
 export type TextProfileId = 'unicode-default';
 
@@ -50,78 +57,17 @@ export function countUnicodeCodePoints(s: string): number {
   return [...s].length;
 }
 
-export class QueryTooLongError extends RangeError {
-  limit: number;
-  actual: number;
-  profileId: string;
-  constructor(limit: number, actual: number, profileId: string) {
-    super(`Query ${actual} tokens exceeds limit ${limit} (${profileId})`);
-    this.name = 'QueryTooLongError';
-    this.limit = limit;
-    this.actual = actual;
-    this.profileId = profileId;
-  }
-}
-
-/**
- * Thrown when a serialized v0.1 buffer (no magic) is loaded as v0.2.
- * M1 shape-only stub — first thrown by `loadDataset` validation in M3.
- */
-export class IncompatibleIndexError extends Error {
-  expected: unknown;
-  actual: unknown;
-  constructor(expected: unknown, actual: unknown) {
-    super(
-      `Incompatible index (expected ${String(expected)}, got ${String(actual)}). Rebuild.`
-    );
-    this.name = 'IncompatibleIndexError';
-    this.expected = expected;
-    this.actual = actual;
-  }
-}
-
-export class ProfileMismatchError extends Error {
-  expected: unknown;
-  actual: unknown;
-  property: string;
-  constructor(expected: unknown, actual: unknown, property: string = 'caseSensitive') {
-    super(
-      `Profile mismatch (${property}: expected ${String(expected)}, got ${String(actual)}). ` +
-        `Rebuild the index or retry with ${property}=${String(expected)}.`
-    );
-    this.name = 'ProfileMismatchError';
-    this.expected = expected;
-    this.actual = actual;
-    this.property = property;
-  }
-}
-
-export class IncompatibleOptionError extends Error {
-  option: string;
-  reason: string;
-  constructor(option: string, reason: string) {
-    super(`Incompatible option ${option}: ${reason}`);
-    this.name = 'IncompatibleOptionError';
-    this.option = option;
-    this.reason = reason;
-  }
-}
-
-export class DuplicateIdError extends Error {
-  id: string | number;
-  constructor(id: string | number, message?: string) {
-    super(message ?? `Duplicate document ID: ${String(id)}`);
-    this.name = 'DuplicateIdError';
-    this.id = id;
-  }
-}
-
-export class DocumentNotFoundError extends Error {
-  id: string | number;
-  constructor(id: string | number, message?: string) {
-    super(message ?? `Document not found: ${String(id)}`);
-    this.name = 'DocumentNotFoundError';
-    this.id = id;
-  }
-}
+// Re-export all error classes from ./errors for backwards-compatible imports
+export {
+  QueryTooLongError,
+  IncompatibleIndexError,
+  ProfileMismatchError,
+  IncompatibleOptionError,
+  DuplicateIdError,
+  DocumentNotFoundError,
+  WebGPUSearchError,
+  IncompatibleHookError,
+  CostBudgetExceededError,
+  InvalidFilterError
+} from './errors';
 

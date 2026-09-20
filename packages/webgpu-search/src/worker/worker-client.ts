@@ -9,7 +9,8 @@ import type {
   MutationResult,
   RestoreDocumentIndexOptions,
   SerializeDocumentIndexOptions,
-  WorkerClientOptions
+  WorkerClientOptions,
+  FilterExpression
 } from '../types';
 import {
   deserializeError,
@@ -21,11 +22,12 @@ import {
 import { abortError, throwIfAborted } from '../runtime-guards';
 import { deserializeDocumentSnapshotHeader } from '../persistence';
 import { SERIALIZED_DOC_HEADER_BYTES } from '../text-profile';
+import { InvalidFilterError, IncompatibleHookError } from '../errors';
 
 interface InternalFieldDef<TDoc> {
   name: string;
   weight: number;
-  getter: (doc: TDoc) => any;
+  getter: (doc: TDoc) => string | string[] | undefined | null;
 }
 
 interface PendingQuery<TDoc> {
@@ -33,7 +35,7 @@ interface PendingQuery<TDoc> {
   resolve: (res: DocumentSearchResponse<TDoc>) => void;
   reject: (err: any) => void;
   signalCleanup?: () => void;
-  filter?: (doc: TDoc) => boolean;
+  filter?: ((doc: TDoc) => boolean) | FilterExpression;
   limit?: number;
 }
 
@@ -136,9 +138,10 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
                 }
               }
 
-              // Apply predicate filter if configured
-              if (pendingQuery.filter) {
-                searchResp.results = searchResp.results.filter((item) => pendingQuery.filter!(item.doc));
+              // Apply predicate filter if configured as a function
+              if (typeof pendingQuery.filter === 'function') {
+                const predicate = pendingQuery.filter;
+                searchResp.results = searchResp.results.filter((item) => predicate(item.doc));
                 if (pendingQuery.limit && searchResp.results.length > pendingQuery.limit) {
                   searchResp.results = searchResp.results.slice(0, pendingQuery.limit);
                 }
@@ -227,11 +230,16 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     const id = this.nextRequestId++;
     return new Promise<T>((resolve, reject) => {
       this.pendingRequests.set(id, { resolve, reject });
-      const req: WorkerRequest = { id, type, payload };
-      if (transfer && transfer.length > 0) {
-        worker.postMessage(req, transfer);
-      } else {
-        worker.postMessage(req);
+      try {
+        const req: WorkerRequest = { id, type, payload };
+        if (transfer && transfer.length > 0) {
+          worker.postMessage(req, transfer);
+        } else {
+          worker.postMessage(req);
+        }
+      } catch (err) {
+        this.pendingRequests.delete(id);
+        reject(err);
       }
     });
   }
@@ -338,13 +346,33 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       }
     }
 
+    if (options.extensions) {
+      throw new IncompatibleHookError(
+        'extensions',
+        'SearchExtensionHooks contain function closures which cannot be cloned across Web Worker boundaries.'
+      );
+    }
+
     const workerFields = this.fieldDefinitions.map((f) => ({
       name: f.name,
       weight: f.weight
     }));
 
+    let workerFilterFields = options.filterFields;
+    if (workerFilterFields) {
+      workerFilterFields = workerFilterFields.map((f) => {
+        if (typeof f === 'object' && f !== null) {
+          const { getter, ...serializableField } = f;
+          return serializableField;
+        }
+        return f;
+      });
+    }
+
+    const { extensions, filterFields, ...restInitOptions } = options;
     const workerOptions = {
-      ...options,
+      ...restInitOptions,
+      ...(workerFilterFields ? { filterFields: workerFilterFields } : {}),
       idField: this.stringIsolated ? INTERNAL_WORKER_ID_KEY : (options.idField ?? 'id'),
       fields: workerFields
     };
@@ -370,6 +398,40 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
 
     throwIfAborted(options?.signal);
 
+    if (options?.extensions) {
+      throw new IncompatibleHookError(
+        'extensions',
+        'SearchExtensionHooks contain function closures which cannot be cloned across Web Worker boundaries.'
+      );
+    }
+
+    const { filter, signal, limit, maxResults, ...restOptions } = options || {};
+
+    if (filter !== undefined && typeof filter !== 'function') {
+      if (typeof filter === 'object' && filter !== null) {
+        throw new InvalidFilterError(
+          'Structured FilterExpression evaluation is scheduled for Milestone 2. Only predicate functions ((doc) => boolean) are supported in Milestone 1.'
+        );
+      }
+      throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
+    }
+
+    const requestedLimit = limit ?? maxResults ?? 50;
+
+    let workerBudget = restOptions.budget;
+    if (workerBudget?.abortSignal) {
+      const { abortSignal, ...remainingBudget } = workerBudget;
+      workerBudget = remainingBudget;
+    }
+
+    const isPredicate = typeof filter === 'function';
+    // Avoid candidate starvation when predicate filter is applied on main thread
+    const workerOptions = {
+      ...restOptions,
+      ...(workerBudget ? { budget: workerBudget } : {}),
+      limit: isPredicate ? ((options as any)?.candidateCapacity ?? 8192) : requestedLimit
+    };
+
     const worker = this.getWorker();
     const reqId = this.nextRequestId++;
     const queryId = this.nextQueryId++;
@@ -387,15 +449,6 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         } satisfies WorkerRequest);
       }
     }
-
-    const { filter, signal, limit, maxResults, ...restOptions } = options || {};
-    const requestedLimit = limit ?? maxResults ?? 50;
-
-    // Avoid candidate starvation when predicate filter is applied on main thread
-    const workerOptions = {
-      ...restOptions,
-      limit: filter ? ((options as any)?.candidateCapacity ?? 8192) : requestedLimit
-    };
 
     return new Promise<DocumentSearchResponse<TDoc>>((resolve, reject) => {
       let signalCleanup: (() => void) | undefined;
@@ -423,7 +476,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         resolve,
         reject,
         signalCleanup,
-        filter,
+        filter: isPredicate ? filter : undefined,
         limit: requestedLimit
       });
 
@@ -438,7 +491,13 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         } satisfies WorkerSearchPayload<TDoc>
       };
 
-      worker.postMessage(req);
+      try {
+        worker.postMessage(req);
+      } catch (err) {
+        this.pendingQueries.delete(reqId);
+        signalCleanup?.();
+        reject(err);
+      }
     });
   }
 

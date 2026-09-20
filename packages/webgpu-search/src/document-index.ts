@@ -25,6 +25,7 @@ import {
   QueryTooLongError,
   type TextProfileId
 } from './text-profile';
+import { InvalidFilterError } from './errors';
 import { alignHighlights, renderHighlightedText } from './highlight';
 import {
   deserializeDocumentSnapshot,
@@ -470,15 +471,27 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason
     });
 
+    if (mode !== 'fuzzy' && mode !== 'substring') {
+      throw new IncompatibleOptionError(
+        'mode',
+        `Search mode '${String(mode)}' is scheduled for Milestone 4. Only 'fuzzy' and 'substring' are supported in Milestone 1.`
+      );
+    }
+
+    if (filter !== undefined && typeof filter !== 'function') {
+      if (typeof filter === 'object' && filter !== null) {
+        throw new InvalidFilterError(
+          'Structured FilterExpression evaluation is scheduled for Milestone 2. Only predicate functions ((doc) => boolean) are supported in Milestone 1.'
+        );
+      }
+      throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
+    }
+
     if (normalizedQuery.isEmpty) {
       return noHits('');
     }
     if (this.idToDocIndex.size === 0) {
       return noHits(query);
-    }
-
-    if (filter !== undefined && typeof filter !== 'function') {
-      throw new TypeError('[webgpu-search] options.filter must be a function.');
     }
 
     let allowedFieldIndices: Set<number> | undefined = undefined;
@@ -508,8 +521,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     // 1. WebGPU execution path
     const gpuHandle = this.gpuEngine;
+    const isGpuSupportedMode = mode === 'fuzzy' || mode === 'substring';
     const useGpu = !forceCpu &&
       !isFieldRestricted &&
+      isGpuSupportedMode &&
       cpuAlgorithm !== 'ufuzzy' &&
       this.engineType === 'webgpu' &&
       gpuHandle !== null &&

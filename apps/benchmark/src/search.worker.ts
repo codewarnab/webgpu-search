@@ -7,7 +7,8 @@ import {
   deserializeUnicodeDataset,
   type SearchResult,
   type CPUSearchResult,
-  type PackedUnicodeBufferV2
+  type PackedUnicodeBufferV2,
+  type SearchMode
 } from 'webgpu-search';
 
 let gpuEngine: WebGPUEngine | null = null;
@@ -52,7 +53,7 @@ export interface CompactHit {
 
 export interface WorkerGpuMeta {
   query: string;
-  mode: 'substring' | 'fuzzy';
+  mode: SearchMode;
   engine: 'webgpu';
   totalMatches: number;
   candidateCount: number;
