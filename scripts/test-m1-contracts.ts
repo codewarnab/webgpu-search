@@ -443,27 +443,28 @@ async function runM1Tests() {
     throw new Error('Filter AST types failed validation');
   }
 
-  // Verify fail-fast on FilterExpression in Milestone 1 for DocumentIndex & SearchWorkerClient
+  // Verify InvalidFilterError on unindexed FilterExpression field for DocumentIndex & SearchWorkerClient
   let threwDocFilterExpr = false;
   try {
     const testIdx = new DocumentIndex({ fields: ['title'] });
     await testIdx.search('query', { filter: filterExpr });
   } catch (err: any) {
-    threwDocFilterExpr = err instanceof InvalidFilterError && err.message.includes('Milestone 2');
+    threwDocFilterExpr = err instanceof InvalidFilterError;
   }
-  if (!threwDocFilterExpr) throw new Error('DocumentIndex.search must throw InvalidFilterError on FilterExpression in M1');
+  if (!threwDocFilterExpr) throw new Error('DocumentIndex.search must throw InvalidFilterError on FilterExpression with unindexed field');
 
   let threwWorkerFilterExpr = false;
   const workerForFilter = new SearchWorkerClient<TestDoc>();
   try {
+    await workerForFilter.init([], { fields: ['title'] });
     await workerForFilter.search('query', { filter: filterExpr });
   } catch (err: any) {
-    threwWorkerFilterExpr = err instanceof InvalidFilterError && err.message.includes('Milestone 2');
+    threwWorkerFilterExpr = err instanceof InvalidFilterError;
   } finally {
     await workerForFilter.destroy();
   }
-  if (!threwWorkerFilterExpr) throw new Error('SearchWorkerClient.search must throw InvalidFilterError on FilterExpression in M1');
-  console.log('   ✅ Filter AST schemas and M1 fail-closed guards verified');
+  if (!threwWorkerFilterExpr) throw new Error('SearchWorkerClient.search must throw InvalidFilterError on FilterExpression with unindexed field');
+  console.log('   ✅ Filter AST schemas and unindexed field guards verified');
 
   // 12. Verifying Facet Aggregations, Typo Tolerance, Ranking, Suggestions, Extensions, & Diagnostics
   console.log('12. Verifying Facets, Typo Tolerance, Ranking, Suggestions, Extensions & Diagnostics...');
