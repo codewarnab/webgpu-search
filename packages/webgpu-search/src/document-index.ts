@@ -783,8 +783,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       gpuHandle.isReady;
 
     if (useGpu && gpuHandle !== null) {
+      // v0.4 M6 fix: narrow GPU try to dispatch only so extension hook
+      // errors (filterPredicate / scoringHook / postProcess) propagate
+      // directly without destroying the engine or double-invoking via CPU
+      // fallback. Only dispatch failures fall through to CPU.
+      let gpuResult: Awaited<ReturnType<WebGPUEngine['search']>> | undefined = undefined;
       try {
-        const gpuResult = await gpuHandle.search(query, {
+        gpuResult = await gpuHandle.search(query, {
           ...options,
           mode,
           limit: this.candidateCapacity,
@@ -796,6 +801,29 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           throw abortError();
         }
         throwIfAborted(signal);
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          throw err;
+        }
+        // Mirror hybrid-index: mode-routed rejections (token/prefix/typo via
+        // direct or raced calls) are not engine failures — keep a healthy GPU
+        // up and fall through to parity CPU.
+        const modeRouted: boolean =
+          err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
+        if (!modeRouted) {
+          console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
+          this.engineType = 'cpu';
+          this.fallbackReason = 'gpu-execution-error';
+          if (this.gpuEngine) {
+            try { this.gpuEngine.destroy(); } catch {}
+            this.gpuEngine = null;
+          }
+        }
+        gpuResult = undefined;
+      }
+
+      if (gpuResult !== undefined) {
+        const gpuResultOk = gpuResult;
 
         // WebGPU candidate readback & fixed-point score enrichment
         const docMatches = new Map<number, {
@@ -806,8 +834,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         // M3: unfiltered query match set for facet aggregation (filter applied below).
         const queryMatchedAll = wantsFacets ? new Set<number>() : null;
 
-        for (let i = 0; i < gpuResult.results.length; i++) {
-          const item = gpuResult.results[i];
+        // v0.4 M6 fix: hook errors propagate (no fallback / no double-invoke).
+        // Only GPU dispatch failures fall back; readback + M6 pipeline runs
+        // outside the dispatch try above.
+        for (let i = 0; i < gpuResultOk.results.length; i++) {
+          const item = gpuResultOk.results[i];
           const r = item.index;
           if (this.tombstones.has(r)) continue;
           const fIdx = this.rowToFieldIndex[r];
@@ -918,8 +949,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         if (wantsFacets && facetEngine && facetSpec && queryMatchedAll !== null) {
           const facetT0 = nowMs();
           let facetCandidates: Iterable<number> = queryMatchedAll;
-          let facetIsApproximate = gpuResult.hasOverflow;
-          if (gpuResult.hasOverflow && facetingMode === 'force-exact') {
+          let facetIsApproximate = gpuResultOk.hasOverflow;
+          if (gpuResultOk.hasOverflow && facetingMode === 'force-exact') {
             const exact = searchMultiFieldCpuReference(
               this.records.length,
               this.sortedFields,
@@ -943,18 +974,18 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, facetIsApproximate
           );
           const facetMs = nowMs() - facetT0;
-          gpuResult.timings.totalMs += facetMs;
+          gpuResultOk.timings.totalMs += facetMs;
         }
 
         return {
-          query: gpuResult.query,
-          mode: gpuResult.mode,
+          query: gpuResultOk.query,
+          mode: gpuResultOk.mode,
           engine: 'webgpu',
           totalMatches,
           candidateCount,
-          hasOverflow: gpuResult.hasOverflow,
+          hasOverflow: gpuResultOk.hasOverflow,
           results,
-          timings: gpuResult.timings,
+          timings: gpuResultOk.timings,
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
           cpuAlgorithm,
@@ -963,24 +994,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
             : {})
         };
-      } catch (err: any) {
-        if (err.name === 'AbortError') {
-          throw err;
-        }
-        // Mirror hybrid-index: mode-routed rejections (token/prefix/typo via
-        // direct or raced calls) are not engine failures — keep a healthy GPU
-        // up and fall through to parity CPU.
-        const modeRouted: boolean =
-          err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
-        if (!modeRouted) {
-          console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
-          this.engineType = 'cpu';
-          this.fallbackReason = 'gpu-execution-error';
-          if (this.gpuEngine) {
-            try { this.gpuEngine.destroy(); } catch {}
-            this.gpuEngine = null;
-          }
-        }
       }
     }
 
@@ -1556,6 +1569,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           docIndex: dIdx
         };
       } else {
+        // Defensive fallback (unreachable in normal flow: resort runs before
+        // postProcess, so IDs/fields resolve). Positional docIndex preserves
+        // the total-order guarantee via unique positions.
         keys[i] = {
           score: item.score,
           fieldWeight: 1.0,

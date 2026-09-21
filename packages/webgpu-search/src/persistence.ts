@@ -360,7 +360,7 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
         throw new IncompatibleIndexError('valid-hookIds-keys', key);
       }
       const val = (schema.hookIds as Record<string, unknown>)[key];
-      if (typeof val !== 'string' || (val as string).length === 0) {
+      if (typeof val !== 'string' || (val as string).trim().length === 0) {
         throw new IncompatibleIndexError(`valid-hookIds.${key}-string`, typeof val);
       }
     }

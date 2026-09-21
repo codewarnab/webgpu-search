@@ -4,16 +4,22 @@
  * Type-safe extension hooks for host applications:
  * - `tokenizer`: custom query term splitting for `'token'` mode (code
  *   symbols `_`, `-`, `camelCase`). CPU-only (`'token'` is CPU-by-design).
+ *   Runs once per query; must be pure and deterministic.
  * - `scoringHook`: post-match boost over surviving Top-K candidates only.
- * - `filterPredicate`: conjunctive post-match predicate.
- * - `postProcess`: final result transformation.
+ *   Must return a finite integer (floats throw `TypeError`); must be pure.
+ * - `filterPredicate`: conjunctive post-match predicate (truthiness-coerced).
+ *   Invocation order is engine-dependent; must be pure.
+ * - `postProcess`: final result transformation (results-only: counts/facets/
+ *   suggestions unaffected; skipped on empty no-hit paths).
  *
  * Persistence safety: closures are never serialized. `serialize()` records
- * only declarative `ExtensionHookIds` (stable `hookId` property when set,
- * else `function.name`, else `'anonymous'`); `restore` requires matching
- * handlers via `options.options.extensions` or throws `IncompatibleHookError`.
- * Hooks cannot cross the Web Worker boundary (`SearchWorkerClient` rejects
- * `extensions` fail-closed).
+ * only declarative `ExtensionHookIds` (stable `hookId` property when set and
+ * non-blank, else `function.name`, else `'anonymous'`); `restore` requires
+ * matching handlers via `options.options.extensions` or throws
+ * `IncompatibleHookError`. Name-derived IDs can collide; assign explicit
+ * `hookId` for persisted hooks. Hooks cannot cross the Web Worker boundary
+ * (`SearchWorkerClient` init/search/restore reject `extensions` fail-closed;
+ * empty `{}` is a no-op).
  *
  * Portable: no DOM refs. Zero runtime dependencies.
  */
@@ -90,14 +96,12 @@ function charKind(ch: string, cp: number): 'upper' | 'lower' | 'digit' | 'other'
   if (isAsciiLower(cp)) return 'lower';
   if (isAsciiDigit(cp)) return 'digit';
   // Unicode-aware fallback (locale-independent, deterministic).
+  // Uncased scripts (CJK, emoji) have lower === upper === ch and fall through
+  // to 'other' below; cased letters land in exactly one of the branches.
   const lower = ch.toLowerCase();
   const upper = ch.toUpperCase();
   if (ch !== lower && ch === upper) return 'upper';
-  if (ch !== upper && ch === lower) {
-    // Distinguish cased lowercase from uncased (digits handled above;
-    // remaining single-char case mappings are lower).
-    return ch !== ch.toUpperCase() || /[a-z]/i.test(ch) ? 'lower' : 'other';
-  }
+  if (ch !== upper && ch === lower) return 'lower';
   if (ch >= '0' && ch <= '9') return 'digit';
   return 'other';
 }
@@ -141,8 +145,10 @@ export function codeTokenizer(text: string, options?: CodeTokenizerOptions): str
     let start = 0;
     const flush = (end: number): void => {
       if (end > start) {
-        const piece = chars.slice(start, end).join('');
-        if (piece.length >= (minLen as number) && piece.length > 0) out.push(piece);
+        // Codepoint-aware length gate (UTF-16 `String.length` miscounts
+        // astral symbols, e.g. 'a😀b'.length === 4 for 3 codepoints).
+        const pieceChars = chars.slice(start, end);
+        if (pieceChars.length >= (minLen as number)) out.push(pieceChars.join(''));
       }
       start = end;
     };
@@ -252,13 +258,19 @@ export function hasAnyHook<TDoc>(hooks: SearchExtensionHooks<TDoc> | undefined):
  * Stable hook identifier: explicit `hookId` property when set (hosts should
  * assign `myScorer.hookId = 'recency-v1'` for restore stability), else
  * `function.name`, else `'anonymous'`.
+ *
+ * Name-derived IDs collide across distinct functions sharing an inferred name
+ * (e.g. two modules each exporting `const tokenizer = ...`, both inferring
+ * `name === 'tokenizer'`) and all truly anonymous closures map to
+ * `'anonymous'`. Treat `'anonymous'` as fail-open: assign an explicit
+ * `hookId` whenever the hook is persisted.
  */
 export function getHookId(fn: unknown): string {
   if (typeof fn !== 'function') {
     throw new TypeError('[webgpu-search] hook must be a function.');
   }
   const f = fn as { hookId?: unknown; name?: unknown };
-  if (typeof f.hookId === 'string' && f.hookId.length > 0) return f.hookId;
+  if (typeof f.hookId === 'string' && f.hookId.trim().length > 0) return f.hookId;
   if (typeof f.name === 'string' && f.name.length > 0) return f.name;
   return 'anonymous';
 }
@@ -363,8 +375,12 @@ export function getTokenTermsForQuery(
  * Mutates `results` scores in place. Each call receives
  * `(doc, baseScore, { query, matchedField, rawScore, normalizedScore })`
  * with `rawScore === normalizedScore === baseScore`. Returns must be finite
- * numbers (caller preserves integer contracts by returning integers).
- * Hook exceptions propagate; non-finite returns throw `TypeError`.
+ * integers (the unified `SearchResultItem` contract is descending normalized
+ * integer scores; floats throw `TypeError` fail-closed). All hooks must be
+ * pure and deterministic: `filterPredicate` runs in engine-dependent order
+ * (GPU result order vs parity row order), so non-deterministic hooks diverge
+ * across engines.
+ * Hook exceptions propagate; non-finite / non-integer returns throw `TypeError`.
  */
 export function applyScoringHook<TDoc>(
   results: DocumentSearchResultItem<TDoc>[],
@@ -389,8 +405,8 @@ export function applyScoringHook<TDoc>(
       baseScore,
       matchInfo
     );
-    if (typeof next !== 'number' || !Number.isFinite(next)) {
-      throw new TypeError('[webgpu-search] extensions.scoringHook must return a finite number.');
+    if (typeof next !== 'number' || !Number.isFinite(next) || !Number.isInteger(next)) {
+      throw new TypeError('[webgpu-search] extensions.scoringHook must return a finite integer.');
     }
     item.score = next;
   }
@@ -399,7 +415,12 @@ export function applyScoringHook<TDoc>(
 /**
  * Apply a post-processing hook as the final result transformation.
  * Returns the hook output (may reorder, filter, or augment). Throws
- * `TypeError` when the hook returns a non-array.
+ * `TypeError` when the hook returns a non-array. Hook exceptions propagate.
+ *
+ * `postProcess` affects only `results`: `totalMatches` / `candidateCount` /
+ * `hasOverflow` are snapshotted pre-pipeline, and `facets` / `suggestions`
+ * ignore it (suggestions are index-wide by design). On empty no-hit paths
+ * (empty query / corpus / empty filter) `postProcess` never runs.
  */
 export function applyPostProcess<TDoc>(
   results: DocumentSearchResultItem<TDoc>[],

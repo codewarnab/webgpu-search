@@ -348,6 +348,18 @@ export function alignHighlights(
   query: string,
   options: AlignHighlightOptions = {}
 ): HighlightRange[] {
+  // v0.4 M6: fail-closed custom tokenizer terms validation before any early
+  // exit so malformed overrides throw identically on empty corpora/queries.
+  if (options.tokenTermsOverride !== undefined) {
+    if (!Array.isArray(options.tokenTermsOverride)) {
+      throw new TypeError('[webgpu-search] tokenTermsOverride must be an array of Uint32Array.');
+    }
+    for (let i = 0; i < options.tokenTermsOverride.length; i++) {
+      if (!(options.tokenTermsOverride[i] instanceof Uint32Array)) {
+        throw new TypeError('[webgpu-search] tokenTermsOverride entries must be Uint32Array.');
+      }
+    }
+  }
   if (typeof raw !== 'string' || typeof query !== 'string') return [];
   if (raw.length === 0 || query.length === 0) return [];
 
@@ -372,19 +384,6 @@ export function alignHighlights(
   if (qLen === 0) return [];
 
   const mode = options.mode ?? 'fuzzy';
-
-  // v0.4 M6: fail-closed custom tokenizer terms validation (even when the
-  // corpus would otherwise take an early exit).
-  if (options.tokenTermsOverride !== undefined) {
-    if (!Array.isArray(options.tokenTermsOverride)) {
-      throw new TypeError('[webgpu-search] tokenTermsOverride must be an array of Uint32Array.');
-    }
-    for (let i = 0; i < options.tokenTermsOverride.length; i++) {
-      if (!(options.tokenTermsOverride[i] instanceof Uint32Array)) {
-        throw new TypeError('[webgpu-search] tokenTermsOverride entries must be Uint32Array.');
-      }
-    }
-  }
 
   // Per-mode length gates (score-highlight symmetry): the old global
   // `tokenCount < qLen` gate broke token (multi-term), prefix
