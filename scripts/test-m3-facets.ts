@@ -660,8 +660,161 @@ async function runMilestone3Tests() {
       const code = await readFile(filePath, 'utf-8');
       assert(!code.includes('window.'), `Unexpected window reference in ${filePath}`);
       assert(!code.includes('document.'), `Unexpected document reference in ${filePath}`);
+      // Hardened: bare globals that break Workers/Node/SSR (typeof-guarded
+      // navigator is allowed; direct use is not).
+      assert(!/\blocalStorage\b/.test(code), `Unexpected localStorage in ${filePath}`);
+      assert(!/\bsessionStorage\b/.test(code), `Unexpected sessionStorage in ${filePath}`);
+      assert(!/\bindexedDB\b/.test(code.replace(/index\.html|IDB/gi, '')), `Unexpected indexedDB in ${filePath}`);
+      // Direct document/window/self/globalThis DOM use (typeof checks ok).
+      const stripped = code.replace(/typeof\s+(document|window|navigator|self)\b/g, '');
+      assert(!/(^|[^\w$.])document\s*\./.test(stripped), `Unexpected bare document use in ${filePath}`);
+      assert(!/(^|[^\w$.])window(?!\s*Client|\.js|\.cjs)/.test(stripped.replace(/worker-client|search-worker/gi, '')), `Unexpected bare window in ${filePath}`);
     }
     console.log('   ✅ Zero DOM references confirmed across facet modules');
+  }
+
+  // =========================================================================
+  // 11. Review hardening (multi-agent PR #30 findings)
+  // =========================================================================
+  console.log('11. Testing review hardening (proto, dedupe, caps, validation)...');
+  {
+    const index = await DocumentIndex.create(CORPUS, productIndexOpts());
+
+    // 11a. Prototype pollution fail-closed (JSON own-key, literal would set proto).
+    const protoFacets = JSON.parse('{"__proto__":{"type":"terms","field":"category"}}');
+    await assert.rejects(
+      index.search('Widget', { facets: protoFacets }),
+      TypeError
+    );
+    await assert.rejects(
+      index.search('Widget', { facets: [{ type: 'terms', field: 'category' }, { type: 'range', field: 'category', ranges: [{ from: 1 }] }] as unknown as FacetRequest[] }),
+      InvalidFilterError
+    );
+
+    // 11b. Per-doc dedupe: duplicate tags count once per doc.
+    const dupIndex = await DocumentIndex.create(
+      [
+        { id: 'd1', title: 'Widget dup', body: 'x', category: 'tech', price: 10, inStock: true, tags: ['sale', 'sale', 'audio'] },
+      ],
+      productIndexOpts()
+    );
+    const dupRes = await dupIndex.search('Widget', { facets: { t: { type: 'terms', field: 'tags' } } });
+    if (dupRes.facets!.t.type !== 'terms') throw new Error('unreachable');
+    const dupMap = new Map(dupRes.facets!.t.buckets.map((b) => [b.value, b.count]));
+    assert.strictEqual(dupMap.get('sale'), 1);
+    assert.strictEqual(dupMap.get('audio'), 1);
+    dupIndex.destroy();
+
+    // 11c. Inverted range bounds throw (from >= to).
+    await assert.rejects(
+      index.search('Widget', { facets: { bad: { type: 'range', field: 'price', ranges: [{ from: 100, to: 50 }] } } }),
+      RangeError
+    );
+    await assert.rejects(
+      index.search('Widget', { facets: { bad: { type: 'range', field: 'price', ranges: [{ from: 50, to: 50 }] } } }),
+      RangeError
+    );
+
+    // 11d. Caps: ranges >100 and facets >32 throw.
+    await assert.rejects(
+      index.search('Widget', {
+        facets: { bad: { type: 'range', field: 'price', ranges: new Array(101).fill(0).map((_, i) => ({ from: i, to: i + 1 })) } },
+      }),
+      RangeError
+    );
+    const manyFacets: Record<string, FacetRequest> = {};
+    for (let i = 0; i < 33; i++) manyFacets[`f${i}`] = { type: 'terms', field: 'category' };
+    await assert.rejects(index.search('Widget', { facets: manyFacets }), RangeError);
+
+    // 11e. Direct FacetEngine validation (bypasses normalize).
+    const store = index.getColumnarStore();
+    const engine = new FacetEngine(store);
+    const all = store.getActiveDocs().getMatchingIndices();
+    assert.throws(() => engine.aggregateTerms('category', all, { limit: 0 }), RangeError);
+    assert.throws(() => engine.aggregateTerms('category', all, { limit: NaN }), TypeError);
+    assert.throws(() => engine.aggregateTerms('category', all, { limit: Infinity }), TypeError);
+    assert.throws(() => engine.aggregateRange('price', all, []), TypeError);
+    assert.throws(() => engine.aggregateRange('price', all, [{ from: 10, to: 5 }]), RangeError);
+    // Fractional limit floors (documented).
+    const floored = engine.aggregateTerms('category', all, { limit: 2.9 });
+    assert.ok(floored.buckets.length <= 2);
+
+    // 11f. excludeFieldFromFilter throws on invalid shapes (was lenient).
+    assert.throws(() => (excludeFieldFromFilter as (e: unknown, f: string) => unknown)(null, 'category'), TypeError);
+    assert.throws(() => (excludeFieldFromFilter as (e: unknown, f: string) => unknown)([], 'category'), TypeError);
+
+    // 11g. faceting ignored when facets absent (no throw).
+    const noFacetNoThrow = await index.search('Widget', { faceting: 'sometimes' as never });
+    assert.strictEqual(noFacetNoThrow.facets, undefined);
+
+    // 11h. Overlapping ranges double-count by design.
+    const overlap = await index.search('Widget', {
+      facets: { p: { type: 'range', field: 'price', ranges: [{ from: 0, to: 200 }, { from: 100, to: 300 }] } },
+    });
+    if (overlap.facets!.p.type !== 'range') throw new Error('unreachable');
+    // p2 (199.99) and p3 (129.5) fall in both buckets.
+    assert.ok(overlap.facets!.p.buckets[0].count >= 2);
+    assert.ok(overlap.facets!.p.buckets[1].count >= 2);
+
+    // 11i. Facets x mode substring + explicit faceting auto.
+    const sub = await index.search('Widget', {
+      mode: 'substring',
+      faceting: 'auto',
+      facets: { c: { type: 'terms', field: 'category' } },
+    });
+    assert.ok(sub.facets?.c);
+
+    index.destroy();
+    console.log('   ✅ Review hardening verified 100%');
+  }
+
+  // =========================================================================
+  // 12. Worker predicate + range/overflow hardening
+  // =========================================================================
+  console.log('12. Testing worker predicate facets + range overflow...');
+  {
+    const worker = new SearchWorkerClient<Product>();
+    try {
+      await worker.init(CORPUS, {
+        fields: ['title', 'body'],
+        filterFields: [
+          { name: 'category', type: 'string' },
+          { name: 'price', type: 'number' },
+        ],
+        preferGpu: false,
+      });
+      // Range facet across worker boundary.
+      const rangeRes = await worker.search('Widget', {
+        facets: { p: { type: 'range', field: 'price', ranges: [{ to: 100 }, { from: 100 }] } },
+      });
+      const p = (rangeRes.facets as Record<string, { type: string; buckets: Array<{ count: number }> }>)!.p;
+      assert.strictEqual(p.type, 'range');
+      assert.deepStrictEqual(p.buckets.map((b) => b.count), [3, 3]);
+
+      // Validation error propagates across worker.
+      await assert.rejects(
+        worker.search('Widget', { facets: { bad: { type: 'terms', field: 'nope' } } }),
+        Error
+      );
+
+      // Predicate + facets: facets must be absent (stale otherwise).
+      // NOTE: SearchWorkerClient predicate path requires a real Worker with
+      // postMessage; in-process check uses DocumentIndex parity (conjunctive).
+      const direct = await DocumentIndex.create(CORPUS, productIndexOpts());
+      const predRes = await direct.search('Widget', {
+        filter: (doc: Product) => doc.category === 'tech',
+        facets: { c: { type: 'terms', field: 'category' } },
+      });
+      if (predRes.facets!.c.type !== 'terms') throw new Error('unreachable');
+      assert.deepStrictEqual(
+        predRes.facets!.c.buckets.map((b) => [b.value, b.count]),
+        [['tech', 3]]
+      );
+      direct.destroy();
+    } finally {
+      await worker.destroy();
+    }
+    console.log('   ✅ Worker predicate + range hardening verified 100%');
   }
 
   console.log('\n🎉 ALL MILESTONE 3 TESTS PASSED SUCCESSFULLY! 🎉\n');

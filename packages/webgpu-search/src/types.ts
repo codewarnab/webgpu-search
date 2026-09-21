@@ -175,9 +175,12 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
    * evaluated via columnar bitsets.
    */
   filter?: ((doc: TDoc) => boolean) | FilterExpression;
-  /** Facet aggregation requests to evaluate over matching candidates */
+  /** Facet aggregation requests to evaluate over matching candidates.
+   * Note: `filter: fn` + `facets` over SearchWorkerClient drops `facets`
+   * fail-closed (function closures cannot cross the worker boundary, so
+   * worker-computed facets would reflect the unfiltered set). */
   facets?: Record<string, FacetRequest> | FacetRequest[];
-  /** Faceting mode: force exact CPU candidate evaluation even if GPU buffer overflowed */
+  /** Faceting mode: force exact CPU candidate evaluation even if GPU buffer overflowed. Ignored unless `facets` is requested. */
   faceting?: 'auto' | 'force-exact';
   /** Typo tolerance configuration */
   typoTolerance?: TypoToleranceOptions | boolean;
@@ -464,6 +467,7 @@ export type DocumentFilterField<TDoc> = (keyof TDoc & string) | FilterFieldDefin
 export interface TermsFacetRequest {
   type: 'terms';
   field: string;
+  /** Max buckets; default 10. Fractional values are floored; must be >= 1. */
   limit?: number; // default: 10
   sortBy?: 'count' | 'value';
 }
@@ -493,6 +497,12 @@ export interface TermsFacetBucket {
 export interface TermsFacetResult {
   type: 'terms';
   field: string;
+  /**
+   * Exactness is engine-relative: false means exact w.r.t. the serving
+   * engine's match set (parity CPU, ufuzzy CPU, or GPU pool), not identical
+   * across `cpuAlgorithm: parity | ufuzzy` or GPU vs CPU (scorers may diverge
+   * row-for-row). True only on GPU overflow without `force-exact`.
+   */
   isApproximate: boolean;
   buckets: TermsFacetBucket[];
 }
@@ -507,6 +517,11 @@ export interface RangeFacetBucketResult {
 export interface RangeFacetResult {
   type: 'range';
   field: string;
+  /**
+   * Engine-relative exactness (see TermsFacetResult): false means exact over
+   * the serving engine's match set. Overlapping ranges double-count by design
+   * (independent half-open buckets).
+   */
   isApproximate: boolean;
   buckets: RangeFacetBucketResult[];
 }

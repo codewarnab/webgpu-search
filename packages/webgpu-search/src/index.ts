@@ -82,6 +82,8 @@ export {
   excludeFieldFromFilter,
   filterReferencesField,
   DEFAULT_TERMS_LIMIT,
+  MAX_FACET_REQUESTS,
+  MAX_RANGE_BUCKETS,
   type NormalizedFacet,
 } from './facets/facet-engine';
 

@@ -59,7 +59,6 @@ import type {
   SearchTimings,
   SerializeDocumentIndexOptions,
   DocumentIndexSchema,
-  FacetRequest,
   FacetResult,
   FilterExpression,
   FilterFieldDefinition,
@@ -518,12 +517,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     // M3 (Issue #10): validate facet contracts fail-fast, before early exits.
     // An empty facet list is equivalent to not requesting facets (absent key).
-    const facetSpec = normalizeFacetRequests(
-      facets as Record<string, FacetRequest> | FacetRequest[] | undefined
-    );
+    // `faceting` is ignored unless facets are requested (no throw on absent).
+    const facetSpec = normalizeFacetRequests(facets);
     const wantsFacets = facetSpec !== undefined && facetSpec.length > 0;
     let facetingMode: 'auto' | 'force-exact' = 'auto';
-    if (faceting !== undefined) {
+    if (wantsFacets && faceting !== undefined) {
       if (faceting !== 'auto' && faceting !== 'force-exact') {
         throw new TypeError(`[webgpu-search] Invalid faceting option: "${String(faceting)}". Must be 'auto' or 'force-exact'.`);
       }
@@ -743,6 +741,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         // approximate over the top pool on overflow unless force-exact rescan.
         let gpuFacets: Record<string, FacetResult> | undefined = undefined;
         if (wantsFacets && facetEngine && facetSpec && queryMatchedAll !== null) {
+          const facetT0 = nowMs();
           let facetCandidates: Iterable<number> = queryMatchedAll;
           let facetIsApproximate = gpuResult.hasOverflow;
           if (gpuResult.hasOverflow && facetingMode === 'force-exact') {
@@ -758,14 +757,17 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               this.candidateCapacity,
               allowedFieldIndices,
               this.tombstones,
-              undefined
+              undefined,
+              true
             );
-            facetCandidates = exact.allMatchedDocIndices;
+            facetCandidates = exact.allMatchedDocIndices ?? exact.results.map((r) => r.docIndex);
             facetIsApproximate = false;
           }
           gpuFacets = this.buildFacetResults(
             facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, facetIsApproximate
           );
+          const facetMs = nowMs() - facetT0;
+          gpuResult.timings.totalMs += facetMs;
         }
 
         return {
@@ -823,7 +825,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
         for (const hit of legacyResult.results) {
           const dIdx = hit.index;
-          if (legacyMatchedAll !== null && this.records[dIdx]) {
+          // Explicit tombstone guard for symmetry with GPU/parity paths:
+          // removed docs have null records (columnar presence also cleared).
+          if (!this.records[dIdx] || this.docIds[dIdx] === null || this.docIds[dIdx] === undefined) continue;
+          if (legacyMatchedAll !== null) {
             legacyMatchedAll.add(dIdx);
           }
           if (filterBitset && !filterBitset.has(dIdx)) continue;
@@ -895,14 +900,18 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
       const results = hits.slice(0, clampedLimit).map((h) => h.item);
       this.enrichHighlights(results, query, mode, options);
-      const durationMs = nowMs() - t0;
+      const preFacetMs = nowMs() - t0;
 
-      // M3: CPU evaluates the full match set, so legacy facets are exact.
+      // M3: CPU evaluates the full match set, so legacy facets are exact
+      // w.r.t. the serving (ufuzzy/native) match set; see types for caveat.
       let legacyFacets: Record<string, FacetResult> | undefined = undefined;
+      let legacyFacetMs = 0;
       if (wantsFacets && facetEngine && facetSpec && legacyMatchedAll !== null) {
+        const fT0 = nowMs();
         legacyFacets = this.buildFacetResults(
           facetEngine, facetSpec, legacyMatchedAll, structuredFilter, filterPredicate, false
         );
+        legacyFacetMs = nowMs() - fT0;
       }
 
       return {
@@ -918,7 +927,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           encodeSubmitMs: 0,
           gpuExecutionMs: null,
           readbackMs: 0,
-          totalMs: durationMs,
+          totalMs: preFacetMs + legacyFacetMs,
           gpuDispatchMs: 0
         },
         profileId: this.profileId,
@@ -929,7 +938,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       };
     }
 
-    // Default parity CPU algorithm
+    // Default parity CPU algorithm (collect full match set only when faceting).
     const parityResult = searchMultiFieldCpuReference(
       this.records.length,
       this.sortedFields,
@@ -949,7 +958,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           return doc !== null && doc !== undefined && filterPredicate(doc);
         }
         return true;
-      } : undefined
+      } : undefined,
+      wantsFacets
     );
 
     if (this.isDestroyed || this.generation !== gen) {
@@ -976,13 +986,16 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     // M3: exact facet aggregation. Disjunctive facets need the unfiltered
     // query match set, so a structured filter triggers one extra unfiltered
-    // parity scan (results above stay filtered and correctly ranked). The
-    // rescan wall-clock is included in totalMs; M7 will attribute facet work
-    // to diagnostics.timings.facetingMs.
+    // parity scan (results above stay filtered and correctly ranked; O(F*n)
+    // per-facet re-evaluation + F bitset allocs by design for disjunctive
+    // semantics). Wall-clock facet work is included in totalMs; M7 will
+    // attribute facet work to diagnostics.timings.facetingMs.
     let parityFacets: Record<string, FacetResult> | undefined = undefined;
+    const facetT0 = nowMs();
     let facetScanMs = 0;
     if (wantsFacets && facetEngine && facetSpec) {
-      let facetCandidates: Iterable<number> = parityResult.allMatchedDocIndices;
+      let facetCandidates: Iterable<number> =
+        parityResult.allMatchedDocIndices ?? parityResult.results.map((r) => r.docIndex);
       if (structuredFilter !== undefined) {
         const unfiltered = searchMultiFieldCpuReference(
           this.records.length,
@@ -996,22 +1009,24 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           this.candidateCapacity,
           allowedFieldIndices,
           this.tombstones,
-          undefined
+          undefined,
+          true
         );
-        facetCandidates = unfiltered.allMatchedDocIndices;
+        facetCandidates = unfiltered.allMatchedDocIndices ?? unfiltered.results.map((r) => r.docIndex);
         facetScanMs = unfiltered.durationMs;
       }
       parityFacets = this.buildFacetResults(
         facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, false
       );
     }
+    const facetMs = wantsFacets ? (nowMs() - facetT0 - facetScanMs) : 0;
 
     const timings: SearchTimings = {
       queryUploadMs: 0,
       encodeSubmitMs: 0,
       gpuExecutionMs: null,
       readbackMs: 0,
-      totalMs: parityResult.durationMs + facetScanMs,
+      totalMs: parityResult.durationMs + facetScanMs + facetMs,
       gpuDispatchMs: 0
     };
 
@@ -1046,7 +1061,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
    * doc set with disjunctive filter exclusion. Each facet ignores structured
    * filter clauses on its own field (`excludeFieldFromFilter`) while keeping
    * all other clauses; function predicates stay conjunctive. `or`/`not`
-   * branches referencing the facet field are kept verbatim (conservative).
+   * branches referencing the facet field are kept verbatim (conservative,
+   * aliased). Cost is O(F*n) with F bitset allocs plus an optional extra
+   * unfiltered parity scan when a structured filter is present.
    */
   private buildFacetResults(
     facetEngine: FacetEngine<TDoc>,
@@ -1073,7 +1090,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           candidates = base.filter((d) => mask.has(d));
         }
       }
-      out[facet.name] = facetEngine.aggregateOne(facet, candidates, isApproximate);
+      const result = facetEngine.aggregateOne(facet, candidates, isApproximate);
+      if (facet.name === '__proto__') {
+        Object.defineProperty(out, facet.name, { value: result, enumerable: true, configurable: true, writable: true });
+      } else {
+        out[facet.name] = result;
+      }
     }
     return out;
   }

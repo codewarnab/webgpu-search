@@ -84,6 +84,12 @@ jobs:
         # fail-closed in-harness: bad env or empty shard exits non-zero).
         run: bun run test:parity
 
+      - name: Run M2 Structured Filter Tests
+        run: bun run test:filter
+
+      - name: Run M3 Facet Aggregation Tests
+        run: bun run test:facets
+
       - name: Setup Chrome (browser regression gate)
         id: setup-chrome
         uses: browser-actions/setup-chrome@v1

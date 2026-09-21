@@ -139,7 +139,10 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
                 }
               }
 
-              // Apply predicate filter if configured as a function
+              // Apply predicate filter if configured as a function.
+              // Facets computed worker-side are over the unfiltered set and
+              // would go stale, so drop them fail-closed (local path applies
+              // the predicate conjunctively in buildFacetResults).
               if (typeof pendingQuery.filter === 'function') {
                 const predicate = pendingQuery.filter;
                 searchResp.results = searchResp.results.filter((item) => predicate(item.doc));
@@ -147,6 +150,9 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
                   searchResp.results = searchResp.results.slice(0, pendingQuery.limit);
                 }
                 searchResp.totalMatches = searchResp.results.length;
+                if ('facets' in searchResp) {
+                  delete (searchResp as { facets?: unknown }).facets;
+                }
               }
             }
             pendingQuery.resolve(searchResp);
@@ -446,9 +452,13 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     }
 
     const isPredicate = typeof filter === 'function';
-    // Avoid candidate starvation when predicate filter is applied on main thread
+    // Avoid candidate starvation when predicate filter is applied on main thread.
+    // Facets are withheld from the worker when a predicate is present: the
+    // worker cannot apply the closure, so any worker-computed facets would
+    // reflect the unfiltered distribution (stale). Caller gets results-only.
+    const { facets: _omitFacets, faceting: _omitFaceting, ...nonFacetRest } = restOptions as Record<string, unknown>;
     const workerOptions = {
-      ...restOptions,
+      ...(isPredicate ? nonFacetRest : restOptions),
       ...(workerBudget ? { budget: workerBudget } : {}),
       ...(filter && !isPredicate ? { filter } : {}),
       limit: isPredicate ? ((options as any)?.candidateCapacity ?? 8192) : requestedLimit
