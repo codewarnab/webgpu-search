@@ -128,7 +128,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
           try {
             const searchResp = resp.result as DocumentSearchResponse<TDoc>;
             if (searchResp && Array.isArray(searchResp.results)) {
-              // String-isolated enrichment: re-attach original doc
+              // String-isolated enrichment: re-attach original docs.
               for (let i = 0; i < searchResp.results.length; i++) {
                 const item = searchResp.results[i];
                 if (item.doc === undefined || item.doc === null) {
@@ -138,11 +138,27 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
                   }
                 }
               }
+              if (Array.isArray(searchResp.suggestions)) {
+                for (let i = 0; i < searchResp.suggestions.length; i++) {
+                  const s = searchResp.suggestions[i];
+                  if (s.doc === undefined || s.doc === null) {
+                    const key = s.docId ?? (s as unknown as { id?: DocumentId }).id;
+                    if (key !== undefined) {
+                      const doc = this.docMap.get(key);
+                      if (doc !== undefined) {
+                        s.doc = doc;
+                      }
+                    }
+                  }
+                }
+              }
 
               // Apply predicate filter if configured as a function.
               // Facets computed worker-side are over the unfiltered set and
               // would go stale, so drop them fail-closed (local path applies
               // the predicate conjunctively in buildFacetResults).
+              // Suggestions stay index-wide by design (filters never narrow
+              // suggestions), so they are kept as returned.
               if (typeof pendingQuery.filter === 'function') {
                 const predicate = pendingQuery.filter;
                 searchResp.results = searchResp.results.filter((item) => predicate(item.doc));

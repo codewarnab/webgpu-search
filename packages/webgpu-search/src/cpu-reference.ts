@@ -14,9 +14,15 @@
  * Portable: no DOM refs. Parity path uses scalar `===` only.
  */
 
-import type { SearchResultItem, SearchMode, TokenMatchOptions, PrefixSearchOptions, TypoToleranceOptions } from './types';
+import type { SearchResultItem, SearchMode, TieBreakerCriterion, TokenMatchOptions, PrefixSearchOptions, TypoToleranceOptions } from './types';
 import { clampLimit, nowMs } from './runtime-guards';
 import { IncompatibleOptionError } from './errors';
+import {
+  compareRanked,
+  isExactTokenMatch,
+  normalizeTieBreakers,
+  type RankableCandidate,
+} from './ranking';
 import {
   normalizeTypoTolerance,
   allowedDistanceForTerm,
@@ -336,7 +342,18 @@ export interface FieldScoreDefinition {
  * aggregates matching fields per document, and returns ranked document hits.
  * v0.4 M4: token `minMatchCount` quorums evaluate per field-row (best-row-wins
  * per document); cross-row term coverage does not combine.
+ * v0.4 M5: optional deterministic ranking — when `docIds` is provided, hits
+ * sort by the M5 hierarchy (score DESC, weight DESC, exact DESC, length ASC,
+ * id ASC) with `tieBreakers` customizing the order; when omitted, the legacy
+ * two-key order (score DESC, docIndex ASC) is kept for backward compatibility
+ * with direct low-level callers.
  */
+export interface MultiFieldRankingOptions {
+  tieBreakers?: TieBreakerCriterion[];
+  /** Parallel to the document space; null/undefined holes mark removed docs. */
+  docIds?: ReadonlyArray<string | number | null | undefined>;
+}
+
 export function searchMultiFieldCpuReference(
   docCount: number,
   fields: readonly FieldScoreDefinition[],
@@ -351,7 +368,8 @@ export function searchMultiFieldCpuReference(
   tombstonedRows?: ReadonlySet<number>,
   filterDoc?: (docIndex: number) => boolean,
   collectAllMatched: boolean = true,
-  modeOptions?: CpuModeOptions
+  modeOptions?: CpuModeOptions,
+  rankingOptions?: MultiFieldRankingOptions
 ): MultiFieldCpuReferenceOutput {
   const t0: number = nowMs();
   if (mode !== 'substring' && mode !== 'fuzzy' && mode !== 'token' && mode !== 'prefix') {
@@ -379,10 +397,13 @@ export function searchMultiFieldCpuReference(
   }
 
   // Aggregate field matches per document:
-  // docIndex -> { bestScore, bestFieldIdx, fieldScores: Map<fieldIdx, weightedScore> }
+  // docIndex -> { bestScore, bestFieldIdx, bestRowIdx, fieldScores: Map<fieldIdx, weightedScore> }
+  // bestRowIdx tracks the winning row so M5 ranking can derive exactness and
+  // matched length from the same row that produced the best score.
   const docMatches = new Map<number, {
     bestScore: number;
     bestFieldIdx: number;
+    bestRowIdx: number;
     fieldScores: Map<number, number>;
   }>();
 
@@ -422,6 +443,7 @@ export function searchMultiFieldCpuReference(
         entry = {
           bestScore: weightedScore,
           bestFieldIdx: fIdx,
+          bestRowIdx: r,
           fieldScores: new Map<number, number>()
         };
         entry.fieldScores.set(fIdx, weightedScore);
@@ -434,12 +456,58 @@ export function searchMultiFieldCpuReference(
         ) {
           entry.bestScore = weightedScore;
           entry.bestFieldIdx = fIdx;
+          entry.bestRowIdx = r;
         }
       }
     }
   }
 
   const hits: MultiFieldHit[] = [];
+  // M5 ranking keys per hit (parallel to hits array when docIds provided).
+  const rankKeys: RankableCandidate[] = [];
+  // Fail-closed: a provided hierarchy is validated even when docIds are
+  // absent (legacy 2-key order still applies, but garbage must not pass
+  // silently), and docIds must parallel the document space when given.
+  if (rankingOptions?.tieBreakers !== undefined) {
+    normalizeTieBreakers(rankingOptions.tieBreakers);
+  }
+  const useDeterministicRanking = rankingOptions?.docIds !== undefined;
+  if (useDeterministicRanking) {
+    const docIds = rankingOptions?.docIds as ReadonlyArray<string | number | null | undefined>;
+    if (docIds.length !== docCount) {
+      throw new RangeError(
+        `[webgpu-search] ranking docIds length (${docIds.length}) must equal docCount (${docCount}).`
+      );
+    }
+    for (let i = 0; i < docIds.length; i++) {
+      const id = docIds[i];
+      // Null/undefined holes mark removed docs (tombstones never produce
+      // hits, so they never reach the comparator); only validate live IDs.
+      if (id === null || id === undefined) continue;
+      if (typeof id === 'number') {
+        if (!Number.isFinite(id)) {
+          throw new TypeError(
+            `[webgpu-search] ranking docIds[${i}] must be a finite number, got ${String(id)}.`
+          );
+        }
+      } else if (typeof id !== 'string' || id.length === 0) {
+        throw new TypeError(
+          `[webgpu-search] ranking docIds[${i}] must be a non-empty string or finite number, got ${String(id)}.`
+        );
+      }
+    }
+    for (let i = 0; i < fields.length; i++) {
+      const w = fields[i].weight;
+      if (typeof w !== 'number' || !Number.isFinite(w) || w <= 0) {
+        throw new RangeError(
+          `[webgpu-search] Field "${fields[i].name}" weight must be a positive finite number, got ${String(w)}.`
+        );
+      }
+    }
+  }
+  const tieBreakers: readonly TieBreakerCriterion[] = useDeterministicRanking
+    ? normalizeTieBreakers(rankingOptions?.tieBreakers)
+    : [];
   for (const [dIdx, entry] of docMatches.entries()) {
     const primaryField = fields[entry.bestFieldIdx];
     const auxMatches: MultiFieldMatch[] = [];
@@ -450,7 +518,7 @@ export function searchMultiFieldCpuReference(
     }
     if (auxMatches.length > 1) {
       auxMatches.sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
+        if (b.score !== a.score) return b.score > a.score ? 1 : -1;
         return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
       });
     }
@@ -461,15 +529,43 @@ export function searchMultiFieldCpuReference(
       matchedField: primaryField.name,
       matches: auxMatches.length > 0 ? auxMatches : undefined
     });
+    if (useDeterministicRanking) {
+      const bestRowTokens = rowTokens[entry.bestRowIdx] as Uint32Array;
+      const hitId = (rankingOptions?.docIds as ReadonlyArray<string | number | null | undefined>)[dIdx];
+      if (hitId === null || hitId === undefined) {
+        throw new TypeError(
+          `[webgpu-search] ranking docIds[${dIdx}] is missing for a matched entry.`
+        );
+      }
+      rankKeys.push({
+        score: entry.bestScore,
+        fieldWeight: primaryField.weight,
+        isExactMatch: isExactTokenMatch(bestRowTokens, queryTokens),
+        matchedLength: bestRowTokens.length,
+        id: hitId as string | number,
+        docIndex: dIdx
+      });
+    }
   }
 
   const totalMatches = hits.length;
-  // Two-key sort: score descending, docIndex ascending
-  hits.sort((a, b) => {
-    if (b.score !== a.score) return b.score > a.score ? 1 : -1;
-    if (a.docIndex !== b.docIndex) return a.docIndex > b.docIndex ? 1 : -1;
-    return 0;
-  });
+  if (useDeterministicRanking) {
+    // M5 deterministic order (score, weight, exact, length, id, docIndex).
+    const order = hits.map((_, i) => i);
+    order.sort((ia, ib) =>
+      compareRanked(rankKeys[ia] as RankableCandidate, rankKeys[ib] as RankableCandidate, tieBreakers)
+    );
+    const sortedHits = order.map((i) => hits[i] as MultiFieldHit);
+    hits.length = 0;
+    for (let i = 0; i < sortedHits.length; i++) hits.push(sortedHits[i] as MultiFieldHit);
+  } else {
+    // Legacy two-key sort: score descending, docIndex ascending
+    hits.sort((a, b) => {
+      if (b.score !== a.score) return b.score > a.score ? 1 : -1;
+      if (a.docIndex !== b.docIndex) return a.docIndex > b.docIndex ? 1 : -1;
+      return 0;
+    });
+  }
 
   const capped = clampLimit(limit);
   const results = hits.length > capped ? hits.slice(0, capped) : hits;

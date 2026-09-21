@@ -5,6 +5,8 @@ import { packUnicodeToGPUBuffer, checkMemoryBudget } from './buffer';
 import { normalizeText } from './unicode-preprocess';
 import {
   searchMultiFieldCpuReference,
+  scoreFuzzyTokens,
+  scoreSubstringTypoTokens,
   type FieldScoreDefinition,
   type CpuModeOptions
 } from './cpu-reference';
@@ -19,8 +21,19 @@ import {
 import {
   normalizePrefixOptions,
   assertPrefixLengthForQuery,
+  scorePrefixTokens,
   type NormalizedPrefixOptions
 } from './modes/prefix-search';
+import {
+  compareRanked,
+  isExactTokenMatch,
+  normalizeTieBreakers,
+  type RankableCandidate
+} from './ranking';
+import {
+  normalizeSuggestOptions,
+  type NormalizedSuggestOptions
+} from './suggest';
 import {
   clampLimit,
   throwIfAborted,
@@ -72,6 +85,10 @@ import type {
   SearchMode,
   SearchTimings,
   SerializeDocumentIndexOptions,
+  SuggestOptions,
+  SuggestionItem,
+  SuggestResponse,
+  TieBreakerCriterion,
   DocumentIndexSchema,
   FacetResult,
   FilterExpression,
@@ -204,8 +221,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     // Field-stratified packing: sort fields descending by weight
     this.sortedFields = [...normalized].sort((a, b) => {
-      if (b.weight !== a.weight) return b.weight - a.weight;
-      return a.originalIndex - b.originalIndex;
+      if (b.weight !== a.weight) return b.weight > a.weight ? 1 : -1;
+      if (a.originalIndex !== b.originalIndex) return a.originalIndex > b.originalIndex ? 1 : -1;
+      return 0;
     });
 
     for (let i = 0; i < this.sortedFields.length; i++) {
@@ -597,6 +615,57 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       facetEngine.validateRequests(facetSpec);
     }
 
+    // M5 (Issue #10): deterministic ranking hierarchy + inline suggest config.
+    // All scope validation (ranking, suggest, fields) is fail-closed before
+    // early exits so malformed shapes throw identically on empty and
+    // non-empty corpora/queries.
+    if (options.ranking !== undefined && (typeof options.ranking !== 'object' || options.ranking === null || Array.isArray(options.ranking))) {
+      throw new TypeError('[webgpu-search] options.ranking must be an object.');
+    }
+    const tieBreakers: TieBreakerCriterion[] = normalizeTieBreakers(
+      options.ranking?.tieBreakers
+    );
+    let suggestSpec: NormalizedSuggestOptions | undefined = undefined;
+    if (options.suggest !== undefined && options.suggest !== false) {
+      suggestSpec = normalizeSuggestOptions(options.suggest as SuggestOptions | boolean);
+      // Inline suggest inherits the search ranking hierarchy unless the
+      // suggest object carries its own explicit tieBreakers.
+      const rawSuggest = options.suggest as SuggestOptions;
+      if (
+        typeof rawSuggest === 'object' &&
+        rawSuggest !== null &&
+        rawSuggest.tieBreakers === undefined &&
+        options.ranking?.tieBreakers !== undefined
+      ) {
+        suggestSpec.tieBreakers = [...tieBreakers];
+      }
+      if (suggestSpec.field !== undefined && !this.fieldNameToIndex.has(suggestSpec.field)) {
+        throw new Error(`[webgpu-search] Unknown suggest field: "${suggestSpec.field}".`);
+      }
+    }
+    // Hoisted search-field validation (fail-closed before empty-query,
+    // empty-corpus, and empty-filter early exits below).
+    let allowedFieldIndices: Set<number> | undefined = undefined;
+    if (searchFields !== undefined) {
+      if (!Array.isArray(searchFields)) {
+        throw new TypeError('[webgpu-search] options.fields must be an array of string field names.');
+      }
+      if (searchFields.length !== 0) {
+        allowedFieldIndices = new Set<number>();
+        for (const fName of searchFields) {
+          if (typeof fName !== 'string') {
+            throw new TypeError('[webgpu-search] options.fields elements must be strings.');
+          }
+          const idx = this.fieldNameToIndex.get(fName);
+          if (idx === undefined) {
+            throw new Error(`[webgpu-search] Unknown search field: "${fName}".`);
+          }
+          allowedFieldIndices.add(idx);
+        }
+      }
+    }
+    const hasEmptyFieldList = searchFields !== undefined && searchFields.length === 0;
+
     const noHits = (q: string): DocumentSearchResponse<TDoc> => ({
       query: q,
       mode,
@@ -646,26 +715,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     if (this.idToDocIndex.size === 0) {
       return noHits(query);
     }
-
-    let allowedFieldIndices: Set<number> | undefined = undefined;
-    if (searchFields !== undefined) {
-      if (!Array.isArray(searchFields)) {
-        throw new TypeError('[webgpu-search] options.fields must be an array of string field names.');
-      }
-      if (searchFields.length === 0) {
-        return noHits(query);
-      }
-      allowedFieldIndices = new Set<number>();
-      for (const fName of searchFields) {
-        if (typeof fName !== 'string') {
-          throw new TypeError('[webgpu-search] options.fields elements must be strings.');
-        }
-        const idx = this.fieldNameToIndex.get(fName);
-        if (idx === undefined) {
-          throw new Error(`[webgpu-search] Unknown search field: "${fName}".`);
-        }
-        allowedFieldIndices.add(idx);
-      }
+    if (hasEmptyFieldList) {
+      return noHits(query);
     }
 
     // When field-restricted, route to CPU to prevent unselected high-priority
@@ -750,6 +801,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         interface RankedCandidate<TDoc> {
           dIdx: number;
           item: DocumentSearchResultItem<TDoc>;
+          rank: RankableCandidate;
         }
 
         const hits: RankedCandidate<TDoc>[] = [];
@@ -763,11 +815,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           }
           if (auxMatches.length > 1) {
             auxMatches.sort((a, b) => {
-              if (b.score !== a.score) return b.score - a.score;
+              if (b.score !== a.score) return b.score > a.score ? 1 : -1;
               return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
             });
           }
 
+          const bestRowIdx = this.docToRowIndices[dIdx]?.[entry.bestFieldIdx];
+          const bestRowTokens = bestRowIdx !== undefined ? this.rowTokens[bestRowIdx] : undefined;
           hits.push({
             dIdx,
             item: {
@@ -776,16 +830,23 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               score: entry.bestScore,
               matchedField: primaryField.name,
               matches: auxMatches.length > 0 ? auxMatches : undefined
+            },
+            rank: {
+              score: entry.bestScore,
+              fieldWeight: primaryField.weight,
+              isExactMatch: bestRowTokens !== undefined
+                ? isExactTokenMatch(bestRowTokens, normalizedQuery.tokens)
+                : false,
+              matchedLength: bestRowTokens !== undefined ? bestRowTokens.length : 0,
+              id: this.docIds[dIdx],
+              docIndex: dIdx
             }
           });
         }
 
-        // Two-key sort: score descending, docIndex ascending
-        hits.sort((a, b) => {
-          if (b.item.score !== a.item.score) return b.item.score > a.item.score ? 1 : -1;
-          if (a.dIdx !== b.dIdx) return a.dIdx > b.dIdx ? 1 : -1;
-          return 0;
-        });
+        // M5 deterministic ranking: score DESC, weight DESC, exact DESC,
+        // length ASC, id ASC (docIndex ASC implicit fallback).
+        hits.sort((a, b) => compareRanked(a.rank, b.rank, tieBreakers));
 
         const totalMatches = hits.length;
         const candidateCount = Math.min(totalMatches, this.candidateCapacity);
@@ -838,7 +899,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
           cpuAlgorithm,
-          ...(gpuFacets ? { facets: gpuFacets } : {})
+          ...(gpuFacets ? { facets: gpuFacets } : {}),
+          ...(suggestSpec
+            ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
+            : {})
         };
       } catch (err: any) {
         if (err.name === 'AbortError') {
@@ -924,6 +988,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       interface RankedLegacyCandidate<TDoc> {
         dIdx: number;
         item: DocumentSearchResultItem<TDoc>;
+        rank: RankableCandidate;
       }
 
       const hits: RankedLegacyCandidate<TDoc>[] = [];
@@ -937,10 +1002,15 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         }
         if (auxMatches.length > 1) {
           auxMatches.sort((a, b) => {
-            if (b.score !== a.score) return b.score - a.score;
+            if (b.score !== a.score) return b.score > a.score ? 1 : -1;
             return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
           });
         }
+        // Legacy ufuzzy/native scorers emit display-space scores without
+        // row-token provenance; derive exactness/length from the post-fold
+        // token streams so ties still break deterministically.
+        const legacyRow = this.docToRowIndices[dIdx]?.[entry.bestFieldIdx];
+        const legacyTokens = legacyRow !== undefined ? this.rowTokens[legacyRow] : undefined;
         hits.push({
           dIdx,
           item: {
@@ -949,15 +1019,21 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             score: entry.bestScore,
             matchedField: primaryField.name,
             matches: auxMatches.length > 0 ? auxMatches : undefined
+          },
+          rank: {
+            score: entry.bestScore,
+            fieldWeight: primaryField.weight,
+            isExactMatch: legacyTokens !== undefined
+              ? isExactTokenMatch(legacyTokens, normalizedQuery.tokens)
+              : false,
+            matchedLength: legacyTokens !== undefined ? legacyTokens.length : 0,
+            id: this.docIds[dIdx],
+            docIndex: dIdx
           }
         });
       }
 
-      hits.sort((a, b) => {
-        if (b.item.score !== a.item.score) return b.item.score > a.item.score ? 1 : -1;
-        if (a.dIdx !== b.dIdx) return a.dIdx > b.dIdx ? 1 : -1;
-        return 0;
-      });
+      hits.sort((a, b) => compareRanked(a.rank, b.rank, tieBreakers));
 
       const totalMatches = hits.length;
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
@@ -997,11 +1073,16 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         scoringVersion: SCORING_VERSION,
         cpuAlgorithm,
         fallbackReason: 'cpu-algorithm-requested',
-        ...(legacyFacets ? { facets: legacyFacets } : {})
+        ...(legacyFacets ? { facets: legacyFacets } : {}),
+        ...(suggestSpec
+          ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
+          : {})
       };
     }
 
     // Default parity CPU algorithm (collect full match set only when faceting).
+    // M5 passes the deterministic hierarchy + doc IDs so pre-truncation order
+    // already reflects (score, weight, exact, length, id).
     const parityResult = searchMultiFieldCpuReference(
       this.records.length,
       this.sortedFields,
@@ -1023,7 +1104,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         return true;
       } : undefined,
       wantsFacets,
-      cpuModeOptions
+      cpuModeOptions,
+      { tieBreakers, docIds: this.docIds as unknown as ReadonlyArray<string | number | null | undefined> }
     );
 
     if (this.isDestroyed || this.generation !== gen) {
@@ -1122,8 +1204,202 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       scoringVersion: SCORING_VERSION,
       cpuAlgorithm,
       fallbackReason: effectiveFallbackReason,
-      ...(parityFacets ? { facets: parityFacets } : {})
+      ...(parityFacets ? { facets: parityFacets } : {}),
+      ...(suggestSpec
+        ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
+        : {})
     };
+  }
+
+  /**
+   * M5 (Issue #10): first-party autocomplete / did-you-mean primitive.
+   *
+   * Scans active documents over the suggest field (or all search fields),
+   * scores each field row with the prefix scorer (`mode: 'prefix'`) or the
+   * fuzzy scorer (`mode: 'fuzzy'`; typo-tolerant substring when
+   * `fuzzyDistance > 0`), ranks with the deterministic M5 comparator, and
+   * returns the top `limit` completions with Unicode-safe highlight ranges.
+   * `prefix` yields `type: 'completion'` (including typo-tolerant prefix);
+   * `fuzzy` yields `type: 'did-you-mean'`.
+   *
+   * Suggestions are index-wide by design: search filters (structured or
+   * predicate) narrow search results but never suggestion candidates, so
+   * inline `search({ filter, suggest })` suggestions match standalone
+   * `suggest()` output for the same query and options. `search.fields`
+   * does scope suggestions unless the suggest spec carries an explicit
+   * `field`, which wins silently — pass `suggest.field` to pin the scan.
+   * Suggestion ranking uses `suggest.tieBreakers` when provided, else the
+   * inline search `ranking.tieBreakers`, else the M5 default; granularity
+   * is per (doc, field) row (a document may appear multiple times), unlike
+   * per-document best-field-wins search ranking.
+   *
+   * Suggest uses default `prefixMatch` options and only `fuzzyDistance` for
+   * typo tolerance — the search `prefixMatch`/`typoTolerance` are ignored.
+   *
+   * Latency is a single O(docs x fields) scan plus a full sort of the match
+   * set (unbounded pre-truncation by design; highlights are bounded to
+   * top-K). Measured ~35ms prefix / ~95ms fuzzy+d2 over 50k rows (25k docs
+   * x 2 fields); inline `search({ suggest })` pays both scans (~2x). There
+   * is no `AbortSignal` support on this path; per-keystroke callers should
+   * debounce. Queries longer than `QUERY_TOKENS_MAX` throw `QueryTooLongError`.
+   */
+  async suggest(
+    query: string,
+    options: SuggestOptions = {}
+  ): Promise<SuggestResponse<TDoc>> {
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    if (typeof query !== 'string') {
+      throw new TypeError(`[webgpu-search] suggest expects query: string, got ${typeof query}.`);
+    }
+    const spec = normalizeSuggestOptions(options);
+    if (spec.field !== undefined && !this.fieldNameToIndex.has(spec.field)) {
+      throw new Error(`[webgpu-search] Unknown suggest field: "${spec.field}".`);
+    }
+    const t0 = nowMs();
+    const normalized = normalizeText(query, this.folded);
+    if (normalized.tokenCount > QUERY_TOKENS_MAX) {
+      throw new QueryTooLongError(QUERY_TOKENS_MAX, normalized.tokenCount, this.profileId);
+    }
+    if (normalized.isEmpty || this.idToDocIndex.size === 0) {
+      return { suggestions: [], queryDurationMs: nowMs() - t0 };
+    }
+    const allowed = spec.field !== undefined
+      ? new Set<number>([this.fieldNameToIndex.get(spec.field) as number])
+      : undefined;
+    const suggestions = this.computeSuggestions(query, normalized.tokens, spec, allowed);
+    return { suggestions, queryDurationMs: nowMs() - t0 };
+  }
+
+  /**
+   * Synchronous suggestion enumeration shared by `suggest()` and inline
+   * `search({ suggest })`. Callers pass pre-normalized query tokens and a
+   * validated spec; `searchFields` scopes the scan when the suggest spec
+   * carries no explicit field.
+   */
+  private computeSuggestions(
+    query: string,
+    queryTokens: Uint32Array,
+    spec: NormalizedSuggestOptions,
+    searchFields?: ReadonlySet<number>
+  ): SuggestionItem<TDoc>[] {
+    let fieldIndices: number[];
+    if (spec.field !== undefined) {
+      fieldIndices = [this.fieldNameToIndex.get(spec.field) as number];
+    } else if (searchFields !== undefined) {
+      fieldIndices = [...searchFields];
+    } else {
+      fieldIndices = this.sortedFields.map((_, i) => i);
+    }
+
+    const typoForSuggest = normalizeTypoTolerance(
+      spec.fuzzyDistance > 0
+        ? { enabled: true, maxDistance: spec.fuzzyDistance as 1 | 2 }
+        : undefined
+    );
+    const prefixOpts = normalizePrefixOptions(undefined);
+
+    interface SuggestHit {
+      keys: RankableCandidate;
+      text: string;
+      dIdx: number;
+      fIdx: number;
+      rawStr: string;
+    }
+    const candidates: SuggestHit[] = [];
+
+    for (let d = 0; d < this.records.length; d++) {
+      const doc = this.records[d];
+      if (doc === null || doc === undefined) continue;
+      const id = this.docIds[d];
+      if (id === null || id === undefined) continue;
+      const rows = this.docToRowIndices[d];
+      if (!rows) continue;
+      for (let k = 0; k < fieldIndices.length; k++) {
+        const fIdx = fieldIndices[k] as number;
+        const rowIdx = rows[fIdx];
+        if (rowIdx === undefined) continue;
+        if (this.tombstones.has(rowIdx)) continue;
+        const rowTok = this.rowTokens[rowIdx];
+        if (!rowTok || rowTok.length === 0) continue;
+        const rawStr = this.rawFieldStrings[d]?.[fIdx] ?? '';
+        if (rawStr.length === 0) continue;
+
+        let matched = false;
+        let rawScore = 0;
+        if (spec.mode === 'prefix') {
+          const r = scorePrefixTokens(rowTok, queryTokens, prefixOpts, typoForSuggest);
+          matched = r.matched;
+          rawScore = r.score;
+        } else if (spec.fuzzyDistance > 0) {
+          const r = scoreSubstringTypoTokens(rowTok, queryTokens, typoForSuggest);
+          matched = r.matched;
+          rawScore = r.score;
+        } else {
+          const r = scoreFuzzyTokens(rowTok, queryTokens);
+          matched = r.matched;
+          rawScore = r.score;
+        }
+        if (!matched) continue;
+        const weight = this.sortedFields[fIdx].weight;
+        candidates.push({
+          keys: {
+            score: Math.round(rawScore * weight),
+            fieldWeight: weight,
+            isExactMatch: isExactTokenMatch(rowTok, queryTokens),
+            matchedLength: rowTok.length,
+            id,
+            docIndex: d
+          },
+          text: rawStr,
+          dIdx: d,
+          fIdx,
+          rawStr
+        });
+      }
+    }
+
+    candidates.sort((a, b) => compareRanked(a.keys, b.keys, spec.tieBreakers));
+    const top = candidates.length > spec.limit ? candidates.slice(0, spec.limit) : candidates;
+    const out: SuggestionItem<TDoc>[] = [];
+    for (let i = 0; i < top.length; i++) {
+      const c = top[i] as SuggestHit;
+      const highlightMode = spec.mode === 'prefix' ? 'prefix' : (spec.fuzzyDistance > 0 ? 'substring' : 'fuzzy');
+      let matchedRanges: HighlightRange[] = [];
+      try {
+        matchedRanges = alignHighlights(c.rawStr, query, {
+          mode: highlightMode,
+          folded: this.folded,
+          queryTokens,
+          typoTolerance: spec.fuzzyDistance > 0
+            ? { enabled: true, maxDistance: spec.fuzzyDistance as 1 | 2 }
+            : undefined
+        });
+      } catch (err) {
+        // Only tolerate expected highlight-alignment failures for a single
+        // candidate (scorer/highlight length gates, polarity mismatch);
+        // programmer errors and I/O faults must propagate.
+        if (
+          err instanceof IncompatibleOptionError ||
+          err instanceof ProfileMismatchError ||
+          err instanceof RangeError
+        ) {
+          matchedRanges = [];
+        } else {
+          throw err;
+        }
+      }
+      out.push({
+        text: c.text,
+        score: c.keys.score,
+        type: spec.mode === 'prefix' ? 'completion' : 'did-you-mean',
+        matchedRanges,
+        docId: c.keys.id,
+        doc: this.records[c.dIdx] as TDoc
+      });
+    }
+    return out;
   }
 
   /**
@@ -1922,7 +2198,15 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const normalized: InternalField<TDoc>[] = schema.fields.map(
       (f: { name: string; weight: number }, originalIndex: number) => {
       const name = f.name;
+      if (typeof name !== 'string' || name.length === 0) {
+        throw new TypeError('[webgpu-search] Restored schema field requires a non-empty string name.');
+      }
       const weight = f.weight ?? 1.0;
+      if (typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0) {
+        throw new RangeError(
+          `[webgpu-search] Restored field "${name}" weight must be a positive finite number, got ${String(weight)}.`
+        );
+      }
       const uf = userFieldMap.get(name);
       let getter: (doc: TDoc) => string | string[] | undefined | null;
       if (uf && typeof uf === 'object' && typeof uf.getter === 'function') {
@@ -1934,8 +2218,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     });
 
     this.sortedFields = [...normalized].sort((a, b) => {
-      if (b.weight !== a.weight) return b.weight - a.weight;
-      return a.originalIndex - b.originalIndex;
+      if (b.weight !== a.weight) return b.weight > a.weight ? 1 : -1;
+      if (a.originalIndex !== b.originalIndex) return a.originalIndex > b.originalIndex ? 1 : -1;
+      return 0;
     });
 
     this.fieldNameToIndex.clear();

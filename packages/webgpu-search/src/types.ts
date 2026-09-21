@@ -210,7 +210,16 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   budget?: CostBudgetOptions;
   /** Whether to populate detailed diagnostics on the response */
   diagnostics?: boolean;
-  /** Autocomplete / did-you-mean suggestion configuration if requested alongside search */
+  /** Autocomplete / did-you-mean suggestion configuration if requested alongside search.
+   * `true` uses defaults; an object customizes; `false`/omitted disables.
+   * Inline suggestions cost a second O(docs x fields) scan (~2x query cost)
+   * and are index-wide by design: `filter` never narrows suggestions, while
+   * `fields` scopes them unless `suggest.field` is set (explicit suggest
+   * field wins). Suggestions use default `prefixMatch` opts, not the search
+   * `prefixMatch`/`typoTolerance` — only `suggest.mode`/`fuzzyDistance` apply.
+   * `prefix` yields `type:'completion'` (including typo-tolerant prefix);
+   * `fuzzy` yields `type:'did-you-mean'`.
+   */
   suggest?: SuggestOptions | boolean;
 }
 
@@ -589,6 +598,14 @@ export interface DeterministicRankingOptions {
   /**
    * Tie-breaker order hierarchy evaluated when scores are tied.
    * Default: ['score', 'weight', 'exact', 'length', 'id']
+   *
+   * M5 behavior change: `DocumentIndex.search()` now applies the full
+   * 5-tier order by default on all paths (GPU readback, parity CPU,
+   * legacy ufuzzy). Previously results were ordered by
+   * `(score DESC, docIndex ASC)` only. To approximate the legacy order,
+   * pass `ranking: { tieBreakers: ['score'] }` (remaining ties fall
+   * through to `docIndex ASC`; exact legacy order is not bit-reproduced
+   * when IDs differ from insertion order).
    */
   tieBreakers?: TieBreakerCriterion[];
 }
@@ -597,8 +614,14 @@ export interface DeterministicRankingOptions {
 export interface SuggestOptions {
   limit?: number;                   // Default: 5
   mode?: 'prefix' | 'fuzzy';        // Default: 'prefix'
-  fuzzyDistance?: number;           // Default: 0 (or 1 for typo-tolerant suggest)
-  field?: string;                   // Restrict to specific field
+  fuzzyDistance?: number;           // Default: 0 (integer 0..2; explicit 1 enables typo-tolerant suggest)
+  field?: string;                   // Restrict to specific field (beats search.fields when both set)
+  /**
+   * Suggestion tie-breaker hierarchy. Default: the M5 5-tier order.
+   * Inline `search({ ranking, suggest })` inherits the search `ranking`
+   * hierarchy when the suggest object omits this key.
+   */
+  tieBreakers?: TieBreakerCriterion[];
 }
 
 export interface SuggestionItem<TDoc = any> {
