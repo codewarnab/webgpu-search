@@ -61,12 +61,13 @@ import {
   candidateOverflowWarning
 } from './diagnostics';
 import {
-  DOC_FORMAT_VERSION,
   QUERY_TOKENS_MAX,
   SCORING_VERSION,
+  U2D4_FORMAT_VERSION,
   UNICODE_VERSION,
   DuplicateIdError,
   DocumentNotFoundError,
+  IncompatibleIndexError,
   IncompatibleOptionError,
   ProfileMismatchError,
   QueryTooLongError,
@@ -124,6 +125,39 @@ export interface InternalField<TDoc> extends FieldScoreDefinition {
   weight: number;
   getter: (doc: TDoc) => string | string[] | undefined | null;
   originalIndex: number;
+}
+
+/**
+ * v0.4 M8: fail-closed custom filter-getter restore guard (mirrors the
+ * hookIds idiom). Snapshots recording `hasGetter: true` for a filter field
+ * require the caller to supply a matching getter override via
+ * `options.options.filterFields`; otherwise columnar rebuild via default
+ * `doc[name]` would silently change filter semantics.
+ */
+export function assertSnapshotFilterGettersSatisfied(
+  snapshotFilterFields: Array<{ name: string; hasGetter?: boolean }> | undefined,
+  userFilterFields: Array<string | { name: string; getter?: unknown }> | undefined
+): void {
+  if (!snapshotFilterFields || snapshotFilterFields.length === 0) return;
+  const needed = snapshotFilterFields.filter((ff) => ff && ff.hasGetter === true);
+  if (needed.length === 0) return;
+  const userGetterNames = new Set<string>();
+  if (Array.isArray(userFilterFields)) {
+    for (const uf of userFilterFields) {
+      if (uf && typeof uf === 'object' && typeof (uf as { name?: unknown }).name === 'string') {
+        const u = uf as { name: string; getter?: unknown };
+        if (typeof u.getter === 'function') userGetterNames.add(u.name);
+      }
+    }
+  }
+  for (const ff of needed) {
+    if (!userGetterNames.has(ff.name)) {
+      throw new IncompatibleIndexError(
+        `filter-getter:${ff.name}`,
+        'missing custom getter override for snapshot filter field (supply options.options.filterFields with getter)'
+      );
+    }
+  }
 }
 
 /**
@@ -267,6 +301,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         let name: string;
         let type: FilterFieldType | undefined = undefined;
         let getter: ((doc: TDoc) => any) | undefined = undefined;
+        let hasGetter = false;
 
         if (typeof ff === 'string') {
           if (ff.trim().length === 0) {
@@ -274,6 +309,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           }
           name = ff;
           getter = (doc: any) => doc[name];
+          hasGetter = false;
         } else if (ff && typeof ff === 'object') {
           if (typeof ff.name !== 'string' || ff.name.trim().length === 0) {
             throw new TypeError('[webgpu-search] Filter field definition requires a non-empty string name.');
@@ -285,8 +321,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               throw new TypeError(`[webgpu-search] Filter field "${name}" getter must be a function.`);
             }
             getter = ff.getter;
+            hasGetter = true;
           } else {
             getter = (doc: any) => doc[name];
+            hasGetter = false;
           }
         } else {
           throw new TypeError('[webgpu-search] Filter field must be a string or FilterFieldDefinition object.');
@@ -296,7 +334,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           throw new Error(`[webgpu-search] Duplicate filter field name: "${name}".`);
         }
         seenFilterNames.add(name);
-        normalizedFilterFields.push({ name, type, getter });
+        normalizedFilterFields.push(hasGetter ? { name, type, getter, hasGetter: true } : { name, type, getter });
       }
     }
     this.filterFieldDefinitions = normalizedFilterFields;
@@ -2538,6 +2576,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     options?: RestoreDocumentIndexOptions<TDoc>
   ): Promise<DocumentIndex<TDoc>> {
     const t0 = nowMs();
+    // v0.4 M8: fail-closed custom filter-getter guard. Snapshot `hasGetter`
+    // entries require a matching getter override; otherwise restore would
+    // silently rebuild columnar via default `doc[name]` (presence cleared).
+    assertSnapshotFilterGettersSatisfied(
+      snapshot.schema.filterFields as Array<{ name: string; hasGetter?: boolean }> | undefined,
+      options?.options?.filterFields as Array<string | { name: string; getter?: unknown }> | undefined
+    );
     const userFields = options?.options?.fields;
     const userFieldMap = new Map<string, any>();
     if (Array.isArray(userFields)) {
@@ -2666,6 +2711,68 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       (this.options as { extensions?: SearchExtensionHooks<TDoc> }).extensions = restoreHooks;
     }
     assertHooksSatisfied(snapshot.schema.hookIds, this.indexExtensions);
+
+    // v0.4 M8: fail-closed custom filter-getter guard for instance restore.
+    // Live filter defs (plus any restore override) must supply getters for
+    // snapshot `hasGetter` fields; otherwise columnar rebuild would silently
+    // change semantics. When the override supplies the getters, adopt it so
+    // `columnarStore.init` uses the correct accessors.
+    {
+      const overrideFF = options?.options?.filterFields as
+        | Array<string | { name: string; type?: FilterFieldType; getter?: (doc: TDoc) => any }>
+        | undefined;
+      const liveCustom = new Set<string>();
+      for (const ff of this.filterFieldDefinitions) {
+        if ((ff as { hasGetter?: boolean }).hasGetter === true) liveCustom.add(ff.name as string);
+      }
+      const overrideGetterNames = new Set<string>();
+      if (Array.isArray(overrideFF)) {
+        for (const uf of overrideFF) {
+          if (uf && typeof uf === 'object' && typeof (uf as { getter?: unknown }).getter === 'function') {
+            overrideGetterNames.add((uf as { name: string }).name);
+          }
+        }
+      }
+      const needed = ((snapshot.schema.filterFields as Array<{ name: string; hasGetter?: boolean }> | undefined) ?? []).filter(
+        (ff) => ff && ff.hasGetter === true
+      );
+      for (const ff of needed) {
+        if (!liveCustom.has(ff.name) && !overrideGetterNames.has(ff.name)) {
+          throw new IncompatibleIndexError(
+            `filter-getter:${ff.name}`,
+            'missing custom getter override for snapshot filter field (supply options.options.filterFields with getter)'
+          );
+        }
+      }
+      if (Array.isArray(overrideFF) && overrideFF.length > 0) {
+        const normalized: FilterFieldDefinition<TDoc>[] = [];
+        const seen = new Set<string>();
+        for (const uf of overrideFF) {
+          if (typeof uf === 'string') {
+            if (seen.has(uf)) continue;
+            seen.add(uf);
+            normalized.push({ name: uf as never, getter: ((doc: any) => (doc as any)[uf]) as never });
+          } else if (uf && typeof uf === 'object' && typeof (uf as { name?: unknown }).name === 'string') {
+            const o = uf as { name: string; type?: FilterFieldType; getter?: (doc: TDoc) => any };
+            if (seen.has(o.name)) continue;
+            seen.add(o.name);
+            const hasCustom = typeof o.getter === 'function';
+            normalized.push(
+              hasCustom
+                ? { name: o.name as never, type: o.type, getter: o.getter as never, hasGetter: true }
+                : { name: o.name as never, type: o.type, getter: ((doc: any) => (doc as any)[o.name]) as never }
+            );
+          }
+        }
+        if (normalized.length > 0) {
+          this.filterFieldDefinitions = normalized;
+          this.columnarStore = new ColumnarStore<TDoc>(normalized, {
+            initialCapacity: this.initialCapacity,
+            growthFactor: this.growthFactor
+          });
+        }
+      }
+    }
 
     this.configureFromSchema(snapshot.schema, options);
 
@@ -2946,7 +3053,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       scoringVersion: SCORING_VERSION,
       tokenCount: this.totalTokens,
       folded: this.folded,
-      formatVersion: DOC_FORMAT_VERSION,
+      formatVersion: U2D4_FORMAT_VERSION,
       docCount,
       rowCount,
       tombstoneCount,

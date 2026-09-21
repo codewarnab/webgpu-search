@@ -1,0 +1,319 @@
+{
+  "generatedAt": "2026-09-21T18:48:39.701Z",
+  "environment": {
+    "engine": "cpu",
+    "preferGpu": false,
+    "headless": true,
+    "runtime": "bun/1.4.2",
+    "platform": "linux-arm64",
+    "note": "Headless CPU numbers; not comparable to browser/WebGPU runs."
+  },
+  "rows": [
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "prefix-search",
+      "medianMs": 12.15,
+      "p95Ms": 14.329,
+      "samples": [
+        11.221,
+        11.42,
+        11.506,
+        11.852,
+        12.04,
+        12.26,
+        12.266,
+        12.446,
+        13.388,
+        15.1
+      ]
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "prefix-search+type-filter",
+      "medianMs": 4.279,
+      "p95Ms": 5.088,
+      "samples": [
+        3.795,
+        3.918,
+        3.939,
+        4.045,
+        4.195,
+        4.364,
+        4.435,
+        4.845,
+        4.992,
+        5.167
+      ]
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "suggest-autocomplete",
+      "medianMs": 13.32,
+      "p95Ms": 14.398,
+      "samples": [
+        12.145,
+        12.231,
+        12.292,
+        12.956,
+        13.226,
+        13.413,
+        13.491,
+        13.698,
+        14.156,
+        14.596
+      ],
+      "extra": {
+        "suggestionCount": 5
+      }
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "fuzzy-search+type-facets",
+      "medianMs": 8.267,
+      "p95Ms": 9.228,
+      "samples": [
+        5.697,
+        5.755,
+        7.537,
+        7.976,
+        8.256,
+        8.279,
+        8.515,
+        8.564,
+        8.792,
+        9.585
+      ]
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search",
+      "medianMs": 4.2,
+      "p95Ms": 5.506,
+      "samples": [
+        3.984,
+        4.03,
+        4.034,
+        4.072,
+        4.083,
+        4.316,
+        4.401,
+        4.726,
+        4.891,
+        6.009
+      ]
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 2.497,
+      "p95Ms": 3.595,
+      "samples": [
+        2.37,
+        2.396,
+        2.41,
+        2.415,
+        2.436,
+        2.558,
+        3.321,
+        3.433,
+        3.537,
+        3.642
+      ],
+      "extra": {
+        "totalMatches": 150
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 4.291,
+      "p95Ms": 7.377,
+      "samples": [
+        4.184,
+        4.191,
+        4.215,
+        4.24,
+        4.259,
+        4.324,
+        4.507,
+        4.981,
+        4.987,
+        9.333
+      ]
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "u2d4-serialize",
+      "medianMs": 40.924,
+      "p95Ms": 49.805,
+      "samples": [
+        35.79,
+        36.341,
+        36.977,
+        37.583,
+        40.585,
+        41.262,
+        41.879,
+        45.942,
+        46.785,
+        52.275
+      ],
+      "extra": {
+        "snapshotBytes": 6670531,
+        "schemaBytes": 140329,
+        "columnarBytes": 548521,
+        "docsBytes": 2166645
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "u2d4-restore",
+      "medianMs": 50.959,
+      "p95Ms": 62.159,
+      "samples": [
+        41.319,
+        45.734,
+        47.769,
+        48.759,
+        50.478,
+        51.44,
+        52.323,
+        55.198,
+        57.455,
+        66.007
+      ],
+      "extra": {
+        "restoredMatches": 150
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search",
+      "medianMs": 18.235,
+      "p95Ms": 18.863,
+      "samples": [
+        17.827,
+        17.987,
+        18.05,
+        18.212,
+        18.225,
+        18.244,
+        18.253,
+        18.694,
+        18.703,
+        18.993
+      ]
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 8.084,
+      "p95Ms": 11.059,
+      "samples": [
+        7.52,
+        7.556,
+        7.636,
+        7.643,
+        7.939,
+        8.23,
+        8.457,
+        8.63,
+        8.817,
+        12.892
+      ],
+      "extra": {
+        "totalMatches": 750
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 24.552,
+      "p95Ms": 25.861,
+      "samples": [
+        24.268,
+        24.359,
+        24.397,
+        24.402,
+        24.527,
+        24.578,
+        24.583,
+        24.91,
+        24.916,
+        26.633
+      ]
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search",
+      "medianMs": 36.535,
+      "p95Ms": 47.942,
+      "samples": [
+        34.786,
+        34.859,
+        35.318,
+        35.54,
+        36.516,
+        36.555,
+        37.389,
+        39.11,
+        47.241,
+        48.516
+      ]
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 15.621,
+      "p95Ms": 17.181,
+      "samples": [
+        14.762,
+        15.097,
+        15.153,
+        15.453,
+        15.484,
+        15.757,
+        15.778,
+        15.954,
+        16.004,
+        18.143
+      ],
+      "extra": {
+        "totalMatches": 1500
+      }
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 34.022,
+      "p95Ms": 34.455,
+      "samples": [
+        33.03,
+        33.281,
+        33.594,
+        33.679,
+        34.002,
+        34.041,
+        34.088,
+        34.17,
+        34.29,
+        34.59
+      ]
+    }
+  ]
+}

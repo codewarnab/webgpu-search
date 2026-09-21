@@ -1,6 +1,6 @@
 // High-Level Primary API
 export { SearchIndex } from './hybrid-index';
-export { DocumentIndex } from './document-index';
+export { DocumentIndex, assertSnapshotFilterGettersSatisfied } from './document-index';
 export { SearchWorkerClient, INTERNAL_WORKER_ID_KEY } from './worker/worker-client';
 
 
@@ -250,6 +250,14 @@ export {
   deserializeDocumentSnapshot,
   deserializeDocumentSnapshotHeader,
   restoreDocumentIndex,
+  encodeColumnarPayload,
+  validateColumnarPayload,
+  MAX_SNAPSHOT_SCHEMA_BYTES,
+  MAX_SNAPSHOT_COLUMNAR_BYTES,
+  MAX_SNAPSHOT_DOCS_BYTES,
+  MAX_SNAPSHOT_BYTES,
+  MAX_SNAPSHOT_DOC_COUNT,
+  MAX_SNAPSHOT_TOKEN_COUNT,
   type RestoredDocumentSnapshot,
 } from './persistence';
 export {

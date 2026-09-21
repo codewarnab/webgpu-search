@@ -2,7 +2,10 @@ import {
   DocumentIndex,
   SearchWorkerClient,
   type DocumentIndexStats,
-  type DocumentSearchResponse
+  type DocumentSearchResponse,
+  type FilterExpression,
+  type SuggestOptions,
+  type SuggestionItem
 } from 'webgpu-search';
 import type { MonacoFileRecord, MonacoPaletteSearchResult } from './types';
 
@@ -10,6 +13,29 @@ export interface PaletteEngineOptions {
   useWorker?: boolean;
   preferGpu?: boolean;
   candidateCapacity?: number;
+}
+
+export interface PaletteSearchOptions {
+  mode?: 'fuzzy' | 'substring' | 'prefix' | 'token';
+  highlight?: boolean;
+  limit?: number;
+  signal?: AbortSignal;
+  /** Restrict to a symbol kind (e.g. 'class' | 'shader'). 'ALL' disables. */
+  typeFilter?: string;
+  /** Restrict to a language (e.g. 'typescript' | 'wgsl'). 'ALL' disables. */
+  languageFilter?: string;
+  /** Request autocomplete suggestions alongside results. */
+  suggest?: boolean | SuggestOptions;
+}
+
+export interface PaletteSearchResult {
+  results: MonacoPaletteSearchResult[];
+  totalMatches: number;
+  searchDurationMs: number;
+  engine: 'webgpu' | 'cpu';
+  hasOverflow: boolean;
+  suggestions?: SuggestionItem<MonacoFileRecord>[];
+  facets?: DocumentSearchResponse<MonacoFileRecord>['facets'];
 }
 
 export class PaletteEngine {
@@ -28,6 +54,12 @@ export class PaletteEngine {
     { name: 'symbols', weight: 2.0 },
     { name: 'path', weight: 1.0 },
     { name: 'description', weight: 0.5 }
+  ];
+
+  /** v0.4 M8: columnar filter attributes enabling structured type/language filters + type facets. */
+  private readonly filterFieldDefs = [
+    { name: 'type', type: 'string' as const },
+    { name: 'language', type: 'string' as const }
   ];
 
   constructor(options?: PaletteEngineOptions) {
@@ -71,6 +103,7 @@ export class PaletteEngine {
         await client.init(this.records, {
           idField: 'id',
           fields: this.fieldDefs,
+          filterFields: this.filterFieldDefs,
           preferGpu: this.preferGpu,
           candidateCapacity: this.candidateCapacity
         });
@@ -99,6 +132,7 @@ export class PaletteEngine {
     const mainIdx = await DocumentIndex.create(this.records, {
       idField: 'id',
       fields: this.fieldDefs,
+      filterFields: this.filterFieldDefs,
       preferGpu: this.preferGpu,
       candidateCapacity: this.candidateCapacity
     });
@@ -123,46 +157,53 @@ export class PaletteEngine {
     await this.rebuildIndex();
   }
 
+  /**
+   * v0.4 M8: structured type/language pre-filtering via columnar bitsets,
+   * native 'prefix' symbol search, and autocomplete suggestions.
+   */
+  buildFilter(typeFilter?: string, languageFilter?: string): FilterExpression | undefined {
+    const clauses: FilterExpression[] = [];
+    if (typeFilter !== undefined && typeFilter !== 'ALL') {
+      clauses.push({ type: typeFilter });
+    }
+    if (languageFilter !== undefined && languageFilter !== 'ALL') {
+      clauses.push({ language: languageFilter });
+    }
+    if (clauses.length === 0) return undefined;
+    if (clauses.length === 1) return clauses[0];
+    return { and: clauses };
+  }
+
   async search(
     query: string,
-    options?: {
-      mode?: 'fuzzy' | 'substring';
-      highlight?: boolean;
-      limit?: number;
-      signal?: AbortSignal;
-    }
-  ): Promise<{
-    results: MonacoPaletteSearchResult[];
-    totalMatches: number;
-    searchDurationMs: number;
-    engine: 'webgpu' | 'cpu';
-    hasOverflow: boolean;
-  }> {
+    options?: PaletteSearchOptions
+  ): Promise<PaletteSearchResult> {
     const start = performance.now();
     const mode = options?.mode ?? 'fuzzy';
     const highlight = options?.highlight ?? true;
     const limit = options?.limit ?? 50;
+    const filter = this.buildFilter(options?.typeFilter, options?.languageFilter);
+    const suggest = options?.suggest;
 
     let response: DocumentSearchResponse<MonacoFileRecord>;
 
+    const searchOpts = {
+      mode,
+      highlight,
+      tag: 'mark',
+      escapeHtml: true,
+      limit,
+      signal: options?.signal,
+      ...(filter ? { filter } : {}),
+      // Type-facet distribution powers the kind breakdown in the palette UI.
+      facets: { byType: { type: 'terms' as const, field: 'type', limit: 10 } },
+      ...(suggest !== undefined ? { suggest } : {})
+    };
+
     if (this.useWorker && this.workerClient) {
-      response = await this.workerClient.search(query, {
-        mode,
-        highlight,
-        tag: 'mark',
-        escapeHtml: true,
-        limit,
-        signal: options?.signal
-      });
+      response = await this.workerClient.search(query, searchOpts);
     } else if (this.mainIndex) {
-      response = await this.mainIndex.search(query, {
-        mode,
-        highlight,
-        tag: 'mark',
-        escapeHtml: true,
-        limit,
-        signal: options?.signal
-      });
+      response = await this.mainIndex.search(query, searchOpts);
     } else {
       return {
         results: [],
@@ -189,8 +230,31 @@ export class PaletteEngine {
       totalMatches: response.totalMatches,
       searchDurationMs: duration,
       engine: response.engine,
-      hasOverflow: response.hasOverflow
+      hasOverflow: response.hasOverflow,
+      ...(response.suggestions ? { suggestions: response.suggestions } : {}),
+      ...(response.facets ? { facets: response.facets } : {})
     };
+  }
+
+  /** First-party autocomplete primitive for symbol navigation. */
+  async suggest(
+    query: string,
+    options?: SuggestOptions
+  ): Promise<{ suggestions: SuggestionItem<MonacoFileRecord>[]; queryDurationMs: number }> {
+    if (this.useWorker && this.workerClient) {
+      const t0 = performance.now();
+      // Worker client has no dedicated suggest RPC; fan out via a
+      // suggest-only worker search (suggestions stay index-wide by design).
+      const res = await this.workerClient.search(query, {
+        limit: 1,
+        highlight: false,
+        suggest: options ?? { mode: 'prefix', limit: 5 }
+      } as any);
+      return { suggestions: res.suggestions ?? [], queryDurationMs: performance.now() - t0 };
+    } else if (this.mainIndex) {
+      return this.mainIndex.suggest(query, options);
+    }
+    return { suggestions: [], queryDurationMs: 0 };
   }
 
   async addRecord(record: MonacoFileRecord): Promise<void> {
@@ -232,6 +296,39 @@ export class PaletteEngine {
       await this.workerClient.add(records);
     } else if (this.mainIndex) {
       await this.mainIndex.add(records);
+    }
+  }
+
+  async serializeSnapshot(): Promise<ArrayBuffer> {
+    if (this.useWorker && this.workerClient) {
+      return this.workerClient.serialize();
+    } else if (this.mainIndex) {
+      return this.mainIndex.serialize();
+    }
+    throw new Error('[PaletteEngine] Index not initialized');
+  }
+
+  async restoreSnapshot(buffer: ArrayBuffer): Promise<void> {
+    if (!buffer || typeof (buffer as ArrayBuffer).byteLength !== 'number') {
+      throw new TypeError('[PaletteEngine] restoreSnapshot expects an ArrayBuffer.');
+    }
+    const { MAX_SNAPSHOT_BYTES, IncompatibleIndexError } = await import('webgpu-search');
+    if ((buffer as ArrayBuffer).byteLength > (MAX_SNAPSHOT_BYTES as number)) {
+      throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
+    }
+    if (this.useWorker && this.workerClient) {
+      await this.workerClient.restore(buffer);
+      this.records = this.workerClient.getRecords();
+    } else if (this.mainIndex) {
+      const { restoreDocumentIndex } = await import('webgpu-search');
+      const restored = await restoreDocumentIndex<MonacoFileRecord>(buffer, {
+        options: { preferGpu: this.preferGpu, candidateCapacity: this.candidateCapacity }
+      });
+      this.mainIndex.destroy();
+      this.mainIndex = restored;
+      this.records = restored.getRecords();
+    } else {
+      throw new Error('[PaletteEngine] Index not initialized');
     }
   }
 

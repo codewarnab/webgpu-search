@@ -93,10 +93,27 @@
       </div>
 
       <div class="filter-item">
+        <label for="service-select">Service:</label>
+        <select id="service-select" class="select-ctrl">
+          <option value="ALL" selected>All Services</option>
+          <option value="auth-service">auth-service</option>
+          <option value="api-gateway">api-gateway</option>
+          <option value="payment-gateway">payment-gateway</option>
+          <option value="gpu-indexer">gpu-indexer</option>
+          <option value="db-cluster">db-cluster</option>
+          <option value="cache-proxy">cache-proxy</option>
+          <option value="pipeline-worker">pipeline-worker</option>
+          <option value="search-engine">search-engine</option>
+        </select>
+      </div>
+
+      <div class="filter-item">
         <label for="mode-select">Mode:</label>
         <select id="mode-select" class="select-ctrl">
           <option value="fuzzy" selected>Fuzzy (Weighted)</option>
           <option value="substring">Substring (Exact)</option>
+          <option value="prefix">Prefix</option>
+          <option value="token">Token</option>
         </select>
       </div>
 
@@ -115,6 +132,42 @@
           <option value="main">Main Thread</option>
         </select>
       </div>
+
+      <div class="filter-item">
+        <label for="latency-min">Lat ≥:</label>
+        <input type="number" id="latency-min" class="select-ctrl" placeholder="ms" min="0" style="width: 76px;" />
+      </div>
+
+      <div class="filter-item">
+        <label for="latency-max">Lat &lt;:</label>
+        <input type="number" id="latency-max" class="select-ctrl" placeholder="ms" min="0" style="width: 76px;" />
+      </div>
+
+      <div class="filter-item">
+        <label for="ts-from">From:</label>
+        <input type="datetime-local" id="ts-from" class="select-ctrl" />
+      </div>
+
+      <div class="filter-item">
+        <label for="ts-to">To:</label>
+        <input type="datetime-local" id="ts-to" class="select-ctrl" />
+      </div>
+    </div>
+  </div>
+
+  <!-- Facet Aggregation Panel -->
+  <div id="facet-bar" class="facet-bar" style="display: none;">
+    <div class="facet-group">
+      <span class="facet-title">Levels</span>
+      <div id="facet-levels" class="facet-chips"></div>
+    </div>
+    <div class="facet-group">
+      <span class="facet-title">Services</span>
+      <div id="facet-services" class="facet-chips"></div>
+    </div>
+    <div class="facet-group">
+      <span class="facet-title">Latency</span>
+      <div id="facet-latency" class="facet-chips"></div>
     </div>
   </div>
 

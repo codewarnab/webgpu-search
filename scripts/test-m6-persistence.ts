@@ -14,6 +14,9 @@ import {
   SERIALIZED_DOC_MAGIC,
   DOC_FORMAT_VERSION,
   SERIALIZED_DOC_HEADER_BYTES,
+  U2D4_MAGIC,
+  U2D4_FORMAT_VERSION,
+  U2D4_HEADER_BYTES,
   DEFAULT_IDB_DATABASE_NAME,
   DEFAULT_SNAPSHOT_STORE_NAME,
   DEFAULT_DOCUMENT_STORE_NAME,
@@ -284,7 +287,7 @@ function createMockWorkerScope(): { clientWorker: any; workerScope: any } {
 }
 
 async function runM6Tests() {
-  console.log('--- Running Milestone 6: Versioned Snapshot Persistence (U2D3) & IndexedDB Tests ---');
+  console.log('--- Running Milestone 6: Versioned Snapshot Persistence (U2D4 canonical, U2D3 legacy read) & IndexedDB Tests ---');
 
   // Sample multi-field documents with Unicode characters
   const sampleArticles: ArticleDoc[] = [
@@ -309,14 +312,18 @@ async function runM6Tests() {
   ];
 
   // =========================================================================
-  // 1. U2D3 Binary Constants & Header Layout
+  // 1. U2D3 Legacy Constants & U2D4 Canonical Constants
   // =========================================================================
-  console.log('1. Testing U2D3 binary specification constants and header layout...');
+  console.log('1. Testing binary specification constants and header layout...');
   {
     assert.strictEqual(SERIALIZED_DOC_MAGIC, 0x55324433, 'SERIALIZED_DOC_MAGIC must be 0x55324433 ("U2D3")');
     assert.strictEqual(DOC_FORMAT_VERSION, 3, 'DOC_FORMAT_VERSION must be 3');
     assert.strictEqual(SERIALIZED_DOC_HEADER_BYTES, 48, 'SERIALIZED_DOC_HEADER_BYTES must be 48 bytes');
-    console.log('   ✅ Binary constants confirmed');
+    assert.strictEqual(U2D4_MAGIC, 0x55324434, 'U2D4_MAGIC must be 0x55324434 ("U2D4")');
+    assert.strictEqual(U2D4_FORMAT_VERSION, 4, 'U2D4_FORMAT_VERSION must be 4');
+    assert.strictEqual(U2D4_HEADER_BYTES, 56, 'U2D4_HEADER_BYTES must be 56 bytes (8-byte aligned)');
+    assert.strictEqual(U2D4_HEADER_BYTES % 8, 0, 'U2D4 header must be 8-byte aligned');
+    console.log('   ✅ Binary constants confirmed (U2D3 legacy read path + U2D4 canonical write path)');
   }
 
   // =========================================================================
@@ -334,17 +341,18 @@ async function runM6Tests() {
 
     const snapshot = originalIndex.serialize();
     assert(snapshot instanceof ArrayBuffer, 'serialize() must return an ArrayBuffer');
-    assert(snapshot.byteLength >= SERIALIZED_DOC_HEADER_BYTES, 'snapshot length must exceed 48 bytes');
+    assert(snapshot.byteLength >= U2D4_HEADER_BYTES, 'snapshot length must exceed 56-byte U2D4 header');
 
-    // Parse header directly
+    // Parse header directly (canonical U2D4 write path)
     const header = deserializeDocumentSnapshotHeader(snapshot);
-    assert.strictEqual(header.magic, 0x55324433);
-    assert.strictEqual(header.formatVersion, 3);
+    assert.strictEqual(header.magic, 0x55324434);
+    assert.strictEqual(header.formatVersion, 4);
     assert.strictEqual(header.docCount, 3);
     assert.strictEqual(header.rowCount, 9); // 3 docs * 3 fields
     assert(header.tokenCount > 0);
     assert(header.schemaByteLength > 0);
     assert(header.docsByteLength > 0);
+    assert(typeof header.columnarByteLength === 'number');
     assert(header.checksum !== 0);
 
     // Restore into a new index
@@ -461,9 +469,9 @@ async function runM6Tests() {
   }
 
   // =========================================================================
-  // 5. Fail-Closed Error Hierarchy & Tamper Resistance
+  // 5. Fail-Closed Error Hierarchy & Corruption Detection
   // =========================================================================
-  console.log('5. Testing fail-closed error hierarchy & tamper resistance...');
+  console.log('5. Testing fail-closed error hierarchy & corruption detection...');
   {
     const index = await DocumentIndex.create(sampleArticles, { fields: ['title'] });
     const validBuffer = index.serialize();
@@ -490,10 +498,10 @@ async function runM6Tests() {
       (err: any) => err instanceof IncompatibleIndexError
     );
 
-    // 4. Corrupt CRC32 (tampering 1 bit in schema segment)
+    // 4. Corrupt CRC32 (tampering 1 bit in schema segment past the 56-byte header)
     const tamperedPayloadBuf = validBuffer.slice(0);
     const u8 = new Uint8Array(tamperedPayloadBuf);
-    u8[50] ^= 0xff; // Flip bits in schema segment
+    u8[60] ^= 0xff; // Flip bits in schema segment
     assert.rejects(
       async () => restoreDocumentIndex(tamperedPayloadBuf),
       (err: any) => err instanceof IncompatibleIndexError
@@ -503,7 +511,7 @@ async function runM6Tests() {
     const rawSnapshot = deserializeDocumentSnapshot(validBuffer);
     const tamperedOffsetsBuf = validBuffer.slice(0);
     const header = deserializeDocumentSnapshotHeader(tamperedOffsetsBuf);
-    const offsetsPos = SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength + header.tokenCount * 4;
+    const offsetsPos = U2D4_HEADER_BYTES + header.schemaByteLength + header.tokenCount * 4;
     // Set offsets[1] > offsets[2]
     new DataView(tamperedOffsetsBuf).setUint32(offsetsPos + 4, 999999, true);
     // Recompute CRC with the bad offset to bypass CRC check and test offset validation directly
@@ -511,10 +519,10 @@ async function runM6Tests() {
     const u8Tampered = new Uint8Array(tamperedOffsetsBuf);
     const { crc32Parts } = await import('../packages/webgpu-search/src/index');
     const newCrc = crc32Parts([
-      new Uint8Array(tamperedOffsetsBuf, 0, 44),
-      new Uint8Array(tamperedOffsetsBuf, SERIALIZED_DOC_HEADER_BYTES)
+      new Uint8Array(tamperedOffsetsBuf, 0, 52),
+      new Uint8Array(tamperedOffsetsBuf, U2D4_HEADER_BYTES)
     ]);
-    tamperedDv.setUint32(44, newCrc, true);
+    tamperedDv.setUint32(52, newCrc, true);
 
     assert.rejects(
       async () => restoreDocumentIndex(tamperedOffsetsBuf),
@@ -530,7 +538,7 @@ async function runM6Tests() {
     // 7. Tampered schema.docIds length mismatch
     const badDocIdsBuf = validBuffer.slice(0);
     const badDocIdsHeader = deserializeDocumentSnapshotHeader(badDocIdsBuf);
-    const schemaBytes = new Uint8Array(badDocIdsBuf, SERIALIZED_DOC_HEADER_BYTES, badDocIdsHeader.schemaByteLength);
+    const schemaBytes = new Uint8Array(badDocIdsBuf, U2D4_HEADER_BYTES, badDocIdsHeader.schemaByteLength);
     const parsedSchema = JSON.parse(new TextDecoder().decode(schemaBytes));
     parsedSchema.docIds = ['doc-1']; // length 1 instead of 3
     const newSchemaBytes = new TextEncoder().encode(JSON.stringify(parsedSchema));
@@ -543,17 +551,17 @@ async function runM6Tests() {
       schemaBytes.set(padded);
       const tamperedDv2 = new DataView(badDocIdsBuf);
       const newCrc2 = crc32Parts([
-        new Uint8Array(badDocIdsBuf, 0, 44),
-        new Uint8Array(badDocIdsBuf, SERIALIZED_DOC_HEADER_BYTES)
+        new Uint8Array(badDocIdsBuf, 0, 52),
+        new Uint8Array(badDocIdsBuf, U2D4_HEADER_BYTES)
       ]);
-      tamperedDv2.setUint32(44, newCrc2, true);
+      tamperedDv2.setUint32(52, newCrc2, true);
       assert.rejects(
         async () => restoreDocumentIndex(badDocIdsBuf),
         (err: any) => err instanceof IncompatibleIndexError
       );
     }
 
-    console.log('   ✅ Fail-closed error hierarchy & tamper checks confirmed');
+    console.log('   ✅ Fail-closed error hierarchy & corruption detection confirmed');
   }
 
   // =========================================================================
@@ -685,7 +693,7 @@ async function runM6Tests() {
     // Serialize across worker boundary
     const workerSnapshot = await workerClient.serialize();
     assert(workerSnapshot instanceof ArrayBuffer);
-    assert(workerSnapshot.byteLength >= SERIALIZED_DOC_HEADER_BYTES);
+    assert(workerSnapshot.byteLength >= U2D4_HEADER_BYTES);
 
     const header = deserializeDocumentSnapshotHeader(workerSnapshot);
     assert.strictEqual(header.docCount, 3);
@@ -795,6 +803,440 @@ async function runM6Tests() {
     assert.strictEqual(bodyRes.results[0].matchedField, 'body');
 
     console.log('   ✅ Dynamic additions stratification parity & custom getters confirmed');
+  }
+
+  // =========================================================================
+  // 9. U2D4 Columnar Segment & Filter/Facet Restore Parity (v0.4 M8)
+  // =========================================================================
+  console.log('9. Testing U2D4 columnar filter metadata roundtrip & facet parity...');
+  {
+    interface FilterDoc {
+      id: string;
+      title: string;
+      level: string;
+      latencyMs: number;
+    }
+    const filterDocs: FilterDoc[] = [
+      { id: 'l-1', title: 'timeout in auth-service fence wait', level: 'ERROR', latencyMs: 1200 },
+      { id: 'l-2', title: 'timeout retry on cache-proxy read', level: 'WARN', latencyMs: 320 },
+      { id: 'l-3', title: 'healthy heartbeat probe ok', level: 'INFO', latencyMs: 12 },
+      { id: 'l-4', title: 'timeout deadlock on orders table', level: 'ERROR', latencyMs: 950 }
+    ];
+
+    const index = await DocumentIndex.create(filterDocs, {
+      fields: ['title'],
+      filterFields: [{ name: 'level' }, { name: 'latencyMs', type: 'number' }]
+    });
+
+    const snapshot = index.serialize();
+    const header = deserializeDocumentSnapshotHeader(snapshot);
+    assert.strictEqual(header.magic, U2D4_MAGIC);
+    assert.strictEqual(header.formatVersion, U2D4_FORMAT_VERSION);
+    assert(header.columnarByteLength! > 0, 'filter-configured snapshot must carry a columnar segment');
+
+    // Columnar segment is 8-byte aligned by construction (56-byte header).
+    assert.strictEqual(U2D4_HEADER_BYTES % 8, 0);
+
+    const baseline = await index.search('timeout', {
+      mode: 'fuzzy',
+      filter: { level: 'ERROR' },
+      facets: { byLevel: { type: 'terms', field: 'level', limit: 10 } }
+    });
+    assert.strictEqual(baseline.totalMatches, 2);
+
+    const restored = await DocumentIndex.fromSnapshot<FilterDoc>(snapshot);
+    const after = await restored.search('timeout', {
+      mode: 'fuzzy',
+      filter: { level: 'ERROR' },
+      facets: { byLevel: { type: 'terms', field: 'level', limit: 10 } }
+    });
+    assert.strictEqual(after.totalMatches, baseline.totalMatches);
+    assert.deepStrictEqual(
+      after.results.map((r) => r.id),
+      baseline.results.map((r) => r.id)
+    );
+    assert.deepStrictEqual(after.facets, baseline.facets);
+
+    // Numeric range filter parity across the restore boundary.
+    const rangeAfter = await restored.search('timeout', {
+      mode: 'fuzzy',
+      filter: { latencyMs: { gte: 900 } }
+    });
+    assert.strictEqual(rangeAfter.totalMatches, 2);
+
+    // Corrupted columnar payload must fail closed (CRC mismatch / corruption detection).
+    const corruptCol = snapshot.slice(0);
+    const colStart = U2D4_HEADER_BYTES + header.schemaByteLength + header.tokenCount * 4 + (header.rowCount + 1) * 4;
+    new Uint8Array(corruptCol, colStart, 1)[0] ^= 0xff;
+    await assert.rejects(
+      async () => restoreDocumentIndex(corruptCol),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+
+    // Canonical byte layout: total length equals the sum of segments.
+    // The 56 B header itself is 8-byte aligned (columnar start alignment
+    // depends on variable-length schema/tokens/offsets, so only the header
+    // width is asserted here).
+    {
+      const { crc32Parts } = await import('../packages/webgpu-search/src/index');
+      const wantTokens = header.tokenCount * 4;
+      const wantOffsets = (header.rowCount + 1) * 4;
+      const columnarLen = header.columnarByteLength ?? 0;
+      assert.strictEqual(
+        snapshot.byteLength,
+        U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets + columnarLen + header.docsByteLength,
+        'canonical byte length must equal header+schema+tokens+offsets+columnar+docs'
+      );
+      assert.strictEqual(U2D4_HEADER_BYTES % 8, 0);
+      const recomputed = crc32Parts([
+        new Uint8Array(snapshot, 0, 52),
+        new Uint8Array(snapshot, U2D4_HEADER_BYTES, header.schemaByteLength),
+        new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength, wantTokens),
+        new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens, wantOffsets),
+        columnarLen > 0
+          ? new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets, columnarLen)
+          : new Uint8Array(0),
+        header.docsByteLength > 0
+          ? new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets + columnarLen, header.docsByteLength)
+          : new Uint8Array(0)
+      ]);
+      assert.strictEqual(recomputed, header.checksum, 'independent CRC recompute must match header checksum');
+    }
+
+    index.destroy();
+    restored.destroy();
+    console.log('   ✅ U2D4 columnar segment, filter/facet parity, and corruption detection confirmed');
+  }
+
+  // =========================================================================
+  // 10. U2D3 Legacy Migration Read Path (48 B header, no columnar segment)
+  // =========================================================================
+  console.log('10. Testing U2D3 legacy snapshot migration read path...');
+  {
+    const { crc32Parts } = await import('../packages/webgpu-search/src/index');
+    const legacyDocs = [
+      { id: 'u2d3-1', title: 'legacy snapshot migration alpha' },
+      { id: 'u2d3-2', title: 'legacy snapshot migration beta' }
+    ];
+    // Build a canonical U2D4 snapshot with no filter fields (columnarLen 0),
+    // then reframe its payloads as a genuine 48 B U2D3 snapshot.
+    const u2d4Index = await DocumentIndex.create(legacyDocs, { fields: ['title'] });
+    const u2d4Snap = u2d4Index.serialize();
+    const u2d4Header = deserializeDocumentSnapshotHeader(u2d4Snap);
+    assert.strictEqual(u2d4Header.columnarByteLength ?? 0, 0);
+    const u2d4Dv = new DataView(u2d4Snap);
+    const profileEnum = u2d4Dv.getUint32(8, true);
+    const unicodeEnum = u2d4Dv.getUint32(12, true);
+    const scoringEnum = u2d4Dv.getUint32(16, true);
+    const docCount = u2d4Dv.getUint32(20, true);
+    const rowCount = u2d4Dv.getUint32(24, true);
+    const tokenCount = u2d4Dv.getUint32(28, true);
+    const foldedVal = u2d4Dv.getUint32(32, true);
+    const schemaLen = u2d4Dv.getUint32(36, true);
+    const docsLen = u2d4Dv.getUint32(40, true);
+    const schemaBytes = new Uint8Array(u2d4Snap, U2D4_HEADER_BYTES, schemaLen);
+    const tokensBytes = new Uint8Array(u2d4Snap, U2D4_HEADER_BYTES + schemaLen, tokenCount * 4);
+    const offsetsBytes = new Uint8Array(
+      u2d4Snap,
+      U2D4_HEADER_BYTES + schemaLen + tokenCount * 4,
+      (rowCount + 1) * 4
+    );
+    const docsBytes = new Uint8Array(
+      u2d4Snap,
+      U2D4_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4,
+      docsLen
+    );
+    const u2d3Total = SERIALIZED_DOC_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4 + docsLen;
+    const u2d3Buf = new ArrayBuffer(u2d3Total);
+    const u2d3Dv = new DataView(u2d3Buf);
+    u2d3Dv.setUint32(0, SERIALIZED_DOC_MAGIC, true);
+    u2d3Dv.setUint32(4, DOC_FORMAT_VERSION, true);
+    u2d3Dv.setUint32(8, profileEnum, true);
+    u2d3Dv.setUint32(12, unicodeEnum, true);
+    u2d3Dv.setUint32(16, scoringEnum, true);
+    u2d3Dv.setUint32(20, docCount, true);
+    u2d3Dv.setUint32(24, rowCount, true);
+    u2d3Dv.setUint32(28, tokenCount, true);
+    u2d3Dv.setUint32(32, foldedVal, true);
+    u2d3Dv.setUint32(36, schemaLen, true);
+    u2d3Dv.setUint32(40, docsLen, true);
+    new Uint8Array(u2d3Buf, SERIALIZED_DOC_HEADER_BYTES, schemaLen).set(schemaBytes);
+    new Uint8Array(u2d3Buf, SERIALIZED_DOC_HEADER_BYTES + schemaLen, tokensBytes.length).set(tokensBytes);
+    new Uint8Array(
+      u2d3Buf,
+      SERIALIZED_DOC_HEADER_BYTES + schemaLen + tokensBytes.length,
+      offsetsBytes.length
+    ).set(offsetsBytes);
+    new Uint8Array(
+      u2d3Buf,
+      SERIALIZED_DOC_HEADER_BYTES + schemaLen + tokensBytes.length + offsetsBytes.length,
+      docsBytes.length
+    ).set(docsBytes);
+    const u2d3Crc = crc32Parts([
+      new Uint8Array(u2d3Buf, 0, 44),
+      new Uint8Array(u2d3Buf, SERIALIZED_DOC_HEADER_BYTES)
+    ]);
+    u2d3Dv.setUint32(44, u2d3Crc, true);
+
+    const legacyHeader = deserializeDocumentSnapshotHeader(u2d3Buf);
+    assert.strictEqual(legacyHeader.magic, SERIALIZED_DOC_MAGIC);
+    assert.strictEqual(legacyHeader.formatVersion, DOC_FORMAT_VERSION);
+    assert.strictEqual(legacyHeader.columnarByteLength ?? 0, 0);
+    assert.strictEqual(legacyHeader.docCount, 2);
+    const legacyRestored = await restoreDocumentIndex(u2d3Buf);
+    assert.strictEqual(legacyRestored.getStats().docCount, 2);
+    const legacyRes = await legacyRestored.search('migration');
+    assert.strictEqual(legacyRes.totalMatches, 2);
+    // Legacy tamper still fails closed.
+    const badLegacy = u2d3Buf.slice(0);
+    new Uint8Array(badLegacy, SERIALIZED_DOC_HEADER_BYTES, 1)[0] ^= 0xff;
+    await assert.rejects(async () => restoreDocumentIndex(badLegacy));
+    u2d4Index.destroy();
+    legacyRestored.destroy();
+    console.log('   ✅ U2D3 legacy migration read path confirmed');
+  }
+
+  // =========================================================================
+  // 11. Columnar Shape Negative Cases (fail-closed with recomputed CRC)
+  // =========================================================================
+  console.log('11. Testing columnar shape negatives (fail-closed beyond CRC)...');
+  {
+    const { crc32Parts, validateColumnarPayload } = await import('../packages/webgpu-search/src/index');
+    interface NegDoc {
+      id: string;
+      title: string;
+      level: string;
+    }
+    const negDocs: NegDoc[] = [
+      { id: 'n-1', title: 'timeout alpha', level: 'ERROR' },
+      { id: 'n-2', title: 'timeout beta', level: 'INFO' }
+    ];
+    const negIndex = await DocumentIndex.create(negDocs, {
+      fields: ['title'],
+      filterFields: [{ name: 'level' }]
+    });
+    const baseSnap = negIndex.serialize();
+    const baseHeader = deserializeDocumentSnapshotHeader(baseSnap);
+    const colStart =
+      U2D4_HEADER_BYTES + baseHeader.schemaByteLength + baseHeader.tokenCount * 4 + (baseHeader.rowCount + 1) * 4;
+    const colLen = baseHeader.columnarByteLength ?? 0;
+    assert(colLen > 0);
+    const recomputeCrc = (buf: ArrayBuffer): number => {
+      const h = deserializeDocumentSnapshotHeader(buf);
+      const cLen = h.columnarByteLength ?? 0;
+      const tBytes = h.tokenCount * 4;
+      const oBytes = (h.rowCount + 1) * 4;
+      return crc32Parts([
+        new Uint8Array(buf, 0, 52),
+        new Uint8Array(buf, U2D4_HEADER_BYTES, h.schemaByteLength),
+        new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength, tBytes),
+        new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength + tBytes, oBytes),
+        cLen > 0
+          ? new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength + tBytes + oBytes, cLen)
+          : new Uint8Array(0),
+        h.docsByteLength > 0
+          ? new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength + tBytes + oBytes + cLen, h.docsByteLength)
+          : new Uint8Array(0)
+      ]);
+    };
+    const withColumnar = (mutate: (payload: any) => void): ArrayBuffer => {
+      const buf = baseSnap.slice(0);
+      const bytes = new Uint8Array(buf, colStart, colLen);
+      const payload = JSON.parse(new TextDecoder().decode(bytes));
+      mutate(payload);
+      const rewritten = new TextEncoder().encode(JSON.stringify(payload));
+      // Length-preserving mutations exercise the CRC/shape path (not the
+      // length path). Length-changing shape cases are covered via direct
+      // `validateColumnarPayload` calls below.
+      assert.strictEqual(rewritten.length, colLen, 'shape-negative mutation must preserve columnar length');
+      new Uint8Array(buf, colStart, colLen).set(rewritten);
+      new DataView(buf).setUint32(52, recomputeCrc(buf), true);
+      return buf;
+    };
+    // Field-name mismatch (same-length alias preserves columnar bytes).
+    await assert.rejects(
+      async () => restoreDocumentIndex(withColumnar((p) => { p.fields[0].name = 'LEVEL'; })),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Type mismatch via direct validator (adding a type changes JSON length,
+    // so exercise shape validation without the snapshot length gate).
+    assert.throws(
+      () => validateColumnarPayload(
+        new TextEncoder().encode(JSON.stringify({ v: 1, fields: [{ name: 'level', type: 'number' }], rows: [['ERROR'], ['INFO']] })),
+        [{ name: 'level' }],
+        2
+      ),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // rows.length !== docCount and row-width mismatch via direct shape validation
+    // (full-snapshot length equality would mask these, so exercise the validator).
+    assert.throws(
+      () => validateColumnarPayload(
+        new TextEncoder().encode(JSON.stringify({ v: 1, fields: [{ name: 'level' }], rows: [[ 'ERROR' ]] })),
+        [{ name: 'level' }],
+        2
+      ),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    assert.throws(
+      () => validateColumnarPayload(
+        new TextEncoder().encode(JSON.stringify({ v: 1, fields: [{ name: 'level' }], rows: [[ 'ERROR', 'EXTRA' ], [ 'INFO' ]] })),
+        [{ name: 'level' }],
+        2
+      ),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Stripped empty segment on a filtered non-empty index fails closed.
+    assert.throws(
+      () => validateColumnarPayload(new Uint8Array(0), [{ name: 'level' }], 2),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Non-JSON bytes (valid CRC over garbage).
+    {
+      const buf = baseSnap.slice(0);
+      new Uint8Array(buf, colStart, colLen).fill(0x41);
+      new DataView(buf).setUint32(52, recomputeCrc(buf), true);
+      await assert.rejects(
+        async () => restoreDocumentIndex(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+    // Envelope version mismatch (v !== 1).
+    await assert.rejects(
+      async () => restoreDocumentIndex(withColumnar((p) => { p.v = 2; })),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Non-zero reserved word (with recomputed CRC to isolate the reserved check).
+    // NOTE: recomputeCrc re-parses the header (which rejects reserved!=0), so
+    // compute the CRC directly from known segment offsets here.
+    {
+      const buf = baseSnap.slice(0);
+      new DataView(buf).setUint32(48, 1, true);
+      const tBytes = baseHeader.tokenCount * 4;
+      const oBytes = (baseHeader.rowCount + 1) * 4;
+      const cLen = baseHeader.columnarByteLength ?? 0;
+      const crcNoHeaderParse = crc32Parts([
+        new Uint8Array(buf, 0, 52),
+        new Uint8Array(buf, U2D4_HEADER_BYTES, baseHeader.schemaByteLength),
+        new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength, tBytes),
+        new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength + tBytes, oBytes),
+        cLen > 0
+          ? new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength + tBytes + oBytes, cLen)
+          : new Uint8Array(0),
+        baseHeader.docsByteLength > 0
+          ? new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength + tBytes + oBytes + cLen, baseHeader.docsByteLength)
+          : new Uint8Array(0)
+      ]);
+      new DataView(buf).setUint32(52, crcNoHeaderParse, true);
+      await assert.rejects(
+        async () => restoreDocumentIndex(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+    // Truncated columnar segment (length mismatch).
+    {
+      const buf = baseSnap.slice(0, baseSnap.byteLength - 1);
+      await assert.rejects(
+        async () => restoreDocumentIndex(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+    // Empty filterFields ⇒ columnarByteLength 0.
+    {
+      const plain = await DocumentIndex.create(negDocs, { fields: ['title'] });
+      const plainSnap = plain.serialize();
+      const plainHeader = deserializeDocumentSnapshotHeader(plainSnap);
+      assert.strictEqual(plainHeader.columnarByteLength ?? 0, 0);
+      plain.destroy();
+    }
+    negIndex.destroy();
+    console.log('   ✅ Columnar shape negatives fail closed');
+  }
+
+  // =========================================================================
+  // 12. Custom Filter Getter Guard (fail-closed unless override supplied)
+  // =========================================================================
+  console.log('12. Testing custom filter getter restore guard...');
+  {
+    interface GetterDoc {
+      id: string;
+      title: string;
+      perf: { latency: number };
+    }
+    const getterDocs: GetterDoc[] = [
+      { id: 'g-1', title: 'timeout alpha', perf: { latency: 1200 } },
+      { id: 'g-2', title: 'timeout beta', perf: { latency: 10 } }
+    ];
+    const getterIndex = await DocumentIndex.create(getterDocs, {
+      fields: ['title'],
+      filterFields: [{ name: 'latencyMs', type: 'number', getter: (d: GetterDoc) => d.perf.latency }]
+    });
+    const getterSnap = getterIndex.serialize();
+    const getterHeader = deserializeDocumentSnapshotHeader(getterSnap);
+    assert.strictEqual(getterHeader.columnarByteLength! > 0, true);
+    // Restore without override must fail closed (default doc[name] would clear presence).
+    await assert.rejects(
+      async () => restoreDocumentIndex<GetterDoc>(getterSnap),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Restore with matching getter override succeeds with filter parity.
+    const restoredGetter = await restoreDocumentIndex<GetterDoc>(getterSnap, {
+      options: {
+        filterFields: [{ name: 'latencyMs', type: 'number', getter: (d: GetterDoc) => d.perf.latency }]
+      }
+    });
+    const getterRes = await restoredGetter.search('timeout', {
+      mode: 'fuzzy',
+      filter: { latencyMs: { gte: 900 } }
+    });
+    assert.strictEqual(getterRes.totalMatches, 1);
+    assert.strictEqual(getterRes.results[0].id, 'g-1');
+    getterIndex.destroy();
+    restoredGetter.destroy();
+    console.log('   ✅ Custom filter getter guard confirmed');
+  }
+
+  // =========================================================================
+  // 13. Snapshot Size Caps & JSON-Safe Columnar Encoding
+  // =========================================================================
+  console.log('13. Testing snapshot size caps & JSON-safe columnar encoding...');
+  {
+    const { encodeColumnarPayload, validateColumnarPayload } = await import('../packages/webgpu-search/src/index');
+    // BigInt / function / symbol / undefined normalize without throwing.
+    {
+      const bytes = encodeColumnarPayload(
+        [{ id: 'b-1' } as any],
+        [{ name: 'level', getter: () => 10n as any }]
+      );
+      assert(bytes.length > 0);
+      const parsed = JSON.parse(new TextDecoder().decode(bytes));
+      assert.strictEqual(parsed.rows[0][0], '10');
+      const fnBytes = encodeColumnarPayload([{ id: 'b-1' } as any], [{ name: 'f', getter: () => (() => 1) as any }]);
+      const fnParsed = JSON.parse(new TextDecoder().decode(fnBytes));
+      assert.strictEqual(fnParsed.rows[0][0], null);
+    }
+    // Oversize lengths fail closed before decode (no OOM allocation).
+    {
+      const big = new Uint8Array(8);
+      assert.throws(
+        () => validateColumnarPayload(new Uint8Array(70 * 1024 * 1024), [{ name: 'level' }], 1),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+      void big;
+      const oversizeHeader = { schemaByteLength: 20 << 20, columnarByteLength: 0, docsByteLength: 0, docCount: 1, tokenCount: 1, rowCount: 1 };
+      void oversizeHeader;
+      // Full-snapshot oversize path: craft a header claiming >16 MiB schema.
+      const small = await DocumentIndex.create([{ id: 's-1', title: 'hello' }], { fields: ['title'] });
+      const snap = small.serialize();
+      const tampered = snap.slice(0);
+      new DataView(tampered).setUint32(36, 20 << 20, true);
+      await assert.rejects(
+        async () => restoreDocumentIndex(tampered),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+      small.destroy();
+    }
+    console.log('   ✅ Size caps & JSON-safe encoding confirmed');
   }
 
   console.log('\n--- All Milestone 6 Persistence Tests Passed Successfully! ✅ ---');

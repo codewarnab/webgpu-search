@@ -7,8 +7,9 @@ import {
   serializeDocumentIndex,
   restoreDocumentIndex,
   deserializeDocumentSnapshotHeader,
-  SERIALIZED_DOC_MAGIC,
-  DOC_FORMAT_VERSION,
+  U2D4_MAGIC,
+  U2D4_FORMAT_VERSION,
+  U2D4_HEADER_BYTES,
   type DocumentId,
   type DocumentIndexStats,
   type HighlightRange
@@ -268,13 +269,14 @@ async function runM8Tests() {
   }
 
   // =========================================================================
-  // 4. Versioned Snapshot Persistence (U2D3 Binary Format Roundtrip)
+  // 4. Versioned Snapshot Persistence (U2D4 Binary Format Roundtrip)
   // =========================================================================
-  console.log('4. Testing U2D3 Little-Endian binary format serialization & restore roundtrip...');
+  console.log('4. Testing U2D4 Little-Endian binary format serialization & restore roundtrip...');
   {
     const testLogs = generateStructuredLogs(5000);
     const docIndex = await DocumentIndex.create(testLogs, {
       fields: ['message', 'service', 'level', 'traceId'],
+      filterFields: [{ name: 'level' }, { name: 'service' }],
       preferGpu: false
     });
 
@@ -282,14 +284,16 @@ async function runM8Tests() {
     const baselineQuery = 'deadlock';
     const baselineSearch = await docIndex.search(baselineQuery, { mode: 'fuzzy', limit: 25 });
 
-    // B. Serialize to U2D3 binary buffer
+    // B. Serialize to U2D4 binary buffer
     const snapshotBuffer = serializeDocumentIndex(docIndex);
-    assert(snapshotBuffer.byteLength > 48, 'Snapshot must be larger than 48-byte header');
+    assert(snapshotBuffer.byteLength > 56, 'Snapshot must be larger than 56-byte U2D4 header');
 
-    // C. Inspect 48-byte Little-Endian Header
+    // C. Inspect 56-byte Little-Endian Header (8-byte aligned)
     const header = deserializeDocumentSnapshotHeader(snapshotBuffer);
-    assert.strictEqual(header.magic, SERIALIZED_DOC_MAGIC); // 0x55324433 ('U2D3')
-    assert.strictEqual(header.formatVersion, DOC_FORMAT_VERSION); // 3
+    assert.strictEqual(header.magic, U2D4_MAGIC); // 0x55324434 ('U2D4')
+    assert.strictEqual(header.formatVersion, U2D4_FORMAT_VERSION); // 4
+    assert.strictEqual(U2D4_HEADER_BYTES, 56);
+    assert.strictEqual(U2D4_HEADER_BYTES % 8, 0, 'U2D4 header must be 8-byte aligned');
     assert.strictEqual(header.profileId, 'unicode-default');
     assert.strictEqual(header.unicodeVersion, '16.0.0');
     assert.strictEqual(header.scoringVersion, 'parity-v1');
@@ -298,6 +302,7 @@ async function runM8Tests() {
     assert(header.tokenCount > 0);
     assert(header.schemaByteLength > 0);
     assert(header.docsByteLength > 0);
+    assert(header.columnarByteLength! > 0, 'filter-configured snapshot must carry a columnar segment');
     assert(typeof header.checksum === 'number');
 
     // D. Restore from binary buffer
@@ -308,7 +313,7 @@ async function runM8Tests() {
     const restoredStats = restoredIndex.getStats();
     assert.strictEqual(restoredStats.docCount, 5000);
     assert.strictEqual(restoredStats.rowCount, 20000);
-    assert.strictEqual(restoredStats.formatVersion, 3);
+    assert.strictEqual(restoredStats.formatVersion, 4);
     assert(typeof restoredStats.restoreTimeMs === 'number' && restoredStats.restoreTimeMs >= 0);
 
     // E. Verify identical ranking and score parity
@@ -323,6 +328,22 @@ async function runM8Tests() {
       assert.strictEqual(restItem.score, baseItem.score);
       assert.strictEqual(restItem.matchedField, baseItem.matchedField);
     }
+
+    // E2. Structured filter + facet parity across the restore boundary.
+    const baselineFiltered = await docIndex.search(baselineQuery, {
+      mode: 'fuzzy',
+      limit: 25,
+      filter: { level: 'ERROR' },
+      facets: { byLevel: { type: 'terms', field: 'level', limit: 10 } }
+    });
+    const restoredFiltered = await restoredIndex.search(baselineQuery, {
+      mode: 'fuzzy',
+      limit: 25,
+      filter: { level: 'ERROR' },
+      facets: { byLevel: { type: 'terms', field: 'level', limit: 10 } }
+    });
+    assert.strictEqual(restoredFiltered.totalMatches, baselineFiltered.totalMatches);
+    assert.deepStrictEqual(restoredFiltered.facets, baselineFiltered.facets);
 
     // F. Decoupled Document Storage Persistence (docsByteLength = 0)
     const decoupledBuffer = serializeDocumentIndex(docIndex, { decoupled: true });
@@ -342,13 +363,225 @@ async function runM8Tests() {
     docIndex.destroy();
     restoredIndex.destroy();
     restoredDecoupled.destroy();
-    console.log('   ✅ U2D3 Little-Endian binary format serialization & decoupled restore verified');
+    console.log('   ✅ U2D4 Little-Endian binary format serialization & decoupled restore verified');
   }
 
   // =========================================================================
-  // 5. Cross-Platform Safety Audit (Zero Unguarded DOM Globals)
+  // 5. v0.4 Proof-App Feature Integration (prefix, filters, facets, suggest)
   // =========================================================================
-  console.log('5. Auditing core library cross-platform safety (zero unguarded DOM globals)...');
+  console.log('5. Testing v0.4 proof-app feature integration (prefix + type filter + autocomplete)...');
+  {
+    // A. Monaco palette: prefix symbol search with structured type filter.
+    const palette = new PaletteEngine({ useWorker: false, preferGpu: false });
+    await palette.init(generateMonacoRecords(600));
+
+    const prefixRes = await palette.search('compute', { mode: 'prefix', limit: 20 });
+    assert(prefixRes.totalMatches >= 1, 'prefix search must match symbol records');
+
+    const shaderOnly = await palette.search('compute', {
+      mode: 'prefix',
+      limit: 20,
+      typeFilter: 'shader'
+    });
+    assert(shaderOnly.totalMatches >= 1, 'shader-filtered prefix search must match');
+    for (const r of shaderOnly.results) {
+      assert.strictEqual(r.doc.type, 'shader');
+    }
+    assert(shaderOnly.totalMatches <= prefixRes.totalMatches);
+
+    // Type facets are populated on every palette search.
+    assert(shaderOnly.facets?.byType?.type === 'terms', 'palette search must return type facets');
+    assert((shaderOnly.facets.byType as any).isApproximate === false);
+
+    // Autocomplete suggestions resolve.
+    const suggestRes = await palette.suggest('comp', { mode: 'prefix', limit: 5 });
+    assert(suggestRes.suggestions.length >= 1, 'suggest must return completions');
+
+    const inlineSuggest = await palette.search('comp', {
+      mode: 'prefix',
+      limit: 5,
+      suggest: { mode: 'prefix', limit: 5 }
+    });
+    assert((inlineSuggest.suggestions?.length ?? 0) >= 1, 'inline suggest must return completions');
+
+    // Palette U2D4 snapshot roundtrip preserves prefix + type filtering.
+    {
+      const snap = await palette.serializeSnapshot();
+      const snapHeader = deserializeDocumentSnapshotHeader(snap);
+      assert.strictEqual(snapHeader.magic, U2D4_MAGIC);
+      assert.strictEqual(snapHeader.formatVersion, U2D4_FORMAT_VERSION);
+      const fresh = new PaletteEngine({ useWorker: false, preferGpu: false });
+      await fresh.init([]);
+      await fresh.restoreSnapshot(snap);
+      const after = await fresh.search('compute', { mode: 'prefix', limit: 20, typeFilter: 'shader' });
+      assert.strictEqual(after.totalMatches, shaderOnly.totalMatches);
+      fresh.destroy();
+    }
+    palette.destroy();
+
+    // B. Log viewer: structured severity filter + timestamp range + facets.
+    const logEngine = new LogEngine({ useWorker: false, preferGpu: false });
+    const logs = generateStructuredLogs(5000);
+    await logEngine.init(logs);
+
+    const errorOnly = await logEngine.search('timeout', {
+      mode: 'fuzzy',
+      limit: 20,
+      levelFilter: 'ERROR'
+    });
+    assert(errorOnly.totalMatches >= 1);
+    for (const r of errorOnly.results) {
+      assert.strictEqual(r.doc.level, 'ERROR');
+    }
+    assert(errorOnly.facets?.byLevel?.type === 'terms', 'log search must return level facets');
+    assert(errorOnly.facets?.byLatency?.type === 'range', 'log search must return latency range facets');
+
+    // Timestamp range narrows strictly on seeded data (range filter is applied,
+    // not ignored): per-result timestamps must fall inside [mid, newest).
+    const newest = logs[logs.length - 1]!.timestamp;
+    const mid = logs[Math.floor(logs.length / 2)]!.timestamp;
+    const rangeNarrow = await logEngine.search('timeout', {
+      mode: 'fuzzy',
+      limit: 50,
+      timestampRange: { from: mid, to: newest }
+    });
+    const rangeWide = await logEngine.search('timeout', { mode: 'fuzzy', limit: 50 });
+    assert(rangeNarrow.totalMatches < rangeWide.totalMatches, 'timestamp range must strictly narrow matches');
+    for (const r of rangeNarrow.results) {
+      assert(r.doc.timestamp >= mid && r.doc.timestamp < newest, 'range result timestamp in-window');
+    }
+
+    // U2D4 snapshot roundtrip preserves structured filtering (restore + search parity).
+    const snap = await logEngine.serializeSnapshot();
+    const snapHeader = deserializeDocumentSnapshotHeader(snap);
+    assert.strictEqual(snapHeader.magic, U2D4_MAGIC);
+    assert.strictEqual(snapHeader.formatVersion, 4);
+    const restoredSnap = await restoreDocumentIndex<StructuredLogRecord>(snap, {
+      options: { preferGpu: false }
+    });
+    const snapBaseline = await logEngine.search('timeout', {
+      mode: 'fuzzy',
+      limit: 20,
+      levelFilter: 'ERROR'
+    });
+    const snapAfter = await restoredSnap.search('timeout', {
+      mode: 'fuzzy',
+      limit: 20,
+      filter: { level: 'ERROR' }
+    });
+    assert.strictEqual(snapAfter.totalMatches, snapBaseline.totalMatches);
+    restoredSnap.destroy();
+    logEngine.destroy();
+    console.log('   ✅ v0.4 proof-app feature integration verified');
+  }
+
+  // =========================================================================
+  // 6. Worker-Boundary Proof-App Integration (filter/facets/suggest survive)
+  // =========================================================================
+  console.log('6. Testing worker-boundary proof-app integration (mock worker)...');
+  {
+    const { SearchWorkerClient, startSearchWorker } = await import('../packages/webgpu-search/src/index');
+    const createMockWorkerScope = () => {
+      const clientListeners: Array<(e: any) => void> = [];
+      const workerListeners: Array<(e: any) => void> = [];
+      const clientWorker = {
+        postMessage(data: any) {
+          queueMicrotask(() => { for (const l of workerListeners) l({ data }); });
+        },
+        addEventListener(event: string, listener: any) {
+          if (event === 'message') clientListeners.push(listener);
+        },
+        removeEventListener(event: string, listener: any) {
+          if (event === 'message') {
+            const i = clientListeners.indexOf(listener);
+            if (i >= 0) clientListeners.splice(i, 1);
+          }
+        },
+        terminate() { clientListeners.length = 0; workerListeners.length = 0; }
+      };
+      const workerScope = {
+        postMessage(data: any) {
+          queueMicrotask(() => { for (const l of clientListeners) l({ data }); });
+        },
+        addEventListener(event: string, listener: any) {
+          if (event === 'message') workerListeners.push(listener);
+        },
+        removeEventListener(event: string, listener: any) {
+          if (event === 'message') {
+            const i = workerListeners.indexOf(listener);
+            if (i >= 0) workerListeners.splice(i, 1);
+          }
+        }
+      };
+      startSearchWorker(workerScope);
+      return { clientWorker };
+    };
+
+    // Palette worker path: prefix + type filter + facets + suggest.
+    {
+      const { clientWorker } = createMockWorkerScope();
+      const client = new SearchWorkerClient<MonacoFileRecord>({ worker: clientWorker as any });
+      const records = generateMonacoRecords(600);
+      await client.init(records, {
+        idField: 'id',
+        fields: [
+          { name: 'filename', weight: 3.0 },
+          { name: 'symbols', weight: 2.0 },
+          { name: 'path', weight: 1.0 },
+          { name: 'description', weight: 0.5 }
+        ],
+        filterFields: [{ name: 'type' }, { name: 'language' }],
+        preferGpu: false
+      });
+      const res = await client.search('compute', {
+        mode: 'prefix',
+        limit: 20,
+        filter: { type: 'shader' },
+        facets: { byType: { type: 'terms', field: 'type', limit: 10 } },
+        suggest: { mode: 'prefix', limit: 5 }
+      } as any);
+      assert(res.totalMatches >= 1);
+      assert((res.facets as any)?.byType?.type === 'terms');
+      assert((res.suggestions?.length ?? 0) >= 1);
+      await client.destroy();
+    }
+
+    // Log worker path: level + latency filter + facets.
+    {
+      const { clientWorker } = createMockWorkerScope();
+      const client = new SearchWorkerClient<StructuredLogRecord>({ worker: clientWorker as any });
+      const logs = generateStructuredLogs(2000);
+      await client.init(logs as any, {
+        idField: 'id',
+        fields: [
+          { name: 'message', weight: 2.0 },
+          { name: 'service', weight: 1.5 },
+          { name: 'level', weight: 1.0 },
+          { name: 'traceId', weight: 1.2 }
+        ],
+        filterFields: [{ name: 'level' }, { name: 'service' }, { name: 'timestamp' }, { name: 'latencyMs', type: 'number' }],
+        preferGpu: false
+      });
+      const res = await client.search('timeout', {
+        mode: 'fuzzy',
+        limit: 20,
+        filter: { level: 'ERROR', latencyMs: { gte: 300 } },
+        facets: {
+          byLevel: { type: 'terms', field: 'level', limit: 10 },
+          byLatency: { type: 'range', field: 'latencyMs', ranges: [{ to: 50 }, { from: 50, to: 300 }, { from: 300 }] }
+        }
+      } as any);
+      assert(res.totalMatches >= 1);
+      assert((res.facets as any)?.byLevel?.type === 'terms');
+      await client.destroy();
+    }
+    console.log('   ✅ Worker-boundary proof-app integration verified');
+  }
+
+  // =========================================================================
+  // 7. Cross-Platform Safety Audit (Zero Unguarded DOM Globals)
+  // =========================================================================
+  console.log('7. Auditing core library cross-platform safety (zero unguarded DOM globals)...');
   {
     const srcDir = path.join(rootDir, 'packages/webgpu-search/src');
     const tsFiles: string[] = [];

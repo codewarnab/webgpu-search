@@ -6,7 +6,16 @@ import type { StructuredLogRecord } from './types';
 // DOM Elements
 const searchInput = document.getElementById('search-input') as HTMLInputElement;
 const levelSelect = document.getElementById('level-select') as HTMLSelectElement;
+const serviceSelect = document.getElementById('service-select') as HTMLSelectElement;
 const modeSelect = document.getElementById('mode-select') as HTMLSelectElement;
+const latencyMin = document.getElementById('latency-min') as HTMLInputElement;
+const latencyMax = document.getElementById('latency-max') as HTMLInputElement;
+const tsFrom = document.getElementById('ts-from') as HTMLInputElement;
+const tsTo = document.getElementById('ts-to') as HTMLInputElement;
+const facetBar = document.getElementById('facet-bar') as HTMLDivElement;
+const facetLevels = document.getElementById('facet-levels') as HTMLDivElement;
+const facetServices = document.getElementById('facet-services') as HTMLDivElement;
+const facetLatency = document.getElementById('facet-latency') as HTMLDivElement;
 const engineSelect = document.getElementById('engine-select') as HTMLSelectElement;
 const workerSelect = document.getElementById('worker-select') as HTMLSelectElement;
 const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement;
@@ -70,6 +79,50 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+/** Safe datetime-local → ISO conversion: invalid input yields undefined (no throw). */
+function toIsoOrUndefined(raw: string): string | undefined {
+  const v = raw.trim();
+  if (v === '') return undefined;
+  const t = new Date(v).getTime();
+  if (!Number.isFinite(t)) return undefined;
+  return new Date(t).toISOString();
+}
+
+/** Shared empty-query filter pipeline so live-stream refresh matches search. */
+function applyEmptyQueryFilters(
+  records: StructuredLogRecord[],
+  opts: { levelFilter: string; serviceFilter: string; minMs?: number; maxMs?: number; fromIso?: string; toIso?: string }
+): StructuredLogRecord[] {
+  let out = records;
+  if (opts.levelFilter !== 'ALL') {
+    out = out.filter((r) => r.level === opts.levelFilter);
+  }
+  if (opts.serviceFilter !== 'ALL') {
+    out = out.filter((r) => r.service === opts.serviceFilter);
+  }
+  if (opts.minMs !== undefined && Number.isFinite(opts.minMs)) {
+    const min = opts.minMs as number;
+    out = out.filter((r) => r.latencyMs >= min);
+  }
+  if (opts.maxMs !== undefined && Number.isFinite(opts.maxMs)) {
+    const max = opts.maxMs as number;
+    out = out.filter((r) => r.latencyMs < max);
+  }
+  if (opts.fromIso !== undefined) {
+    out = out.filter((r) => r.timestamp >= (opts.fromIso as string));
+  }
+  if (opts.toIso !== undefined) {
+    out = out.filter((r) => r.timestamp < (opts.toIso as string));
+  }
+  return out;
+}
+
+/** Guarded select assignment: unknown facet values reset to ALL (no poisoned empty filter). */
+function setSelectGuarded(sel: HTMLSelectElement, value: string): void {
+  const exists = Array.from(sel.options).some((o) => o.value === value);
+  sel.value = exists ? value : 'ALL';
+}
+
 async function updateHUD(): Promise<void> {
   const stats = await engine.getStats();
   if (!stats) return;
@@ -106,8 +159,13 @@ btnCloseDrawer.addEventListener('click', () => {
 
 async function performSearch(): Promise<void> {
   const query = searchInput.value.trim();
-  const mode = modeSelect.value as 'fuzzy' | 'substring';
+  const mode = modeSelect.value as 'fuzzy' | 'substring' | 'prefix' | 'token';
   const levelFilter = levelSelect.value;
+  const serviceFilter = serviceSelect.value;
+  const minMs = latencyMin.value.trim() === '' ? undefined : Number(latencyMin.value);
+  const maxMs = latencyMax.value.trim() === '' ? undefined : Number(latencyMax.value);
+  const fromIso = toIsoOrUndefined(tsFrom.value);
+  const toIso = toIsoOrUndefined(tsTo.value);
 
   if (currentAbortController) {
     currentAbortController.abort();
@@ -116,14 +174,19 @@ async function performSearch(): Promise<void> {
   currentAbortController = controller;
 
   if (!query) {
-    let records = engine.getRecords();
-    if (levelFilter !== 'ALL') {
-      records = records.filter((r) => r.level === levelFilter);
-    }
+    const records = applyEmptyQueryFilters(engine.getRecords(), {
+      levelFilter,
+      serviceFilter,
+      minMs,
+      maxMs,
+      fromIso,
+      toIso
+    });
     const items: VirtualGridItem[] = records.map((r) => ({ record: r }));
     grid.setItems(items, { resetScroll: false });
     hudMatches.textContent = records.length.toLocaleString();
     hudLatency.textContent = '0.00 ms';
+    renderFacets(undefined);
     return;
   }
 
@@ -133,6 +196,19 @@ async function performSearch(): Promise<void> {
       highlight: true,
       limit: 1000,
       levelFilter,
+      serviceFilter,
+      latencyRange: minMs !== undefined || maxMs !== undefined
+        ? {
+          ...(minMs !== undefined && Number.isFinite(minMs) ? { minMs } : {}),
+          ...(maxMs !== undefined && Number.isFinite(maxMs) ? { maxMs } : {})
+        }
+        : undefined,
+      timestampRange: fromIso !== undefined || toIso !== undefined
+        ? {
+          ...(fromIso !== undefined ? { from: fromIso } : {}),
+          ...(toIso !== undefined ? { to: toIso } : {})
+        }
+        : undefined,
       signal: controller.signal
     });
 
@@ -141,10 +217,75 @@ async function performSearch(): Promise<void> {
     grid.setSearchResults(searchRes.results);
     hudMatches.textContent = searchRes.totalMatches.toLocaleString();
     hudLatency.textContent = `${searchRes.searchDurationMs.toFixed(2)} ms`;
+    renderFacets(searchRes.facets);
   } catch (err: any) {
     if (err?.name === 'AbortError') return;
     console.error('[Search Error]', err);
   }
+}
+
+function renderFacetChips(
+  container: HTMLDivElement,
+  buckets: Array<{ key?: string; value?: unknown; count: number; from?: number; to?: number }>,
+  onSelect?: (label: string, bucket?: { from?: number; to?: number }) => void
+): void {
+  container.innerHTML = '';
+  for (const b of buckets) {
+    const label = b.key ?? String(b.value);
+    const chip = document.createElement('button');
+    chip.className = 'facet-chip';
+    chip.textContent = `${label} · ${b.count}`;
+    if (onSelect) {
+      chip.style.cursor = 'pointer';
+      chip.addEventListener('click', () => onSelect(label, { from: b.from, to: b.to }));
+    } else {
+      // Non-interactive bucket: render as span semantics (no pointer cursor).
+      chip.style.cursor = 'default';
+      chip.disabled = true;
+    }
+    container.appendChild(chip);
+  }
+}
+
+function renderFacets(facets: Record<string, any> | undefined): void {
+  // Clear all groups up-front so absent groups cannot show stale chips.
+  facetLevels.innerHTML = '';
+  facetServices.innerHTML = '';
+  facetLatency.innerHTML = '';
+  if (!facets) {
+    facetBar.style.display = 'none';
+    return;
+  }
+  let anyBuckets = false;
+  const byLevel = facets.byLevel;
+  if (byLevel?.type === 'terms' && Array.isArray(byLevel.buckets) && byLevel.buckets.length > 0) {
+    anyBuckets = true;
+    renderFacetChips(facetLevels, byLevel.buckets, (label) => {
+      setSelectGuarded(levelSelect, label);
+      performSearch();
+    });
+  }
+  const byService = facets.byService;
+  if (byService?.type === 'terms' && Array.isArray(byService.buckets) && byService.buckets.length > 0) {
+    anyBuckets = true;
+    renderFacetChips(facetServices, byService.buckets.slice(0, 8), (label) => {
+      setSelectGuarded(serviceSelect, label);
+      performSearch();
+    });
+  }
+  const byLatency = facets.byLatency;
+  if (byLatency?.type === 'range' && Array.isArray(byLatency.buckets) && byLatency.buckets.length > 0) {
+    anyBuckets = true;
+    // Clicking a latency bucket narrows the latency inputs to that range.
+    renderFacetChips(facetLatency, byLatency.buckets, (_label, bucket) => {
+      if (bucket?.from !== undefined) latencyMin.value = String(bucket.from);
+      else latencyMin.value = '';
+      if (bucket?.to !== undefined) latencyMax.value = String(bucket.to);
+      else latencyMax.value = '';
+      performSearch();
+    });
+  }
+  facetBar.style.display = anyBuckets ? 'flex' : 'none';
 }
 
 async function loadDataset(count: number): Promise<void> {
@@ -180,13 +321,23 @@ function toggleStream(): void {
         await engine.appendLogs(newLogs);
         await updateHUD();
 
-        // If user isn't searching, refresh grid with current level filter
+        // If user isn't searching, refresh grid with the same empty-query
+        // filter pipeline as performSearch (level+service+latency+timestamp).
         if (!searchInput.value.trim()) {
-          let records = engine.getRecords();
           const levelFilter = levelSelect.value;
-          if (levelFilter !== 'ALL') {
-            records = records.filter((r) => r.level === levelFilter);
-          }
+          const serviceFilter = serviceSelect.value;
+          const minMs = latencyMin.value.trim() === '' ? undefined : Number(latencyMin.value);
+          const maxMs = latencyMax.value.trim() === '' ? undefined : Number(latencyMax.value);
+          const fromIso = toIsoOrUndefined(tsFrom.value);
+          const toIso = toIsoOrUndefined(tsTo.value);
+          const records = applyEmptyQueryFilters(engine.getRecords(), {
+            levelFilter,
+            serviceFilter,
+            minMs,
+            maxMs,
+            fromIso,
+            toIso
+          });
           const items: VirtualGridItem[] = records.slice(-1000).map((r) => ({ record: r }));
           grid.setItems(items, { resetScroll: false });
           hudMatches.textContent = records.length.toLocaleString();
@@ -264,7 +415,12 @@ searchInput.addEventListener('input', () => {
 });
 
 levelSelect.addEventListener('change', () => performSearch());
+serviceSelect.addEventListener('change', () => performSearch());
 modeSelect.addEventListener('change', () => performSearch());
+latencyMin.addEventListener('change', () => performSearch());
+latencyMax.addEventListener('change', () => performSearch());
+tsFrom.addEventListener('change', () => performSearch());
+tsTo.addEventListener('change', () => performSearch());
 
 engineSelect.addEventListener('change', async () => {
   const preferGpu = engineSelect.value === 'webgpu';

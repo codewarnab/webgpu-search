@@ -24,6 +24,19 @@ function escapeHtml(str: string): string {
   }[c] || c));
 }
 
+/**
+ * Defense-in-depth sanitizer for library-provided `highlightedText`.
+ * The library escapes with `escapeHtml:true`, but the grid inserts via
+ * `innerHTML` — re-escape everything except `<mark>`/`</mark>` so a future
+ * library regression or a caller omitting the flag cannot become stored XSS.
+ */
+function sanitizeHighlighted(html: string): string {
+  const escaped = escapeHtml(html);
+  return escaped
+    .replace(/&lt;mark&gt;/g, '<mark>')
+    .replace(/&lt;\/mark&gt;/g, '</mark>');
+}
+
 export class VirtualGrid {
   private container: HTMLElement;
   private rowHeight: number;
@@ -148,9 +161,9 @@ export class VirtualGrid {
       const rowIdx = startIndex + i;
 
       const levelClass = `level-${escapeHtml(r.level.toLowerCase())}`;
-      const msg = item.highlightedText?.message || escapeHtml(r.message);
-      const svc = item.highlightedText?.service || escapeHtml(r.service);
-      const trace = item.highlightedText?.traceId || escapeHtml(r.traceId);
+      const msg = item.highlightedText?.message ? sanitizeHighlighted(item.highlightedText.message) : escapeHtml(r.message);
+      const svc = item.highlightedText?.service ? sanitizeHighlighted(item.highlightedText.service) : escapeHtml(r.service);
+      const trace = item.highlightedText?.traceId ? sanitizeHighlighted(item.highlightedText.traceId) : escapeHtml(r.traceId);
 
       const scoreCol = item.score !== undefined
         ? `<span class="score-pill">${item.score}</span>`
