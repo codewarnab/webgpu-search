@@ -212,6 +212,12 @@ export interface MultiFieldCpuReferenceOutput {
   hasOverflow: boolean;
   results: MultiFieldHit[];
   durationMs: number;
+  /**
+   * Full ranked query-matched doc indices (post-filter when `filterDoc` is
+   * set, unfiltered otherwise), unaffected by `limit` truncation. Used by
+   * facet aggregation for exact bucket counts over the entire match set.
+   */
+  allMatchedDocIndices: number[];
 }
 
 export interface FieldScoreDefinition {
@@ -251,7 +257,8 @@ export function searchMultiFieldCpuReference(
       candidateCount: 0,
       hasOverflow: false,
       results: [],
-      durationMs: nowMs() - t0
+      durationMs: nowMs() - t0,
+      allMatchedDocIndices: []
     };
   }
 
@@ -343,7 +350,8 @@ export function searchMultiFieldCpuReference(
     candidateCount,
     hasOverflow,
     results,
-    durationMs
+    durationMs,
+    allMatchedDocIndices: hits.map((h) => h.docIndex)
   };
 }
 

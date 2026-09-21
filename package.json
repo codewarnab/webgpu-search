@@ -21,6 +21,7 @@
     "test:m7": "bun scripts/test-m7-observability.ts",
     "test:m8": "bun scripts/test-m8-proof-apps.ts",
     "test:filter": "bun scripts/test-m2-filter.ts",
+    "test:facets": "bun scripts/test-m3-facets.ts",
     "test:parity": "bun scripts/test-m4-parity.ts",
     "test:preprocess": "bun scripts/test-m2-preprocess.ts",
     "test:preprocess:tr": "LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun scripts/test-m2-preprocess.ts",

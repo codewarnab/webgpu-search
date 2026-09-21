@@ -921,4 +921,108 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
   getColumn(name: string): Column | undefined {
     return this.columns.get(name);
   }
+
+  /**
+   * Exact value distribution over candidate doc rows, specialized per column
+   * type for hot-loop speed (string columns count by dictionary code with
+   * zero per-doc allocation; numeric/boolean use primitive counters).
+   * Returns `undefined` for unknown fields. Missing values are skipped.
+   */
+  termsDistribution(
+    name: string,
+    candidates: Iterable<number>
+  ): Array<{ value: FilterValue; count: number }> | undefined {
+    const col = this.columns.get(name);
+    if (!col) return undefined;
+
+    switch (col.type) {
+      case 'string': {
+        const tableLen = col.stringTable.length;
+        const counts = new Uint32Array(Math.max(tableLen, 1));
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          if (!col.presence.has(d)) continue;
+          const code = col.codes[d];
+          if (code < counts.length) counts[code]++;
+        }
+        const out: Array<{ value: FilterValue; count: number }> = [];
+        for (let c = 0; c < tableLen; c++) {
+          if (counts[c] > 0) out.push({ value: col.stringTable[c], count: counts[c] });
+        }
+        return out;
+      }
+      case 'number': {
+        const map = new Map<number, number>();
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          if (!col.presence.has(d)) continue;
+          const v = col.values[d];
+          if (!Number.isFinite(v)) continue;
+          map.set(v, (map.get(v) ?? 0) + 1);
+        }
+        const out: Array<{ value: FilterValue; count: number }> = [];
+        for (const [value, count] of map) out.push({ value, count });
+        return out;
+      }
+      case 'boolean': {
+        let trueCount = 0;
+        let falseCount = 0;
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          if (!col.presence.has(d)) continue;
+          if (col.trueBitset.has(d)) trueCount++;
+          else falseCount++;
+        }
+        const out: Array<{ value: FilterValue; count: number }> = [];
+        if (trueCount > 0) out.push({ value: true, count: trueCount });
+        if (falseCount > 0) out.push({ value: false, count: falseCount });
+        return out;
+      }
+      case 'string[]': {
+        const map = new Map<string, number>();
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          const tags = col.docTags.get(d);
+          if (!tags) continue;
+          for (let i = 0; i < tags.length; i++) {
+            const t = tags[i];
+            map.set(t, (map.get(t) ?? 0) + 1);
+          }
+        }
+        const out: Array<{ value: FilterValue; count: number }> = [];
+        for (const [value, count] of map) out.push({ value, count });
+        return out;
+      }
+    }
+  }
+
+  /**
+   * Numeric bucket counts over candidate doc rows for half-open intervals
+   * `[from, to)`. Returns `undefined` for unknown or non-number fields.
+   */
+  rangeDistribution(
+    name: string,
+    candidates: Iterable<number>,
+    ranges: Array<{ from?: number; to?: number }>
+  ): number[] | undefined {
+    const col = this.columns.get(name);
+    if (!col || col.type !== 'number') return undefined;
+    const counts = new Array<number>(ranges.length).fill(0);
+    const froms = ranges.map((r) => r.from);
+    const tos = ranges.map((r) => r.to);
+    for (const d of candidates) {
+      if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+      if (!col.presence.has(d)) continue;
+      const v = col.values[d];
+      if (!Number.isFinite(v)) continue;
+      for (let b = 0; b < ranges.length; b++) {
+        const from = froms[b];
+        const to = tos[b];
+        if ((from === undefined || v >= from) && (to === undefined || v < to)) {
+          counts[b]++;
+        }
+      }
+    }
+    return counts;
+  }
 }
