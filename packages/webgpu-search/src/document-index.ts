@@ -61,9 +61,9 @@ import {
   candidateOverflowWarning
 } from './diagnostics';
 import {
-  DOC_FORMAT_VERSION,
   QUERY_TOKENS_MAX,
   SCORING_VERSION,
+  U2D4_FORMAT_VERSION,
   UNICODE_VERSION,
   DuplicateIdError,
   DocumentNotFoundError,
@@ -2946,7 +2946,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       scoringVersion: SCORING_VERSION,
       tokenCount: this.totalTokens,
       folded: this.folded,
-      formatVersion: DOC_FORMAT_VERSION,
+      formatVersion: U2D4_FORMAT_VERSION,
       docCount,
       rowCount,
       tombstoneCount,

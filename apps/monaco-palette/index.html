@@ -43,6 +43,35 @@
             <select id="mode-select" class="select-ctrl">
               <option value="fuzzy" selected>Fuzzy (Weighted)</option>
               <option value="substring">Substring (Exact)</option>
+              <option value="prefix">Prefix (Symbols)</option>
+              <option value="token">Token (Multi-term)</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <label for="type-select">Kind:</label>
+            <select id="type-select" class="select-ctrl">
+              <option value="ALL" selected>All Kinds</option>
+              <option value="file">file</option>
+              <option value="class">class</option>
+              <option value="function">function</option>
+              <option value="interface">interface</option>
+              <option value="method">method</option>
+              <option value="shader">shader</option>
+              <option value="type">type</option>
+              <option value="constant">constant</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <label for="lang-select">Lang:</label>
+            <select id="lang-select" class="select-ctrl">
+              <option value="ALL" selected>All Languages</option>
+              <option value="typescript">typescript</option>
+              <option value="wgsl">wgsl</option>
+              <option value="rust">rust</option>
+              <option value="json">json</option>
+              <option value="markdown">markdown</option>
             </select>
           </div>
 
@@ -68,7 +97,21 @@
             <input type="checkbox" id="highlight-toggle" checked />
             <span>Unicode Highlighting</span>
           </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="suggest-toggle" checked />
+            <span>Autocomplete</span>
+          </label>
         </div>
+      </div>
+
+      <div id="suggest-bar" class="suggest-bar" style="display: none;">
+        <span class="section-label">Suggestions</span>
+        <div id="suggest-list" class="suggest-list"></div>
+      </div>
+
+      <div id="facet-bar" class="facet-bar" style="display: none;">
+        <span class="section-label">Kind Facets</span>
+        <div id="facet-list" class="facet-list"></div>
       </div>
 
       <div class="palette-body">

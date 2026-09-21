@@ -27,7 +27,7 @@ interface TestDoc {
 const SAMPLE_DOCS: TestDoc[] = [
   { id: '1', title: 'WebGPU Shading Pipelines', category: 'GPU', content: 'WGSL compute shaders parallel search' },
   { id: '2', title: 'Unicode Canonical Decomposition', category: 'Text', content: 'NFD and NFC normalization code points' },
-  { id: '3', title: 'IndexedDB Snapshot Storage', category: 'Persistence', content: 'U2D3 Little-Endian binary format with CRC32' },
+  { id: '3', title: 'IndexedDB Snapshot Storage', category: 'Persistence', content: 'U2D4 Little-Endian binary format with CRC32' },
   { id: '4', title: 'Worker Client Concurrency', category: 'Threading', content: 'Off-thread async search with abort controllers' },
 ];
 
@@ -52,7 +52,7 @@ async function runM7Tests() {
     assert.strictEqual(stats.tombstoneRatio, 0);
     assert.strictEqual(stats.engine, 'cpu');
     assert.strictEqual(stats.fallbackReason, 'prefer-cpu');
-    assert.strictEqual(stats.formatVersion, 3);
+    assert.strictEqual(stats.formatVersion, 4);
     assert.strictEqual(stats.scoringVersion, 'parity-v1');
     assert.strictEqual(stats.unicodeVersion, '16.0.0');
     assert.strictEqual(stats.profileId, 'unicode-default');

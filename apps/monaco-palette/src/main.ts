@@ -9,6 +9,13 @@ const modeSelect = document.getElementById('mode-select') as HTMLSelectElement;
 const engineSelect = document.getElementById('engine-select') as HTMLSelectElement;
 const workerSelect = document.getElementById('worker-select') as HTMLSelectElement;
 const highlightToggle = document.getElementById('highlight-toggle') as HTMLInputElement;
+const suggestToggle = document.getElementById('suggest-toggle') as HTMLInputElement;
+const typeSelect = document.getElementById('type-select') as HTMLSelectElement;
+const langSelect = document.getElementById('lang-select') as HTMLSelectElement;
+const suggestBar = document.getElementById('suggest-bar') as HTMLDivElement;
+const suggestList = document.getElementById('suggest-list') as HTMLDivElement;
+const facetBar = document.getElementById('facet-bar') as HTMLDivElement;
+const facetList = document.getElementById('facet-list') as HTMLDivElement;
 const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement;
 
 // Preview Elements
@@ -185,6 +192,45 @@ function renderSelection(): void {
   updatePreview(selected);
 }
 
+function renderSuggestions(suggestions: Array<{ text: string; score: number }>): void {
+  suggestList.innerHTML = '';
+  if (suggestions.length === 0) {
+    suggestBar.style.display = 'none';
+    return;
+  }
+  suggestBar.style.display = 'block';
+  for (const s of suggestions) {
+    const chip = document.createElement('button');
+    chip.className = 'suggest-chip';
+    chip.textContent = `${s.text} (${s.score})`;
+    chip.addEventListener('click', () => {
+      searchInput.value = s.text;
+      performSearch();
+    });
+    suggestList.appendChild(chip);
+  }
+}
+
+function renderFacets(facets: Record<string, any> | undefined): void {
+  facetList.innerHTML = '';
+  const byType = facets?.byType;
+  if (!byType || byType.type !== 'terms' || !Array.isArray(byType.buckets) || byType.buckets.length === 0) {
+    facetBar.style.display = 'none';
+    return;
+  }
+  facetBar.style.display = 'block';
+  for (const b of byType.buckets) {
+    const chip = document.createElement('button');
+    chip.className = 'facet-chip';
+    chip.textContent = `${String(b.value)} · ${b.count}`;
+    chip.addEventListener('click', () => {
+      typeSelect.value = String(b.value);
+      performSearch();
+    });
+    facetList.appendChild(chip);
+  }
+}
+
 async function performSearch(): Promise<void> {
   const query = searchInput.value.trim();
 
@@ -193,15 +239,21 @@ async function performSearch(): Promise<void> {
   }
   currentAbortController = new AbortController();
 
-  const mode = modeSelect.value as 'fuzzy' | 'substring';
+  const mode = modeSelect.value as 'fuzzy' | 'substring' | 'prefix' | 'token';
   const highlight = highlightToggle.checked;
+  const withSuggest = suggestToggle.checked;
+  const typeFilter = typeSelect.value;
+  const languageFilter = langSelect.value;
 
   try {
     const searchRes = await engine.search(query, {
       mode,
       highlight,
       limit: 50,
-      signal: currentAbortController.signal
+      typeFilter,
+      languageFilter,
+      signal: currentAbortController.signal,
+      ...(withSuggest && query ? { suggest: { mode: 'prefix', limit: 5 } } : {})
     });
 
     activeResults = searchRes.results;
@@ -209,6 +261,8 @@ async function performSearch(): Promise<void> {
     statMatches.textContent = searchRes.totalMatches.toLocaleString();
     statLatency.textContent = `${searchRes.searchDurationMs.toFixed(2)} ms`;
 
+    renderSuggestions(searchRes.suggestions ?? []);
+    renderFacets(searchRes.facets);
     renderResults();
   } catch (err: any) {
     if (err?.name === 'AbortError') return;
@@ -254,6 +308,9 @@ searchInput.addEventListener('keydown', (e) => {
 
 modeSelect.addEventListener('change', () => performSearch());
 highlightToggle.addEventListener('change', () => performSearch());
+suggestToggle.addEventListener('change', () => performSearch());
+typeSelect.addEventListener('change', () => performSearch());
+langSelect.addEventListener('change', () => performSearch());
 
 engineSelect.addEventListener('change', async () => {
   const preferGpu = engineSelect.value === 'webgpu';

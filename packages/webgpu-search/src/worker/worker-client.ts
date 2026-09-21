@@ -21,7 +21,7 @@ import {
 } from './protocol';
 import { abortError, throwIfAborted } from '../runtime-guards';
 import { deserializeDocumentSnapshotHeader } from '../persistence';
-import { SERIALIZED_DOC_HEADER_BYTES } from '../text-profile';
+import { SERIALIZED_DOC_HEADER_BYTES, U2D4_HEADER_BYTES, U2D4_MAGIC } from '../text-profile';
 import { IncompatibleHookError } from '../errors';
 import { hasAnyHook, normalizeSearchExtensionHooks } from '../extensions';
 
@@ -692,7 +692,11 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       }
 
       if (buffer.byteLength >= SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength) {
-        const schemaBytes = new Uint8Array(buffer, SERIALIZED_DOC_HEADER_BYTES, header.schemaByteLength);
+        // U2D4 inserts a columnar segment between offsets and docs; derive
+        // header width and columnar length from the parsed header so legacy
+        // U2D3 snapshots (no columnar segment) still stage correctly.
+        const headerBytes = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+        const schemaBytes = new Uint8Array(buffer, headerBytes, header.schemaByteLength);
         const schemaStr = new TextDecoder().decode(schemaBytes);
         const schema = JSON.parse(schemaStr);
         if (schema && Array.isArray(schema.fields)) {
@@ -751,11 +755,14 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
           stagedDocMap.set(id, doc);
         }
       } else if (header.docsByteLength > 0) {
+        const headerBytes = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+        const columnarLen = header.columnarByteLength ?? 0;
         const docsOffset =
-          SERIALIZED_DOC_HEADER_BYTES +
+          headerBytes +
           header.schemaByteLength +
           header.tokenCount * 4 +
-          (header.rowCount + 1) * 4;
+          (header.rowCount + 1) * 4 +
+          columnarLen;
         const docsBytes = new Uint8Array(buffer, docsOffset, header.docsByteLength);
         const docsStr = new TextDecoder().decode(docsBytes);
         const docs = JSON.parse(docsStr);

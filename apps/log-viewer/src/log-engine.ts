@@ -8,6 +8,9 @@ import {
   deleteIndexFromIDB,
   type DocumentIndexStats,
   type DocumentSearchResponse,
+  type FacetRequest,
+  type FacetResult,
+  type FilterExpression,
   type MutationResult
 } from 'webgpu-search';
 import type { LogViewerSearchResult, StructuredLogRecord } from './types';
@@ -19,6 +22,30 @@ export interface LogEngineOptions {
 
 export const IDB_DATABASE_NAME = 'webgpu-log-viewer-snapshots';
 export const IDB_SNAPSHOT_KEY = 'latest-100k-snapshot';
+
+export interface LogSearchOptions {
+  mode?: 'fuzzy' | 'substring' | 'prefix' | 'token';
+  highlight?: boolean;
+  limit?: number;
+  levelFilter?: string;
+  serviceFilter?: string;
+  /** Half-open latency window [minMs, maxMs). */
+  latencyRange?: { minMs?: number; maxMs?: number };
+  /** Half-open ISO timestamp window [from, to). Lexicographic = chronological for ISO-8601. */
+  timestampRange?: { from?: string; to?: string };
+  /** Facet requests; defaults to level terms + latency ranges. `false` disables. */
+  facets?: Record<string, FacetRequest> | false;
+  signal?: AbortSignal;
+}
+
+export interface LogSearchResult {
+  results: LogViewerSearchResult[];
+  totalMatches: number;
+  searchDurationMs: number;
+  engine: 'webgpu' | 'cpu';
+  hasOverflow: boolean;
+  facets?: Record<string, FacetResult>;
+}
 
 export class LogEngine {
   private mainIndex: DocumentIndex<StructuredLogRecord> | null = null;
@@ -35,6 +62,19 @@ export class LogEngine {
     { name: 'service', weight: 1.5 },
     { name: 'level', weight: 1.0 },
     { name: 'traceId', weight: 1.2 }
+  ];
+
+  /**
+   * v0.4 M8: columnar filter attributes. `timestamp` stays a string so ISO-8601
+   * lexicographic range compares equal chronological order on both the main
+   * thread and the string-isolated worker (no custom getter crosses the
+   * worker boundary).
+   */
+  private readonly filterFieldDefs = [
+    { name: 'level', type: 'string' as const },
+    { name: 'service', type: 'string' as const },
+    { name: 'timestamp', type: 'string' as const },
+    { name: 'latencyMs', type: 'number' as const }
   ];
 
   constructor(options?: LogEngineOptions) {
@@ -77,6 +117,7 @@ export class LogEngine {
         await client.init(this.records, {
           idField: 'id',
           fields: this.fieldDefs,
+          filterFields: this.filterFieldDefs,
           preferGpu: this.preferGpu,
           candidateCapacity: 32768
         });
@@ -104,6 +145,7 @@ export class LogEngine {
     const mainIdx = await DocumentIndex.create(this.records, {
       idField: 'id',
       fields: this.fieldDefs,
+      filterFields: this.filterFieldDefs,
       preferGpu: this.preferGpu,
       candidateCapacity: 32768
     });
@@ -128,55 +170,86 @@ export class LogEngine {
     await this.rebuildIndex();
   }
 
+  /**
+   * v0.4 M8: compiles level/service/latency/timestamp constraints into a
+   * single structured `FilterExpression` evaluated via columnar bitsets
+   * (pre-match, O(N/32) bitwise) instead of per-record predicates.
+   */
+  buildFilter(options?: LogSearchOptions): FilterExpression | undefined {
+    const clauses: FilterExpression[] = [];
+    const levelFilter = options?.levelFilter;
+    if (levelFilter !== undefined && levelFilter !== 'ALL') {
+      clauses.push({ level: levelFilter });
+    }
+    const serviceFilter = options?.serviceFilter;
+    if (serviceFilter !== undefined && serviceFilter !== 'ALL') {
+      clauses.push({ service: serviceFilter });
+    }
+    const latencyRange = options?.latencyRange;
+    if (latencyRange !== undefined && (latencyRange.minMs !== undefined || latencyRange.maxMs !== undefined)) {
+      const comp: Record<string, number> = {};
+      if (latencyRange.minMs !== undefined) comp.gte = latencyRange.minMs;
+      if (latencyRange.maxMs !== undefined) comp.lt = latencyRange.maxMs;
+      clauses.push({ latencyMs: comp as { gte?: number; lt?: number } });
+    }
+    const timestampRange = options?.timestampRange;
+    if (timestampRange !== undefined && (timestampRange.from !== undefined || timestampRange.to !== undefined)) {
+      const comp: Record<string, string> = {};
+      if (timestampRange.from !== undefined) comp.gte = timestampRange.from;
+      if (timestampRange.to !== undefined) comp.lt = timestampRange.to;
+      clauses.push({ timestamp: comp as { gte?: string; lt?: string } });
+    }
+    if (clauses.length === 0) return undefined;
+    if (clauses.length === 1) return clauses[0];
+    return { and: clauses };
+  }
+
+  defaultFacets(): Record<string, FacetRequest> {
+    return {
+      byLevel: { type: 'terms', field: 'level', limit: 10 },
+      byService: { type: 'terms', field: 'service', limit: 10 },
+      byLatency: {
+        type: 'range',
+        field: 'latencyMs',
+        ranges: [
+          { to: 50, key: 'fast-<50ms' },
+          { from: 50, to: 300, key: 'normal-50-300ms' },
+          { from: 300, to: 800, key: 'slow-300-800ms' },
+          { from: 800, key: 'critical-800ms+' }
+        ]
+      }
+    };
+  }
+
   async search(
     query: string,
-    options?: {
-      mode?: 'fuzzy' | 'substring';
-      highlight?: boolean;
-      limit?: number;
-      levelFilter?: string;
-      signal?: AbortSignal;
-    }
-  ): Promise<{
-    results: LogViewerSearchResult[];
-    totalMatches: number;
-    searchDurationMs: number;
-    engine: 'webgpu' | 'cpu';
-    hasOverflow: boolean;
-  }> {
+    options?: LogSearchOptions
+  ): Promise<LogSearchResult> {
     const start = performance.now();
     const mode = options?.mode ?? 'fuzzy';
     const highlight = options?.highlight ?? true;
     const limit = options?.limit ?? 100;
-    const levelFilter = options?.levelFilter;
 
-    const filter = levelFilter && levelFilter !== 'ALL'
-      ? (doc: StructuredLogRecord) => doc.level === levelFilter
-      : undefined;
+    const filter = this.buildFilter(options);
+    const facets = options?.facets === false ? undefined : (options?.facets ?? this.defaultFacets());
 
     let response: DocumentSearchResponse<StructuredLogRecord>;
 
+    const searchOpts = {
+      mode,
+      highlight,
+      tag: 'mark',
+      escapeHtml: true,
+      limit,
+      ...(filter ? { filter } : {}),
+      ...(facets ? { facets } : {}),
+      signal: options?.signal
+    };
+
     if (this.useWorker && this.workerClient) {
-      response = await this.workerClient.search(query, {
-        mode,
-        highlight,
-        tag: 'mark',
-        escapeHtml: true,
-        limit,
-        filter,
-        signal: options?.signal,
-        candidateCapacity: 32768
-      } as any);
+      response = await this.workerClient.search(query, searchOpts);
     } else if (this.mainIndex) {
-      response = await this.mainIndex.search(query, {
-        mode,
-        highlight,
-        tag: 'mark',
-        escapeHtml: true,
-        limit,
-        filter,
-        signal: options?.signal
-      });
+      response = await this.mainIndex.search(query, searchOpts);
     } else {
       return {
         results: [],
@@ -203,7 +276,8 @@ export class LogEngine {
       totalMatches: response.totalMatches,
       searchDurationMs: duration,
       engine: response.engine,
-      hasOverflow: response.hasOverflow
+      hasOverflow: response.hasOverflow,
+      ...(response.facets ? { facets: response.facets } : {})
     };
   }
 

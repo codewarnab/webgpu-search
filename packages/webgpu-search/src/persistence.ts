@@ -9,6 +9,9 @@ import {
   SCORING_TO_ENUM,
   SERIALIZED_DOC_HEADER_BYTES,
   SERIALIZED_DOC_MAGIC,
+  U2D4_FORMAT_VERSION,
+  U2D4_HEADER_BYTES,
+  U2D4_MAGIC,
   UNICODE_VERSION_TO_ENUM,
   IncompatibleIndexError
 } from './text-profile';
@@ -28,9 +31,108 @@ const isLittleEndian = (() => {
   return u8[0] === 0x34;
 })();
 
+/** U2D4 reserved word must be zero (forward-extension guard). */
+const U2D4_RESERVED_EXPECTED = 0;
+
 /**
- * Parses and returns the 48-byte Little-Endian U2D3 binary header.
- * Validates MAGIC and formatVersion fail-closed.
+ * Encodes the columnar filter-attribute segment for a U2D4 snapshot.
+ *
+ * Layout: UTF-8 JSON bytes of `{ v: 1, fields, rows }` where `fields` mirrors
+ * `schema.filterFields` (name + type) and `rows[d][f]` holds the raw getter
+ * value for doc `d` and filter field `f` (`undefined` normalizes to `null`,
+ * matching columnar presence semantics where null/undefined clears presence).
+ *
+ * The segment is advisory + integrity-checked: restore rebuilds the
+ * authoritative `ColumnarStore` via `init(records)` and validates shape only
+ * (field names/types, row counts). Corrupt payloads throw
+ * `IncompatibleIndexError` via CRC or shape validation. Empty (0 bytes) when
+ * the index declares no `filterFields` or holds no docs.
+ */
+export function encodeColumnarPayload<TDoc>(
+  records: TDoc[],
+  filterDefs: Array<{ name: string; type?: string; getter?: (doc: TDoc) => unknown }>
+): Uint8Array {
+  if (filterDefs.length === 0 || records.length === 0) {
+    return new Uint8Array(0);
+  }
+  const fields = filterDefs.map((ff) => ({
+    name: ff.name,
+    ...(ff.type !== undefined ? { type: ff.type } : {})
+  }));
+  const rows: unknown[][] = new Array(records.length);
+  for (let d = 0; d < records.length; d++) {
+    const doc = records[d];
+    const row: unknown[] = new Array(filterDefs.length);
+    for (let f = 0; f < filterDefs.length; f++) {
+      const getter = filterDefs[f]!.getter;
+      let v: unknown = null;
+      try {
+        v = getter ? getter(doc) : (doc as any)?.[filterDefs[f]!.name];
+      } catch {
+        v = null;
+      }
+      row[f] = v === undefined ? null : v;
+    }
+    rows[d] = row;
+  }
+  const json = JSON.stringify({ v: 1, fields, rows });
+  return new TextEncoder().encode(json);
+}
+
+/**
+ * Validates a decoded U2D4 columnar segment against the snapshot schema.
+ * Throws `IncompatibleIndexError` fail-closed on version, field, or shape
+ * mismatch. Returns the parsed row count for cross-checking with `docCount`.
+ */
+export function validateColumnarPayload(
+  columnarBytes: Uint8Array,
+  schemaFilterFields: Array<{ name: string; type?: string }> | undefined,
+  docCount: number
+): void {
+  if (columnarBytes.length === 0) return;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(new TextDecoder().decode(columnarBytes));
+  } catch {
+    throw new IncompatibleIndexError('valid-columnar-json', 'parse-failure');
+  }
+  if (!parsed || typeof parsed !== 'object' || parsed.v !== 1 || !Array.isArray(parsed.fields) || !Array.isArray(parsed.rows)) {
+    throw new IncompatibleIndexError('valid-columnar-envelope', typeof parsed);
+  }
+  const expectedFields = schemaFilterFields ?? [];
+  if (parsed.fields.length !== expectedFields.length) {
+    throw new IncompatibleIndexError(`columnar fields length ${expectedFields.length}`, parsed.fields.length);
+  }
+  for (let i = 0; i < expectedFields.length; i++) {
+    const exp = expectedFields[i]!;
+    const got = parsed.fields[i];
+    if (!got || typeof got !== 'object' || got.name !== exp.name) {
+      throw new IncompatibleIndexError(`columnar field[${i}].name ${exp.name}`, got?.name);
+    }
+    const expType = exp.type ?? 'string';
+    const gotType = got.type ?? 'string';
+    if (gotType !== expType) {
+      throw new IncompatibleIndexError(`columnar field[${i}].type ${expType}`, gotType);
+    }
+  }
+  if (parsed.rows.length !== docCount) {
+    throw new IncompatibleIndexError(`columnar rows length ${docCount}`, parsed.rows.length);
+  }
+  for (let d = 0; d < parsed.rows.length; d++) {
+    const row = parsed.rows[d];
+    if (!Array.isArray(row) || row.length !== expectedFields.length) {
+      throw new IncompatibleIndexError(`columnar row[${d}] width ${expectedFields.length}`, Array.isArray(row) ? row.length : typeof row);
+    }
+  }
+}
+
+/**
+ * Parses a snapshot header, accepting both legacy U2D3 (48 bytes,
+ * magic `0x55324433`, version 3) and canonical U2D4 (56 bytes, magic
+ * `0x55324434`, version 4) fail-closed. Unknown magics, versions, enums, or
+ * non-zero U2D4 reserved words throw `IncompatibleIndexError`.
+ *
+ * U2D3 headers report `columnarByteLength: 0` (absent segment).
  */
 export function deserializeDocumentSnapshotHeader(buffer: ArrayBuffer): DocumentSnapshotHeader {
   const buf = buffer as unknown as { byteLength?: unknown; slice?: unknown };
@@ -40,67 +142,132 @@ export function deserializeDocumentSnapshotHeader(buffer: ArrayBuffer): Document
     throw new IncompatibleIndexError(SERIALIZED_DOC_MAGIC, 'neutered/short');
   }
 
-  const dv = new DataView(buffer, 0, SERIALIZED_DOC_HEADER_BYTES);
-  const magic = dv.getUint32(0, true);
-  if (magic !== SERIALIZED_DOC_MAGIC) {
-    throw new IncompatibleIndexError(SERIALIZED_DOC_MAGIC, magic);
+  const magic = new DataView(buffer, 0, 4).getUint32(0, true);
+
+  if (magic === SERIALIZED_DOC_MAGIC) {
+    const dv = new DataView(buffer, 0, SERIALIZED_DOC_HEADER_BYTES);
+    const formatVersion = dv.getUint32(4, true);
+    if (formatVersion !== DOC_FORMAT_VERSION) {
+      throw new IncompatibleIndexError(DOC_FORMAT_VERSION, formatVersion);
+    }
+    const profileEnum = dv.getUint32(8, true);
+    const unicodeVersionEnum = dv.getUint32(12, true);
+    const scoringVersionEnum = dv.getUint32(16, true);
+
+    const profileId = ENUM_TO_PROFILE[profileEnum];
+    const unicodeVersion = ENUM_TO_UNICODE_VERSION[unicodeVersionEnum];
+    const scoringVersion = ENUM_TO_SCORING[scoringVersionEnum];
+
+    if (profileId === undefined || unicodeVersion === undefined || scoringVersion === undefined) {
+      const badEnum = profileId === undefined ? profileEnum : unicodeVersion === undefined ? unicodeVersionEnum : scoringVersionEnum;
+      throw new IncompatibleIndexError('valid-enum', badEnum);
+    }
+
+    const docCount = dv.getUint32(20, true);
+    const rowCount = dv.getUint32(24, true);
+    const tokenCount = dv.getUint32(28, true);
+    const foldedVal = dv.getUint32(32, true);
+
+    if (foldedVal !== 0 && foldedVal !== 1) {
+      throw new IncompatibleIndexError('folded 0|1', foldedVal);
+    }
+
+    const schemaByteLength = dv.getUint32(36, true);
+    const docsByteLength = dv.getUint32(40, true);
+    const checksum = dv.getUint32(44, true);
+
+    return {
+      magic,
+      formatVersion,
+      profileId,
+      unicodeVersion,
+      scoringVersion,
+      docCount,
+      rowCount,
+      tokenCount,
+      folded: foldedVal === 1,
+      schemaByteLength,
+      docsByteLength,
+      columnarByteLength: 0,
+      checksum
+    };
   }
 
-  const formatVersion = dv.getUint32(4, true);
-  if (formatVersion !== DOC_FORMAT_VERSION) {
-    throw new IncompatibleIndexError(DOC_FORMAT_VERSION, formatVersion);
+  if (magic === U2D4_MAGIC) {
+    if (byteLen < U2D4_HEADER_BYTES) {
+      throw new IncompatibleIndexError(U2D4_MAGIC, 'neutered/short-u2d4');
+    }
+    const dv = new DataView(buffer, 0, U2D4_HEADER_BYTES);
+    const formatVersion = dv.getUint32(4, true);
+    if (formatVersion !== U2D4_FORMAT_VERSION) {
+      throw new IncompatibleIndexError(U2D4_FORMAT_VERSION, formatVersion);
+    }
+    const profileEnum = dv.getUint32(8, true);
+    const unicodeVersionEnum = dv.getUint32(12, true);
+    const scoringVersionEnum = dv.getUint32(16, true);
+
+    const profileId = ENUM_TO_PROFILE[profileEnum];
+    const unicodeVersion = ENUM_TO_UNICODE_VERSION[unicodeVersionEnum];
+    const scoringVersion = ENUM_TO_SCORING[scoringVersionEnum];
+
+    if (profileId === undefined || unicodeVersion === undefined || scoringVersion === undefined) {
+      const badEnum = profileId === undefined ? profileEnum : unicodeVersion === undefined ? unicodeVersionEnum : scoringVersionEnum;
+      throw new IncompatibleIndexError('valid-enum', badEnum);
+    }
+
+    const docCount = dv.getUint32(20, true);
+    const rowCount = dv.getUint32(24, true);
+    const tokenCount = dv.getUint32(28, true);
+    const foldedVal = dv.getUint32(32, true);
+
+    if (foldedVal !== 0 && foldedVal !== 1) {
+      throw new IncompatibleIndexError('folded 0|1', foldedVal);
+    }
+
+    const schemaByteLength = dv.getUint32(36, true);
+    const docsByteLength = dv.getUint32(40, true);
+    const columnarByteLength = dv.getUint32(44, true);
+    const reserved = dv.getUint32(48, true);
+    const checksum = dv.getUint32(52, true);
+
+    if (reserved !== U2D4_RESERVED_EXPECTED) {
+      throw new IncompatibleIndexError('reserved 0', reserved);
+    }
+
+    return {
+      magic,
+      formatVersion,
+      profileId,
+      unicodeVersion,
+      scoringVersion,
+      docCount,
+      rowCount,
+      tokenCount,
+      folded: foldedVal === 1,
+      schemaByteLength,
+      docsByteLength,
+      columnarByteLength,
+      checksum
+    };
   }
 
-  const profileEnum = dv.getUint32(8, true);
-  const unicodeVersionEnum = dv.getUint32(12, true);
-  const scoringVersionEnum = dv.getUint32(16, true);
-
-  const profileId = ENUM_TO_PROFILE[profileEnum];
-  const unicodeVersion = ENUM_TO_UNICODE_VERSION[unicodeVersionEnum];
-  const scoringVersion = ENUM_TO_SCORING[scoringVersionEnum];
-
-  if (profileId === undefined || unicodeVersion === undefined || scoringVersion === undefined) {
-    const badEnum = profileId === undefined ? profileEnum : unicodeVersion === undefined ? unicodeVersionEnum : scoringVersionEnum;
-    throw new IncompatibleIndexError('valid-enum', badEnum);
-  }
-
-  const docCount = dv.getUint32(20, true);
-  const rowCount = dv.getUint32(24, true);
-  const tokenCount = dv.getUint32(28, true);
-  const foldedVal = dv.getUint32(32, true);
-
-  if (foldedVal !== 0 && foldedVal !== 1) {
-    throw new IncompatibleIndexError('folded 0|1', foldedVal);
-  }
-
-  const schemaByteLength = dv.getUint32(36, true);
-  const docsByteLength = dv.getUint32(40, true);
-  const checksum = dv.getUint32(44, true);
-
-  return {
-    magic,
-    formatVersion,
-    profileId,
-    unicodeVersion,
-    scoringVersion,
-    docCount,
-    rowCount,
-    tokenCount,
-    folded: foldedVal === 1,
-    schemaByteLength,
-    docsByteLength,
-    checksum
-  };
+  throw new IncompatibleIndexError(`${SERIALIZED_DOC_MAGIC}|${U2D4_MAGIC}`, magic);
 }
 
 /**
- * Serializes a DocumentIndex into a versioned U2D3 Little-Endian binary ArrayBuffer.
+ * Serializes a DocumentIndex into a versioned U2D4 Little-Endian binary ArrayBuffer.
+ *
+ * Header layout: 56 bytes (14 x u32 words, LE), evenly divisible by 8 so
+ * subsequent 64-bit columnar typed arrays stay aligned without padding.
+ * Word 13 [0x34..0x37] is the checksum destination covering header `[0..52)`
+ * plus payload segments in order: schema + tokens + offsets + columnar + docs.
  *
  * Invariants:
  * 1. Automatic compaction pre-condition: compacts tombstones prior to snapshot creation.
- * 2. Header layout: 48 bytes (12 x u32 words, LE). Word 11 [0x2C..0x2F] is checksum destination.
- * 3. Circular-dependency-free CRC32 covers header [0..44) + schema + tokens + offsets + docs.
- * 4. Decoupled document storage support: docsByteLength = 0 avoids 100MB+ JSON string allocations.
+ * 2. Circular-dependency-free CRC32 covers header [0..52) + all payload segments.
+ * 3. Decoupled document storage support: docsByteLength = 0 avoids 100MB+ JSON string allocations.
+ * 4. Columnar filter metadata serializes alongside attribute schemas
+ *    (empty segment when no filterFields); closures are never serialized.
  */
 export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
   index: DocumentIndex<TDoc>,
@@ -161,6 +328,11 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
   const schemaBytes = new TextEncoder().encode(schemaJson);
   const schemaByteLength = schemaBytes.length;
 
+  // Columnar filter-attribute segment (U2D4).
+  const filterDefs = index.getFilterFieldDefinitions() as Array<{ name: string; type?: string; getter?: (doc: TDoc) => unknown }>;
+  const columnarBytes = encodeColumnarPayload(records, filterDefs);
+  const columnarByteLength = columnarBytes.length;
+
   // Decoupled vs embedded document storage
   const decoupled = options?.decoupled === true;
   let docsBytes: Uint8Array;
@@ -190,18 +362,19 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
   const offsetsByteLength = (rowCount + 1) * 4;
 
   const totalBytes =
-    SERIALIZED_DOC_HEADER_BYTES +
+    U2D4_HEADER_BYTES +
     schemaByteLength +
     tokensByteLength +
     offsetsByteLength +
+    columnarByteLength +
     docsByteLength;
 
   const out = new ArrayBuffer(totalBytes);
   const dv = new DataView(out);
 
-  // Write header [0..44) in Little-Endian
-  dv.setUint32(0, SERIALIZED_DOC_MAGIC, true);
-  dv.setUint32(4, DOC_FORMAT_VERSION, true);
+  // Write header [0..52) in Little-Endian
+  dv.setUint32(0, U2D4_MAGIC, true);
+  dv.setUint32(4, U2D4_FORMAT_VERSION, true);
   dv.setUint32(8, pe, true);
   dv.setUint32(12, ue, true);
   dv.setUint32(16, se, true);
@@ -211,9 +384,11 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
   dv.setUint32(32, folded ? 1 : 0, true);
   dv.setUint32(36, schemaByteLength, true);
   dv.setUint32(40, docsByteLength, true);
+  dv.setUint32(44, columnarByteLength, true);
+  dv.setUint32(48, U2D4_RESERVED_EXPECTED, true);
 
   // Copy Schema JSON
-  let cursor = SERIALIZED_DOC_HEADER_BYTES;
+  let cursor = U2D4_HEADER_BYTES;
   new Uint8Array(out, cursor, schemaByteLength).set(schemaBytes);
   cursor += schemaByteLength;
 
@@ -246,31 +421,41 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
   }
   cursor += offsetsByteLength;
 
+  // Copy Columnar segment
+  if (columnarByteLength > 0) {
+    new Uint8Array(out, cursor, columnarByteLength).set(columnarBytes);
+    cursor += columnarByteLength;
+  }
+
   // Copy Document Records (if embedded)
   if (docsByteLength > 0) {
     new Uint8Array(out, cursor, docsByteLength).set(docsBytes);
     cursor += docsByteLength;
   }
 
-  // Calculate CRC32 over header [0..44) + payload segments
-  const header44 = new Uint8Array(out, 0, 44);
-  const payloadSchema = new Uint8Array(out, SERIALIZED_DOC_HEADER_BYTES, schemaByteLength);
-  const payloadTokens = new Uint8Array(out, SERIALIZED_DOC_HEADER_BYTES + schemaByteLength, tokensByteLength);
-  const payloadOffsets = new Uint8Array(out, SERIALIZED_DOC_HEADER_BYTES + schemaByteLength + tokensByteLength, offsetsByteLength);
+  // Calculate CRC32 over header [0..52) + payload segments
+  const header52 = new Uint8Array(out, 0, 52);
+  const payloadSchema = new Uint8Array(out, U2D4_HEADER_BYTES, schemaByteLength);
+  const payloadTokens = new Uint8Array(out, U2D4_HEADER_BYTES + schemaByteLength, tokensByteLength);
+  const payloadOffsets = new Uint8Array(out, U2D4_HEADER_BYTES + schemaByteLength + tokensByteLength, offsetsByteLength);
+  const payloadColumnar = columnarByteLength > 0
+    ? new Uint8Array(out, U2D4_HEADER_BYTES + schemaByteLength + tokensByteLength + offsetsByteLength, columnarByteLength)
+    : new Uint8Array(0);
   const payloadDocs = docsByteLength > 0
-    ? new Uint8Array(out, SERIALIZED_DOC_HEADER_BYTES + schemaByteLength + tokensByteLength + offsetsByteLength, docsByteLength)
+    ? new Uint8Array(out, U2D4_HEADER_BYTES + schemaByteLength + tokensByteLength + offsetsByteLength + columnarByteLength, docsByteLength)
     : new Uint8Array(0);
 
   const crc = crc32Parts([
-    header44,
+    header52,
     payloadSchema,
     payloadTokens,
     payloadOffsets,
+    payloadColumnar,
     payloadDocs
   ]);
 
-  // Destination Word 11 [0x2C..0x2F]
-  dv.setUint32(44, crc, true);
+  // Destination Word 13 [0x34..0x37]
+  dv.setUint32(52, crc, true);
 
   return out;
 }
@@ -285,8 +470,10 @@ export interface RestoredDocumentSnapshot<TDoc = Record<string, unknown>> {
 }
 
 /**
- * Deserializes and validates a U2D3 binary ArrayBuffer.
- * Validates MAGIC, version, CRC32, schema, monotonic offsets, and document records.
+ * Deserializes and validates a versioned binary ArrayBuffer.
+ * Accepts canonical U2D4 and legacy U2D3 (migration read path).
+ * Validates MAGIC, version, CRC32, schema, columnar shape, monotonic
+ * offsets, and document records.
  */
 export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
   buffer: ArrayBuffer,
@@ -294,14 +481,20 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
 ): RestoredDocumentSnapshot<TDoc> {
   const header = deserializeDocumentSnapshotHeader(buffer);
   const byteLen = buffer.byteLength;
+  const isU2D4 = header.magic === U2D4_MAGIC;
+  const headerBytes = isU2D4 ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+  const checksumOffset = isU2D4 ? 52 : 44;
+  const headerPrefixLen = isU2D4 ? 52 : 44;
+  const columnarLen = header.columnarByteLength ?? 0;
 
   const wantTokensBytes = header.tokenCount * 4;
   const wantOffsetsBytes = (header.rowCount + 1) * 4;
   const expectedTotal =
-    SERIALIZED_DOC_HEADER_BYTES +
+    headerBytes +
     header.schemaByteLength +
     wantTokensBytes +
     wantOffsetsBytes +
+    columnarLen +
     header.docsByteLength;
 
   if (byteLen !== expectedTotal) {
@@ -309,21 +502,20 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
   }
 
   // Verify Checksum
-  const header44 = new Uint8Array(buffer, 0, 44);
-  const payloadSchema = new Uint8Array(buffer, SERIALIZED_DOC_HEADER_BYTES, header.schemaByteLength);
-  const payloadTokens = new Uint8Array(buffer, SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength, wantTokensBytes);
-  const payloadOffsets = new Uint8Array(buffer, SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength + wantTokensBytes, wantOffsetsBytes);
+  const headerPrefix = new Uint8Array(buffer, 0, headerPrefixLen);
+  const payloadSchema = new Uint8Array(buffer, headerBytes, header.schemaByteLength);
+  const payloadTokens = new Uint8Array(buffer, headerBytes + header.schemaByteLength, wantTokensBytes);
+  const payloadOffsets = new Uint8Array(buffer, headerBytes + header.schemaByteLength + wantTokensBytes, wantOffsetsBytes);
+  const payloadColumnar = columnarLen > 0
+    ? new Uint8Array(buffer, headerBytes + header.schemaByteLength + wantTokensBytes + wantOffsetsBytes, columnarLen)
+    : new Uint8Array(0);
   const payloadDocs = header.docsByteLength > 0
-    ? new Uint8Array(buffer, SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength + wantTokensBytes + wantOffsetsBytes, header.docsByteLength)
+    ? new Uint8Array(buffer, headerBytes + header.schemaByteLength + wantTokensBytes + wantOffsetsBytes + columnarLen, header.docsByteLength)
     : new Uint8Array(0);
 
-  const computedCrc = crc32Parts([
-    header44,
-    payloadSchema,
-    payloadTokens,
-    payloadOffsets,
-    payloadDocs
-  ]);
+  const computedCrc = isU2D4
+    ? crc32Parts([headerPrefix, payloadSchema, payloadTokens, payloadOffsets, payloadColumnar, payloadDocs])
+    : crc32Parts([headerPrefix, payloadSchema, payloadTokens, payloadOffsets, payloadDocs]);
 
   if (computedCrc !== header.checksum) {
     throw new IncompatibleIndexError(header.checksum, computedCrc);
@@ -366,6 +558,16 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
     }
   }
 
+  // U2D4: fail-closed columnar shape validation (authoritative rebuild via
+  // ColumnarStore.init(records) happens in applySnapshotData).
+  if (isU2D4) {
+    validateColumnarPayload(
+      payloadColumnar,
+      (schema.filterFields as Array<{ name: string; type?: string }>) ?? undefined,
+      header.docCount
+    );
+  }
+
   // Validate row count matches field count * doc count
   const expectedRowCount = header.docCount * schema.fields.length;
   if (header.rowCount !== expectedRowCount) {
@@ -373,7 +575,7 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
   }
 
   // Unpack Tokens & Offsets (independent sliced allocations to guarantee 4-byte alignment)
-  const tokensStart = SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength;
+  const tokensStart = headerBytes + header.schemaByteLength;
   const tokensBuf = buffer.slice(tokensStart, tokensStart + wantTokensBytes);
   const tokens = new Uint32Array(tokensBuf);
 
@@ -434,6 +636,9 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
     }
   }
 
+  // Silence unused-var drift for checksum offset documentation.
+  void checksumOffset;
+
   return {
     header,
     schema,
@@ -445,7 +650,8 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
 }
 
 /**
- * Restores a DocumentIndex instance from a U2D3 binary ArrayBuffer.
+ * Restores a DocumentIndex instance from a versioned binary ArrayBuffer
+ * (U2D4 canonical, U2D3 legacy migration path).
  */
 export async function restoreDocumentIndex<TDoc = Record<string, unknown>>(
   buffer: ArrayBuffer,

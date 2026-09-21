@@ -1,0 +1,131 @@
+{
+  "generatedAt": "2026-09-21T16:56:02.300Z",
+  "rows": [
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "prefix-search",
+      "medianMs": 10.874,
+      "p95Ms": 12.172
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "prefix-search+type-filter",
+      "medianMs": 4.518,
+      "p95Ms": 5.472
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "suggest-autocomplete",
+      "medianMs": 13.938,
+      "p95Ms": 21.377,
+      "extra": {
+        "suggestionCount": 5
+      }
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "fuzzy-search+type-facets",
+      "medianMs": 8.433,
+      "p95Ms": 10.332
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search",
+      "medianMs": 4.351,
+      "p95Ms": 7.151
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 2.576,
+      "p95Ms": 3.779,
+      "extra": {
+        "totalMatches": 150
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 4.551,
+      "p95Ms": 7.224
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "u2d4-serialize",
+      "medianMs": 73.383,
+      "p95Ms": 73.383,
+      "extra": {
+        "snapshotBytes": 6670531,
+        "schemaBytes": 140329,
+        "columnarBytes": 548521,
+        "docsBytes": 2166645
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "u2d4-restore",
+      "medianMs": 86.353,
+      "p95Ms": 86.353,
+      "extra": {
+        "restoredMatches": 150
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search",
+      "medianMs": 18.643,
+      "p95Ms": 19.433
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 8.249,
+      "p95Ms": 11.253,
+      "extra": {
+        "totalMatches": 750
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 25.092,
+      "p95Ms": 26.31
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search",
+      "medianMs": 35.76,
+      "p95Ms": 48.268
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 15.614,
+      "p95Ms": 17.341,
+      "extra": {
+        "totalMatches": 1500
+      }
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 33.595,
+      "p95Ms": 37.568
+    }
+  ]
+}

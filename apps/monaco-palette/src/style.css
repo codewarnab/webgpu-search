@@ -510,3 +510,37 @@ mark {
   justify-content: flex-end;
   gap: 8px;
 }
+
+.suggest-bar,
+.facet-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-color);
+}
+
+.suggest-list,
+.facet-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.suggest-chip,
+.facet-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  background-color: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+
+.suggest-chip:hover,
+.facet-chip:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+}

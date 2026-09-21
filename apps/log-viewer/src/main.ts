@@ -6,7 +6,16 @@ import type { StructuredLogRecord } from './types';
 // DOM Elements
 const searchInput = document.getElementById('search-input') as HTMLInputElement;
 const levelSelect = document.getElementById('level-select') as HTMLSelectElement;
+const serviceSelect = document.getElementById('service-select') as HTMLSelectElement;
 const modeSelect = document.getElementById('mode-select') as HTMLSelectElement;
+const latencyMin = document.getElementById('latency-min') as HTMLInputElement;
+const latencyMax = document.getElementById('latency-max') as HTMLInputElement;
+const tsFrom = document.getElementById('ts-from') as HTMLInputElement;
+const tsTo = document.getElementById('ts-to') as HTMLInputElement;
+const facetBar = document.getElementById('facet-bar') as HTMLDivElement;
+const facetLevels = document.getElementById('facet-levels') as HTMLDivElement;
+const facetServices = document.getElementById('facet-services') as HTMLDivElement;
+const facetLatency = document.getElementById('facet-latency') as HTMLDivElement;
 const engineSelect = document.getElementById('engine-select') as HTMLSelectElement;
 const workerSelect = document.getElementById('worker-select') as HTMLSelectElement;
 const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement;
@@ -106,8 +115,13 @@ btnCloseDrawer.addEventListener('click', () => {
 
 async function performSearch(): Promise<void> {
   const query = searchInput.value.trim();
-  const mode = modeSelect.value as 'fuzzy' | 'substring';
+  const mode = modeSelect.value as 'fuzzy' | 'substring' | 'prefix' | 'token';
   const levelFilter = levelSelect.value;
+  const serviceFilter = serviceSelect.value;
+  const minMs = latencyMin.value.trim() === '' ? undefined : Number(latencyMin.value);
+  const maxMs = latencyMax.value.trim() === '' ? undefined : Number(latencyMax.value);
+  const fromIso = tsFrom.value.trim() === '' ? undefined : new Date(tsFrom.value).toISOString();
+  const toIso = tsTo.value.trim() === '' ? undefined : new Date(tsTo.value).toISOString();
 
   if (currentAbortController) {
     currentAbortController.abort();
@@ -120,10 +134,26 @@ async function performSearch(): Promise<void> {
     if (levelFilter !== 'ALL') {
       records = records.filter((r) => r.level === levelFilter);
     }
+    if (serviceFilter !== 'ALL') {
+      records = records.filter((r) => r.service === serviceFilter);
+    }
+    if (minMs !== undefined && Number.isFinite(minMs)) {
+      records = records.filter((r) => r.latencyMs >= (minMs as number));
+    }
+    if (maxMs !== undefined && Number.isFinite(maxMs)) {
+      records = records.filter((r) => r.latencyMs < (maxMs as number));
+    }
+    if (fromIso !== undefined) {
+      records = records.filter((r) => r.timestamp >= (fromIso as string));
+    }
+    if (toIso !== undefined) {
+      records = records.filter((r) => r.timestamp < (toIso as string));
+    }
     const items: VirtualGridItem[] = records.map((r) => ({ record: r }));
     grid.setItems(items, { resetScroll: false });
     hudMatches.textContent = records.length.toLocaleString();
     hudLatency.textContent = '0.00 ms';
+    renderFacets(undefined);
     return;
   }
 
@@ -133,6 +163,19 @@ async function performSearch(): Promise<void> {
       highlight: true,
       limit: 1000,
       levelFilter,
+      serviceFilter,
+      latencyRange: minMs !== undefined || maxMs !== undefined
+        ? {
+          ...(minMs !== undefined && Number.isFinite(minMs) ? { minMs } : {}),
+          ...(maxMs !== undefined && Number.isFinite(maxMs) ? { maxMs } : {})
+        }
+        : undefined,
+      timestampRange: fromIso !== undefined || toIso !== undefined
+        ? {
+          ...(fromIso !== undefined ? { from: fromIso } : {}),
+          ...(toIso !== undefined ? { to: toIso } : {})
+        }
+        : undefined,
       signal: controller.signal
     });
 
@@ -141,9 +184,54 @@ async function performSearch(): Promise<void> {
     grid.setSearchResults(searchRes.results);
     hudMatches.textContent = searchRes.totalMatches.toLocaleString();
     hudLatency.textContent = `${searchRes.searchDurationMs.toFixed(2)} ms`;
+    renderFacets(searchRes.facets);
   } catch (err: any) {
     if (err?.name === 'AbortError') return;
     console.error('[Search Error]', err);
+  }
+}
+
+function renderFacetChips(
+  container: HTMLDivElement,
+  buckets: Array<{ key?: string; value?: unknown; count: number }>,
+  onSelect?: (label: string) => void
+): void {
+  container.innerHTML = '';
+  for (const b of buckets) {
+    const label = b.key ?? String(b.value);
+    const chip = document.createElement('button');
+    chip.className = 'facet-chip';
+    chip.textContent = `${label} · ${b.count}`;
+    if (onSelect) {
+      chip.addEventListener('click', () => onSelect(label));
+    }
+    container.appendChild(chip);
+  }
+}
+
+function renderFacets(facets: Record<string, any> | undefined): void {
+  if (!facets) {
+    facetBar.style.display = 'none';
+    return;
+  }
+  facetBar.style.display = 'flex';
+  const byLevel = facets.byLevel;
+  if (byLevel?.type === 'terms' && Array.isArray(byLevel.buckets)) {
+    renderFacetChips(facetLevels, byLevel.buckets, (label) => {
+      levelSelect.value = label;
+      performSearch();
+    });
+  }
+  const byService = facets.byService;
+  if (byService?.type === 'terms' && Array.isArray(byService.buckets)) {
+    renderFacetChips(facetServices, byService.buckets.slice(0, 8), (label) => {
+      serviceSelect.value = label;
+      performSearch();
+    });
+  }
+  const byLatency = facets.byLatency;
+  if (byLatency?.type === 'range' && Array.isArray(byLatency.buckets)) {
+    renderFacetChips(facetLatency, byLatency.buckets);
   }
 }
 
@@ -264,7 +352,12 @@ searchInput.addEventListener('input', () => {
 });
 
 levelSelect.addEventListener('change', () => performSearch());
+serviceSelect.addEventListener('change', () => performSearch());
 modeSelect.addEventListener('change', () => performSearch());
+latencyMin.addEventListener('change', () => performSearch());
+latencyMax.addEventListener('change', () => performSearch());
+tsFrom.addEventListener('change', () => performSearch());
+tsTo.addEventListener('change', () => performSearch());
 
 engineSelect.addEventListener('change', async () => {
   const preferGpu = engineSelect.value === 'webgpu';

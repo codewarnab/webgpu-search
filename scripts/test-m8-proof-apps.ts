@@ -7,8 +7,9 @@ import {
   serializeDocumentIndex,
   restoreDocumentIndex,
   deserializeDocumentSnapshotHeader,
-  SERIALIZED_DOC_MAGIC,
-  DOC_FORMAT_VERSION,
+  U2D4_MAGIC,
+  U2D4_FORMAT_VERSION,
+  U2D4_HEADER_BYTES,
   type DocumentId,
   type DocumentIndexStats,
   type HighlightRange
@@ -268,13 +269,14 @@ async function runM8Tests() {
   }
 
   // =========================================================================
-  // 4. Versioned Snapshot Persistence (U2D3 Binary Format Roundtrip)
+  // 4. Versioned Snapshot Persistence (U2D4 Binary Format Roundtrip)
   // =========================================================================
-  console.log('4. Testing U2D3 Little-Endian binary format serialization & restore roundtrip...');
+  console.log('4. Testing U2D4 Little-Endian binary format serialization & restore roundtrip...');
   {
     const testLogs = generateStructuredLogs(5000);
     const docIndex = await DocumentIndex.create(testLogs, {
       fields: ['message', 'service', 'level', 'traceId'],
+      filterFields: [{ name: 'level' }, { name: 'service' }],
       preferGpu: false
     });
 
@@ -282,14 +284,16 @@ async function runM8Tests() {
     const baselineQuery = 'deadlock';
     const baselineSearch = await docIndex.search(baselineQuery, { mode: 'fuzzy', limit: 25 });
 
-    // B. Serialize to U2D3 binary buffer
+    // B. Serialize to U2D4 binary buffer
     const snapshotBuffer = serializeDocumentIndex(docIndex);
-    assert(snapshotBuffer.byteLength > 48, 'Snapshot must be larger than 48-byte header');
+    assert(snapshotBuffer.byteLength > 56, 'Snapshot must be larger than 56-byte U2D4 header');
 
-    // C. Inspect 48-byte Little-Endian Header
+    // C. Inspect 56-byte Little-Endian Header (8-byte aligned)
     const header = deserializeDocumentSnapshotHeader(snapshotBuffer);
-    assert.strictEqual(header.magic, SERIALIZED_DOC_MAGIC); // 0x55324433 ('U2D3')
-    assert.strictEqual(header.formatVersion, DOC_FORMAT_VERSION); // 3
+    assert.strictEqual(header.magic, U2D4_MAGIC); // 0x55324434 ('U2D4')
+    assert.strictEqual(header.formatVersion, U2D4_FORMAT_VERSION); // 4
+    assert.strictEqual(U2D4_HEADER_BYTES, 56);
+    assert.strictEqual(U2D4_HEADER_BYTES % 8, 0, 'U2D4 header must be 8-byte aligned');
     assert.strictEqual(header.profileId, 'unicode-default');
     assert.strictEqual(header.unicodeVersion, '16.0.0');
     assert.strictEqual(header.scoringVersion, 'parity-v1');
@@ -298,6 +302,7 @@ async function runM8Tests() {
     assert(header.tokenCount > 0);
     assert(header.schemaByteLength > 0);
     assert(header.docsByteLength > 0);
+    assert(header.columnarByteLength! > 0, 'filter-configured snapshot must carry a columnar segment');
     assert(typeof header.checksum === 'number');
 
     // D. Restore from binary buffer
@@ -308,7 +313,7 @@ async function runM8Tests() {
     const restoredStats = restoredIndex.getStats();
     assert.strictEqual(restoredStats.docCount, 5000);
     assert.strictEqual(restoredStats.rowCount, 20000);
-    assert.strictEqual(restoredStats.formatVersion, 3);
+    assert.strictEqual(restoredStats.formatVersion, 4);
     assert(typeof restoredStats.restoreTimeMs === 'number' && restoredStats.restoreTimeMs >= 0);
 
     // E. Verify identical ranking and score parity
@@ -323,6 +328,22 @@ async function runM8Tests() {
       assert.strictEqual(restItem.score, baseItem.score);
       assert.strictEqual(restItem.matchedField, baseItem.matchedField);
     }
+
+    // E2. Structured filter + facet parity across the restore boundary.
+    const baselineFiltered = await docIndex.search(baselineQuery, {
+      mode: 'fuzzy',
+      limit: 25,
+      filter: { level: 'ERROR' },
+      facets: { byLevel: { type: 'terms', field: 'level', limit: 10 } }
+    });
+    const restoredFiltered = await restoredIndex.search(baselineQuery, {
+      mode: 'fuzzy',
+      limit: 25,
+      filter: { level: 'ERROR' },
+      facets: { byLevel: { type: 'terms', field: 'level', limit: 10 } }
+    });
+    assert.strictEqual(restoredFiltered.totalMatches, baselineFiltered.totalMatches);
+    assert.deepStrictEqual(restoredFiltered.facets, baselineFiltered.facets);
 
     // F. Decoupled Document Storage Persistence (docsByteLength = 0)
     const decoupledBuffer = serializeDocumentIndex(docIndex, { decoupled: true });
@@ -342,7 +363,83 @@ async function runM8Tests() {
     docIndex.destroy();
     restoredIndex.destroy();
     restoredDecoupled.destroy();
-    console.log('   ✅ U2D3 Little-Endian binary format serialization & decoupled restore verified');
+    console.log('   ✅ U2D4 Little-Endian binary format serialization & decoupled restore verified');
+  }
+
+  // =========================================================================
+  // 6. v0.4 Proof-App Feature Integration (prefix, filters, facets, suggest)
+  // =========================================================================
+  console.log('6. Testing v0.4 proof-app feature integration (prefix + type filter + autocomplete)...');
+  {
+    // A. Monaco palette: prefix symbol search with structured type filter.
+    const palette = new PaletteEngine({ useWorker: false, preferGpu: false });
+    await palette.init(generateMonacoRecords(600));
+
+    const prefixRes = await palette.search('compute', { mode: 'prefix', limit: 20 });
+    assert(prefixRes.totalMatches >= 1, 'prefix search must match symbol records');
+
+    const shaderOnly = await palette.search('compute', {
+      mode: 'prefix',
+      limit: 20,
+      typeFilter: 'shader'
+    });
+    assert(shaderOnly.totalMatches >= 1, 'shader-filtered prefix search must match');
+    for (const r of shaderOnly.results) {
+      assert.strictEqual(r.doc.type, 'shader');
+    }
+    assert(shaderOnly.totalMatches <= prefixRes.totalMatches);
+
+    // Type facets are populated on every palette search.
+    assert(shaderOnly.facets?.byType?.type === 'terms', 'palette search must return type facets');
+    assert((shaderOnly.facets.byType as any).isApproximate === false);
+
+    // Autocomplete suggestions resolve.
+    const suggestRes = await palette.suggest('comp', { mode: 'prefix', limit: 5 });
+    assert(suggestRes.suggestions.length >= 1, 'suggest must return completions');
+
+    const inlineSuggest = await palette.search('comp', {
+      mode: 'prefix',
+      limit: 5,
+      suggest: { mode: 'prefix', limit: 5 }
+    });
+    assert((inlineSuggest.suggestions?.length ?? 0) >= 1, 'inline suggest must return completions');
+    palette.destroy();
+
+    // B. Log viewer: structured severity filter + timestamp range + facets.
+    const logEngine = new LogEngine({ useWorker: false, preferGpu: false });
+    const logs = generateStructuredLogs(5000);
+    await logEngine.init(logs);
+
+    const errorOnly = await logEngine.search('timeout', {
+      mode: 'fuzzy',
+      limit: 20,
+      levelFilter: 'ERROR'
+    });
+    assert(errorOnly.totalMatches >= 1);
+    for (const r of errorOnly.results) {
+      assert.strictEqual(r.doc.level, 'ERROR');
+    }
+    assert(errorOnly.facets?.byLevel?.type === 'terms', 'log search must return level facets');
+    assert(errorOnly.facets?.byLatency?.type === 'range', 'log search must return latency range facets');
+
+    // Timestamp range narrows monotonically.
+    const newest = logs[logs.length - 1]!.timestamp;
+    const mid = logs[Math.floor(logs.length / 2)]!.timestamp;
+    const rangeNarrow = await logEngine.search('timeout', {
+      mode: 'fuzzy',
+      limit: 50,
+      timestampRange: { from: mid, to: newest }
+    });
+    const rangeWide = await logEngine.search('timeout', { mode: 'fuzzy', limit: 50 });
+    assert(rangeNarrow.totalMatches <= rangeWide.totalMatches);
+
+    // U2D4 snapshot roundtrip preserves structured filtering.
+    const snap = await logEngine.serializeSnapshot();
+    const snapHeader = deserializeDocumentSnapshotHeader(snap);
+    assert.strictEqual(snapHeader.magic, U2D4_MAGIC);
+    assert.strictEqual(snapHeader.formatVersion, 4);
+    logEngine.destroy();
+    console.log('   ✅ v0.4 proof-app feature integration verified');
   }
 
   // =========================================================================
