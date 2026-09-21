@@ -367,9 +367,9 @@ async function runM8Tests() {
   }
 
   // =========================================================================
-  // 6. v0.4 Proof-App Feature Integration (prefix, filters, facets, suggest)
+  // 5. v0.4 Proof-App Feature Integration (prefix, filters, facets, suggest)
   // =========================================================================
-  console.log('6. Testing v0.4 proof-app feature integration (prefix + type filter + autocomplete)...');
+  console.log('5. Testing v0.4 proof-app feature integration (prefix + type filter + autocomplete)...');
   {
     // A. Monaco palette: prefix symbol search with structured type filter.
     const palette = new PaletteEngine({ useWorker: false, preferGpu: false });
@@ -403,6 +403,20 @@ async function runM8Tests() {
       suggest: { mode: 'prefix', limit: 5 }
     });
     assert((inlineSuggest.suggestions?.length ?? 0) >= 1, 'inline suggest must return completions');
+
+    // Palette U2D4 snapshot roundtrip preserves prefix + type filtering.
+    {
+      const snap = await palette.serializeSnapshot();
+      const snapHeader = deserializeDocumentSnapshotHeader(snap);
+      assert.strictEqual(snapHeader.magic, U2D4_MAGIC);
+      assert.strictEqual(snapHeader.formatVersion, U2D4_FORMAT_VERSION);
+      const fresh = new PaletteEngine({ useWorker: false, preferGpu: false });
+      await fresh.init([]);
+      await fresh.restoreSnapshot(snap);
+      const after = await fresh.search('compute', { mode: 'prefix', limit: 20, typeFilter: 'shader' });
+      assert.strictEqual(after.totalMatches, shaderOnly.totalMatches);
+      fresh.destroy();
+    }
     palette.destroy();
 
     // B. Log viewer: structured severity filter + timestamp range + facets.
@@ -422,7 +436,8 @@ async function runM8Tests() {
     assert(errorOnly.facets?.byLevel?.type === 'terms', 'log search must return level facets');
     assert(errorOnly.facets?.byLatency?.type === 'range', 'log search must return latency range facets');
 
-    // Timestamp range narrows monotonically.
+    // Timestamp range narrows strictly on seeded data (range filter is applied,
+    // not ignored): per-result timestamps must fall inside [mid, newest).
     const newest = logs[logs.length - 1]!.timestamp;
     const mid = logs[Math.floor(logs.length / 2)]!.timestamp;
     const rangeNarrow = await logEngine.search('timeout', {
@@ -431,21 +446,142 @@ async function runM8Tests() {
       timestampRange: { from: mid, to: newest }
     });
     const rangeWide = await logEngine.search('timeout', { mode: 'fuzzy', limit: 50 });
-    assert(rangeNarrow.totalMatches <= rangeWide.totalMatches);
+    assert(rangeNarrow.totalMatches < rangeWide.totalMatches, 'timestamp range must strictly narrow matches');
+    for (const r of rangeNarrow.results) {
+      assert(r.doc.timestamp >= mid && r.doc.timestamp < newest, 'range result timestamp in-window');
+    }
 
-    // U2D4 snapshot roundtrip preserves structured filtering.
+    // U2D4 snapshot roundtrip preserves structured filtering (restore + search parity).
     const snap = await logEngine.serializeSnapshot();
     const snapHeader = deserializeDocumentSnapshotHeader(snap);
     assert.strictEqual(snapHeader.magic, U2D4_MAGIC);
     assert.strictEqual(snapHeader.formatVersion, 4);
+    const restoredSnap = await restoreDocumentIndex<StructuredLogRecord>(snap, {
+      options: { preferGpu: false }
+    });
+    const snapBaseline = await logEngine.search('timeout', {
+      mode: 'fuzzy',
+      limit: 20,
+      levelFilter: 'ERROR'
+    });
+    const snapAfter = await restoredSnap.search('timeout', {
+      mode: 'fuzzy',
+      limit: 20,
+      filter: { level: 'ERROR' }
+    });
+    assert.strictEqual(snapAfter.totalMatches, snapBaseline.totalMatches);
+    restoredSnap.destroy();
     logEngine.destroy();
     console.log('   ✅ v0.4 proof-app feature integration verified');
   }
 
   // =========================================================================
-  // 5. Cross-Platform Safety Audit (Zero Unguarded DOM Globals)
+  // 6. Worker-Boundary Proof-App Integration (filter/facets/suggest survive)
   // =========================================================================
-  console.log('5. Auditing core library cross-platform safety (zero unguarded DOM globals)...');
+  console.log('6. Testing worker-boundary proof-app integration (mock worker)...');
+  {
+    const { SearchWorkerClient, startSearchWorker } = await import('../packages/webgpu-search/src/index');
+    const createMockWorkerScope = () => {
+      const clientListeners: Array<(e: any) => void> = [];
+      const workerListeners: Array<(e: any) => void> = [];
+      const clientWorker = {
+        postMessage(data: any) {
+          queueMicrotask(() => { for (const l of workerListeners) l({ data }); });
+        },
+        addEventListener(event: string, listener: any) {
+          if (event === 'message') clientListeners.push(listener);
+        },
+        removeEventListener(event: string, listener: any) {
+          if (event === 'message') {
+            const i = clientListeners.indexOf(listener);
+            if (i >= 0) clientListeners.splice(i, 1);
+          }
+        },
+        terminate() { clientListeners.length = 0; workerListeners.length = 0; }
+      };
+      const workerScope = {
+        postMessage(data: any) {
+          queueMicrotask(() => { for (const l of clientListeners) l({ data }); });
+        },
+        addEventListener(event: string, listener: any) {
+          if (event === 'message') workerListeners.push(listener);
+        },
+        removeEventListener(event: string, listener: any) {
+          if (event === 'message') {
+            const i = workerListeners.indexOf(listener);
+            if (i >= 0) workerListeners.splice(i, 1);
+          }
+        }
+      };
+      startSearchWorker(workerScope);
+      return { clientWorker };
+    };
+
+    // Palette worker path: prefix + type filter + facets + suggest.
+    {
+      const { clientWorker } = createMockWorkerScope();
+      const client = new SearchWorkerClient<MonacoFileRecord>({ worker: clientWorker as any });
+      const records = generateMonacoRecords(600);
+      await client.init(records, {
+        idField: 'id',
+        fields: [
+          { name: 'filename', weight: 3.0 },
+          { name: 'symbols', weight: 2.0 },
+          { name: 'path', weight: 1.0 },
+          { name: 'description', weight: 0.5 }
+        ],
+        filterFields: [{ name: 'type' }, { name: 'language' }],
+        preferGpu: false
+      });
+      const res = await client.search('compute', {
+        mode: 'prefix',
+        limit: 20,
+        filter: { type: 'shader' },
+        facets: { byType: { type: 'terms', field: 'type', limit: 10 } },
+        suggest: { mode: 'prefix', limit: 5 }
+      } as any);
+      assert(res.totalMatches >= 1);
+      assert((res.facets as any)?.byType?.type === 'terms');
+      assert((res.suggestions?.length ?? 0) >= 1);
+      await client.destroy();
+    }
+
+    // Log worker path: level + latency filter + facets.
+    {
+      const { clientWorker } = createMockWorkerScope();
+      const client = new SearchWorkerClient<StructuredLogRecord>({ worker: clientWorker as any });
+      const logs = generateStructuredLogs(2000);
+      await client.init(logs as any, {
+        idField: 'id',
+        fields: [
+          { name: 'message', weight: 2.0 },
+          { name: 'service', weight: 1.5 },
+          { name: 'level', weight: 1.0 },
+          { name: 'traceId', weight: 1.2 }
+        ],
+        filterFields: [{ name: 'level' }, { name: 'service' }, { name: 'timestamp' }, { name: 'latencyMs', type: 'number' }],
+        preferGpu: false
+      });
+      const res = await client.search('timeout', {
+        mode: 'fuzzy',
+        limit: 20,
+        filter: { level: 'ERROR', latencyMs: { gte: 300 } },
+        facets: {
+          byLevel: { type: 'terms', field: 'level', limit: 10 },
+          byLatency: { type: 'range', field: 'latencyMs', ranges: [{ to: 50 }, { from: 50, to: 300 }, { from: 300 }] }
+        }
+      } as any);
+      assert(res.totalMatches >= 1);
+      assert((res.facets as any)?.byLevel?.type === 'terms');
+      await client.destroy();
+    }
+    console.log('   ✅ Worker-boundary proof-app integration verified');
+  }
+
+  // =========================================================================
+  // 7. Cross-Platform Safety Audit (Zero Unguarded DOM Globals)
+  // =========================================================================
+  console.log('7. Auditing core library cross-platform safety (zero unguarded DOM globals)...');
   {
     const srcDir = path.join(rootDir, 'packages/webgpu-search/src');
     const tsFiles: string[] = [];

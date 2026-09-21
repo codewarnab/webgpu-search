@@ -386,6 +386,13 @@ export interface DocumentIndexSchema {
   filterFields?: Array<{
     name: string;
     type?: FilterFieldType;
+    /**
+     * v0.4 M8: true when the snapshotted index used a custom `getter` for
+     * this filter field. Restore requires a matching getter override
+     * (fail-closed `IncompatibleIndexError`), otherwise columnar rebuild
+     * via default `doc[name]` would silently drop filter semantics.
+     */
+    hasGetter?: boolean;
   }>;
   /**
    * v0.4 M6: declarative extension hook identifiers recorded at snapshot
@@ -519,6 +526,13 @@ export interface FilterFieldDefinition<TDoc = Record<string, unknown>> {
   name: (keyof TDoc & string) | (string & {});
   type?: FilterFieldType;
   getter?: (doc: TDoc) => FilterValue | FilterValue[] | undefined | null;
+  /**
+   * v0.4 M8: internal marker — true when `getter` is a custom closure rather
+   * than the default `doc[name]` accessor. Persisted as `hasGetter` in
+   * `DocumentIndexSchema.filterFields` so snapshot restore can fail closed
+   * when the getter cannot be revived across the serialization boundary.
+   */
+  hasGetter?: boolean;
 }
 
 export type DocumentFilterField<TDoc> = (keyof TDoc & string) | FilterFieldDefinition<TDoc>;

@@ -35,6 +35,74 @@ const isLittleEndian = (() => {
 const U2D4_RESERVED_EXPECTED = 0;
 
 /**
+ * Fail-closed snapshot size caps (untrusted-input hardening). Length words
+ * are attacker-controlled u32s; the total-length equality check alone does
+ * not bound memory because the attacker supplies the bytes. Caps are
+ * enforced *before* any `TextDecoder`/`JSON.parse`/`slice` allocation.
+ */
+export const MAX_SNAPSHOT_SCHEMA_BYTES = 16 << 20; // 16 MiB
+export const MAX_SNAPSHOT_COLUMNAR_BYTES = 64 << 20; // 64 MiB
+export const MAX_SNAPSHOT_DOCS_BYTES = 256 << 20; // 256 MiB
+export const MAX_SNAPSHOT_BYTES = 512 << 20; // 512 MiB total
+export const MAX_SNAPSHOT_DOC_COUNT = 10_000_000;
+export const MAX_SNAPSHOT_TOKEN_COUNT = 256_000_000; // ~1 GiB tokens
+
+function assertSnapshotSizeCaps(
+  schemaByteLength: number,
+  columnarByteLength: number,
+  docsByteLength: number,
+  docCount: number,
+  tokenCount: number,
+  rowCount: number
+): void {
+  if (
+    !Number.isFinite(schemaByteLength) ||
+    !Number.isFinite(columnarByteLength) ||
+    !Number.isFinite(docsByteLength) ||
+    !Number.isFinite(docCount) ||
+    !Number.isFinite(tokenCount) ||
+    !Number.isFinite(rowCount)
+  ) {
+    throw new IncompatibleIndexError('finite-snapshot-lengths', 'non-finite');
+  }
+  if (schemaByteLength > MAX_SNAPSHOT_SCHEMA_BYTES) {
+    throw new IncompatibleIndexError(`schema-bytes<=${MAX_SNAPSHOT_SCHEMA_BYTES}`, schemaByteLength);
+  }
+  if (columnarByteLength > MAX_SNAPSHOT_COLUMNAR_BYTES) {
+    throw new IncompatibleIndexError(`columnar-bytes<=${MAX_SNAPSHOT_COLUMNAR_BYTES}`, columnarByteLength);
+  }
+  if (docsByteLength > MAX_SNAPSHOT_DOCS_BYTES) {
+    throw new IncompatibleIndexError(`docs-bytes<=${MAX_SNAPSHOT_DOCS_BYTES}`, docsByteLength);
+  }
+  if (docCount > MAX_SNAPSHOT_DOC_COUNT) {
+    throw new IncompatibleIndexError(`docCount<=${MAX_SNAPSHOT_DOC_COUNT}`, docCount);
+  }
+  if (tokenCount > MAX_SNAPSHOT_TOKEN_COUNT) {
+    throw new IncompatibleIndexError(`tokenCount<=${MAX_SNAPSHOT_TOKEN_COUNT}`, tokenCount);
+  }
+}
+
+/** JSON-safe normalization: BigInt/functions/symbols cannot cross `JSON.stringify`. */
+function toJsonSafeValue(v: unknown): unknown {
+  if (typeof v === 'bigint') return String(v);
+  if (typeof v === 'function' || typeof v === 'symbol') return null;
+  if (v === undefined) return null;
+  return v;
+}
+
+function stringifyColumnarPayload(payload: { v: number; fields: unknown; rows: unknown }): string {
+  return JSON.stringify(payload, (_key, value) =>
+    typeof value === 'bigint'
+      ? String(value)
+      : typeof value === 'function' || typeof value === 'symbol'
+        ? null
+        : value === undefined
+          ? null
+          : (value as unknown)
+  );
+}
+
+/**
  * Encodes the columnar filter-attribute segment for a U2D4 snapshot.
  *
  * Layout: UTF-8 JSON bytes of `{ v: 1, fields, rows }` where `fields` mirrors
@@ -71,25 +139,37 @@ export function encodeColumnarPayload<TDoc>(
       } catch {
         v = null;
       }
-      row[f] = v === undefined ? null : v;
+      row[f] = toJsonSafeValue(v);
     }
     rows[d] = row;
   }
-  const json = JSON.stringify({ v: 1, fields, rows });
+  const json = stringifyColumnarPayload({ v: 1, fields, rows });
   return new TextEncoder().encode(json);
 }
 
 /**
  * Validates a decoded U2D4 columnar segment against the snapshot schema.
  * Throws `IncompatibleIndexError` fail-closed on version, field, or shape
- * mismatch. Returns the parsed row count for cross-checking with `docCount`.
+ * mismatch. Empty segments are only valid when no filter fields are declared
+ * or the snapshot holds no docs; a stripped segment on a filtered non-empty
+ * index throws (integrity signal — authoritative rebuild would otherwise
+ * silently succeed with default accessors).
  */
 export function validateColumnarPayload(
   columnarBytes: Uint8Array,
   schemaFilterFields: Array<{ name: string; type?: string }> | undefined,
   docCount: number
 ): void {
-  if (columnarBytes.length === 0) return;
+  const expectedFields = schemaFilterFields ?? [];
+  if (columnarBytes.length === 0) {
+    if (expectedFields.length > 0 && docCount > 0) {
+      throw new IncompatibleIndexError('columnar-present', 'stripped-empty-segment');
+    }
+    return;
+  }
+  if (columnarBytes.length > MAX_SNAPSHOT_COLUMNAR_BYTES) {
+    throw new IncompatibleIndexError(`columnar-bytes<=${MAX_SNAPSHOT_COLUMNAR_BYTES}`, columnarBytes.length);
+  }
   let parsed: any;
   try {
     parsed = JSON.parse(new TextDecoder().decode(columnarBytes));
@@ -99,7 +179,6 @@ export function validateColumnarPayload(
   if (!parsed || typeof parsed !== 'object' || parsed.v !== 1 || !Array.isArray(parsed.fields) || !Array.isArray(parsed.rows)) {
     throw new IncompatibleIndexError('valid-columnar-envelope', typeof parsed);
   }
-  const expectedFields = schemaFilterFields ?? [];
   if (parsed.fields.length !== expectedFields.length) {
     throw new IncompatibleIndexError(`columnar fields length ${expectedFields.length}`, parsed.fields.length);
   }
@@ -301,7 +380,8 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
   }
 
   // Schema segment encoding (v0.4 M6: declarative hookIds only — closures
-  // are never serialized).
+  // are never serialized; v0.4 M8: filter `hasGetter` persisted so restore
+  // can fail closed when a custom getter cannot be revived).
   const hookIds = collectHookIds(index.getExtensions?.() as any);
   const schema: DocumentIndexSchema = {
     fields: sortedFields.map((f: InternalField<TDoc>) => ({
@@ -319,7 +399,8 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
     mutationEpoch: index.getStats().mutationEpoch,
     filterFields: index.getFilterFieldDefinitions().map((ff) => ({
       name: ff.name,
-      type: ff.type
+      type: ff.type,
+      ...((ff as { hasGetter?: boolean }).hasGetter === true ? { hasGetter: true as const } : {})
     })),
     ...(hookIds !== undefined ? { hookIds } : {})
   };
@@ -479,13 +560,28 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
   buffer: ArrayBuffer,
   options?: RestoreDocumentIndexOptions<TDoc>
 ): RestoredDocumentSnapshot<TDoc> {
+  if (!buffer || typeof (buffer as ArrayBuffer).byteLength !== 'number') {
+    throw new IncompatibleIndexError('arraybuffer', typeof buffer);
+  }
+  if ((buffer as ArrayBuffer).byteLength > MAX_SNAPSHOT_BYTES) {
+    throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
+  }
   const header = deserializeDocumentSnapshotHeader(buffer);
   const byteLen = buffer.byteLength;
   const isU2D4 = header.magic === U2D4_MAGIC;
   const headerBytes = isU2D4 ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
-  const checksumOffset = isU2D4 ? 52 : 44;
   const headerPrefixLen = isU2D4 ? 52 : 44;
   const columnarLen = header.columnarByteLength ?? 0;
+
+  // Fail-closed size caps before any decode/slice allocation.
+  assertSnapshotSizeCaps(
+    header.schemaByteLength,
+    columnarLen,
+    header.docsByteLength,
+    header.docCount,
+    header.tokenCount,
+    header.rowCount
+  );
 
   const wantTokensBytes = header.tokenCount * 4;
   const wantOffsetsBytes = (header.rowCount + 1) * 4;
@@ -635,9 +731,6 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
       throw new IncompatibleIndexError('docIds or options.documents required for decoupled restore', 'missing');
     }
   }
-
-  // Silence unused-var drift for checksum offset documentation.
-  void checksumOffset;
 
   return {
     header,

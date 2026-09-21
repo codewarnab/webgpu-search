@@ -79,6 +79,50 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+/** Safe datetime-local → ISO conversion: invalid input yields undefined (no throw). */
+function toIsoOrUndefined(raw: string): string | undefined {
+  const v = raw.trim();
+  if (v === '') return undefined;
+  const t = new Date(v).getTime();
+  if (!Number.isFinite(t)) return undefined;
+  return new Date(t).toISOString();
+}
+
+/** Shared empty-query filter pipeline so live-stream refresh matches search. */
+function applyEmptyQueryFilters(
+  records: StructuredLogRecord[],
+  opts: { levelFilter: string; serviceFilter: string; minMs?: number; maxMs?: number; fromIso?: string; toIso?: string }
+): StructuredLogRecord[] {
+  let out = records;
+  if (opts.levelFilter !== 'ALL') {
+    out = out.filter((r) => r.level === opts.levelFilter);
+  }
+  if (opts.serviceFilter !== 'ALL') {
+    out = out.filter((r) => r.service === opts.serviceFilter);
+  }
+  if (opts.minMs !== undefined && Number.isFinite(opts.minMs)) {
+    const min = opts.minMs as number;
+    out = out.filter((r) => r.latencyMs >= min);
+  }
+  if (opts.maxMs !== undefined && Number.isFinite(opts.maxMs)) {
+    const max = opts.maxMs as number;
+    out = out.filter((r) => r.latencyMs < max);
+  }
+  if (opts.fromIso !== undefined) {
+    out = out.filter((r) => r.timestamp >= (opts.fromIso as string));
+  }
+  if (opts.toIso !== undefined) {
+    out = out.filter((r) => r.timestamp < (opts.toIso as string));
+  }
+  return out;
+}
+
+/** Guarded select assignment: unknown facet values reset to ALL (no poisoned empty filter). */
+function setSelectGuarded(sel: HTMLSelectElement, value: string): void {
+  const exists = Array.from(sel.options).some((o) => o.value === value);
+  sel.value = exists ? value : 'ALL';
+}
+
 async function updateHUD(): Promise<void> {
   const stats = await engine.getStats();
   if (!stats) return;
@@ -120,8 +164,8 @@ async function performSearch(): Promise<void> {
   const serviceFilter = serviceSelect.value;
   const minMs = latencyMin.value.trim() === '' ? undefined : Number(latencyMin.value);
   const maxMs = latencyMax.value.trim() === '' ? undefined : Number(latencyMax.value);
-  const fromIso = tsFrom.value.trim() === '' ? undefined : new Date(tsFrom.value).toISOString();
-  const toIso = tsTo.value.trim() === '' ? undefined : new Date(tsTo.value).toISOString();
+  const fromIso = toIsoOrUndefined(tsFrom.value);
+  const toIso = toIsoOrUndefined(tsTo.value);
 
   if (currentAbortController) {
     currentAbortController.abort();
@@ -130,25 +174,14 @@ async function performSearch(): Promise<void> {
   currentAbortController = controller;
 
   if (!query) {
-    let records = engine.getRecords();
-    if (levelFilter !== 'ALL') {
-      records = records.filter((r) => r.level === levelFilter);
-    }
-    if (serviceFilter !== 'ALL') {
-      records = records.filter((r) => r.service === serviceFilter);
-    }
-    if (minMs !== undefined && Number.isFinite(minMs)) {
-      records = records.filter((r) => r.latencyMs >= (minMs as number));
-    }
-    if (maxMs !== undefined && Number.isFinite(maxMs)) {
-      records = records.filter((r) => r.latencyMs < (maxMs as number));
-    }
-    if (fromIso !== undefined) {
-      records = records.filter((r) => r.timestamp >= (fromIso as string));
-    }
-    if (toIso !== undefined) {
-      records = records.filter((r) => r.timestamp < (toIso as string));
-    }
+    const records = applyEmptyQueryFilters(engine.getRecords(), {
+      levelFilter,
+      serviceFilter,
+      minMs,
+      maxMs,
+      fromIso,
+      toIso
+    });
     const items: VirtualGridItem[] = records.map((r) => ({ record: r }));
     grid.setItems(items, { resetScroll: false });
     hudMatches.textContent = records.length.toLocaleString();
@@ -193,8 +226,8 @@ async function performSearch(): Promise<void> {
 
 function renderFacetChips(
   container: HTMLDivElement,
-  buckets: Array<{ key?: string; value?: unknown; count: number }>,
-  onSelect?: (label: string) => void
+  buckets: Array<{ key?: string; value?: unknown; count: number; from?: number; to?: number }>,
+  onSelect?: (label: string, bucket?: { from?: number; to?: number }) => void
 ): void {
   container.innerHTML = '';
   for (const b of buckets) {
@@ -203,36 +236,56 @@ function renderFacetChips(
     chip.className = 'facet-chip';
     chip.textContent = `${label} · ${b.count}`;
     if (onSelect) {
-      chip.addEventListener('click', () => onSelect(label));
+      chip.style.cursor = 'pointer';
+      chip.addEventListener('click', () => onSelect(label, { from: b.from, to: b.to }));
+    } else {
+      // Non-interactive bucket: render as span semantics (no pointer cursor).
+      chip.style.cursor = 'default';
+      chip.disabled = true;
     }
     container.appendChild(chip);
   }
 }
 
 function renderFacets(facets: Record<string, any> | undefined): void {
+  // Clear all groups up-front so absent groups cannot show stale chips.
+  facetLevels.innerHTML = '';
+  facetServices.innerHTML = '';
+  facetLatency.innerHTML = '';
   if (!facets) {
     facetBar.style.display = 'none';
     return;
   }
-  facetBar.style.display = 'flex';
+  let anyBuckets = false;
   const byLevel = facets.byLevel;
-  if (byLevel?.type === 'terms' && Array.isArray(byLevel.buckets)) {
+  if (byLevel?.type === 'terms' && Array.isArray(byLevel.buckets) && byLevel.buckets.length > 0) {
+    anyBuckets = true;
     renderFacetChips(facetLevels, byLevel.buckets, (label) => {
-      levelSelect.value = label;
+      setSelectGuarded(levelSelect, label);
       performSearch();
     });
   }
   const byService = facets.byService;
-  if (byService?.type === 'terms' && Array.isArray(byService.buckets)) {
+  if (byService?.type === 'terms' && Array.isArray(byService.buckets) && byService.buckets.length > 0) {
+    anyBuckets = true;
     renderFacetChips(facetServices, byService.buckets.slice(0, 8), (label) => {
-      serviceSelect.value = label;
+      setSelectGuarded(serviceSelect, label);
       performSearch();
     });
   }
   const byLatency = facets.byLatency;
-  if (byLatency?.type === 'range' && Array.isArray(byLatency.buckets)) {
-    renderFacetChips(facetLatency, byLatency.buckets);
+  if (byLatency?.type === 'range' && Array.isArray(byLatency.buckets) && byLatency.buckets.length > 0) {
+    anyBuckets = true;
+    // Clicking a latency bucket narrows the latency inputs to that range.
+    renderFacetChips(facetLatency, byLatency.buckets, (_label, bucket) => {
+      if (bucket?.from !== undefined) latencyMin.value = String(bucket.from);
+      else latencyMin.value = '';
+      if (bucket?.to !== undefined) latencyMax.value = String(bucket.to);
+      else latencyMax.value = '';
+      performSearch();
+    });
   }
+  facetBar.style.display = anyBuckets ? 'flex' : 'none';
 }
 
 async function loadDataset(count: number): Promise<void> {
@@ -268,13 +321,23 @@ function toggleStream(): void {
         await engine.appendLogs(newLogs);
         await updateHUD();
 
-        // If user isn't searching, refresh grid with current level filter
+        // If user isn't searching, refresh grid with the same empty-query
+        // filter pipeline as performSearch (level+service+latency+timestamp).
         if (!searchInput.value.trim()) {
-          let records = engine.getRecords();
           const levelFilter = levelSelect.value;
-          if (levelFilter !== 'ALL') {
-            records = records.filter((r) => r.level === levelFilter);
-          }
+          const serviceFilter = serviceSelect.value;
+          const minMs = latencyMin.value.trim() === '' ? undefined : Number(latencyMin.value);
+          const maxMs = latencyMax.value.trim() === '' ? undefined : Number(latencyMax.value);
+          const fromIso = toIsoOrUndefined(tsFrom.value);
+          const toIso = toIsoOrUndefined(tsTo.value);
+          const records = applyEmptyQueryFilters(engine.getRecords(), {
+            levelFilter,
+            serviceFilter,
+            minMs,
+            maxMs,
+            fromIso,
+            toIso
+          });
           const items: VirtualGridItem[] = records.slice(-1000).map((r) => ({ record: r }));
           grid.setItems(items, { resetScroll: false });
           hudMatches.textContent = records.length.toLocaleString();

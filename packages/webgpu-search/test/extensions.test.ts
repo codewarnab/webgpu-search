@@ -448,7 +448,8 @@ describe('persistence safety: hookIds + fail-closed restore', () => {
       },
     }));
     const buf = index.serialize();
-    const headerBytes = 48;
+    const header = deserializeDocumentSnapshotHeader(buf);
+    const headerBytes = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
     const dv = new DataView(buf, 0, headerBytes);
     const schemaLen = dv.getUint32(36, true);
     const schemaStr = new TextDecoder().decode(new Uint8Array(buf, headerBytes, schemaLen));

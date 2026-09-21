@@ -9,7 +9,13 @@
  *  - U2D4 persistence: serialize/restore wall-clock, snapshot bytes, and
  *    columnar segment overhead.
  *
+ * Environment: headless CPU only (`preferGpu: false`) for determinism.
+ * Numbers are NOT comparable to browser/WebGPU runs. The JSON report records
+ * `environment` (runtime, cpu, headless) alongside `generatedAt` + rows.
+ *
  * Run: `bun scripts/bench-v04-matrix.ts [--out <path>]`
+ * `--out` is constrained to the repo working directory (basename sanitized)
+ * to avoid arbitrary file writes; absolute paths under cwd or /tmp are allowed.
  * All engines run CPU (`preferGpu: false`) for headless determinism.
  */
 import { DocumentIndex } from '../packages/webgpu-search/src/index';
@@ -62,13 +68,25 @@ interface MatrixRow {
   operation: string;
   medianMs: number;
   p95Ms: number;
+  samples?: number[];
   extra?: Record<string, number | string | boolean>;
+}
+
+function resolveOutPath(raw: string | undefined): string {
+  const fallback = 'benchmark_v04_matrix.json';
+  if (!raw) return fallback;
+  // Allow explicit absolute paths under cwd or /tmp (CI uses /tmp), otherwise
+  // sanitize to basename inside cwd to avoid arbitrary writes (e.g. /etc/passwd).
+  if (raw.startsWith('/tmp/') || raw.startsWith(`${process.cwd()}/`)) return raw;
+  const base = raw.split('/').pop()!.split('\\').pop()!;
+  const safe = base.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128) || fallback;
+  return safe;
 }
 
 async function main(): Promise<void> {
   const rows: MatrixRow[] = [];
   const outIdx = process.argv.indexOf('--out');
-  const outPath = outIdx >= 0 ? process.argv[outIdx + 1] : 'benchmark_v04_matrix.json';
+  const outPath = resolveOutPath(outIdx >= 0 ? process.argv[outIdx + 1] : undefined);
 
   // ------------------------------------------------------------------
   // 1. IDE symbols (monaco-palette shape)
@@ -90,12 +108,12 @@ async function main(): Promise<void> {
     const prefix = await timeSamples(() =>
       index.search('compute', { mode: 'prefix', limit: 20 }).then(() => {})
     );
-    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search', medianMs: prefix.medianMs, p95Ms: prefix.p95Ms });
+    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search', medianMs: prefix.medianMs, p95Ms: prefix.p95Ms, samples: prefix.samples });
 
     const filtered = await timeSamples(() =>
       index.search('compute', { mode: 'prefix', limit: 20, filter: { type: 'shader' } }).then(() => {})
     );
-    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search+type-filter', medianMs: filtered.medianMs, p95Ms: filtered.p95Ms });
+    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search+type-filter', medianMs: filtered.medianMs, p95Ms: filtered.p95Ms, samples: filtered.samples });
 
     const suggest = await timeSamples(() =>
       index.suggest('comp', { mode: 'prefix', limit: 5 }).then(() => {})
@@ -103,7 +121,7 @@ async function main(): Promise<void> {
     const suggestRes = await index.suggest('comp', { mode: 'prefix', limit: 5 });
     rows.push({
       scenario: 'ide-symbols-5k', docs: 5000, operation: 'suggest-autocomplete',
-      medianMs: suggest.medianMs, p95Ms: suggest.p95Ms,
+      medianMs: suggest.medianMs, p95Ms: suggest.p95Ms, samples: suggest.samples,
       extra: { suggestionCount: suggestRes.suggestions.length }
     });
 
@@ -113,7 +131,7 @@ async function main(): Promise<void> {
         facets: { byType: { type: 'terms', field: 'type', limit: 10 } }
       }).then(() => {})
     );
-    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'fuzzy-search+type-facets', medianMs: facets.medianMs, p95Ms: facets.p95Ms });
+    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'fuzzy-search+type-facets', medianMs: facets.medianMs, p95Ms: facets.p95Ms, samples: facets.samples });
 
     index.destroy();
   }
@@ -138,7 +156,7 @@ async function main(): Promise<void> {
     const fuzzy = await timeSamples(() =>
       index.search('timeout', { mode: 'fuzzy', limit: 50 }).then(() => {})
     );
-    rows.push({ scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search', medianMs: fuzzy.medianMs, p95Ms: fuzzy.p95Ms });
+    rows.push({ scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search', medianMs: fuzzy.medianMs, p95Ms: fuzzy.p95Ms, samples: fuzzy.samples });
 
     const filtered = await timeSamples(() =>
       index.search('timeout', {
@@ -152,7 +170,7 @@ async function main(): Promise<void> {
     });
     rows.push({
       scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search+level+latency-filter',
-      medianMs: filtered.medianMs, p95Ms: filtered.p95Ms,
+      medianMs: filtered.medianMs, p95Ms: filtered.p95Ms, samples: filtered.samples,
       extra: { totalMatches: filteredRes.totalMatches }
     });
 
@@ -172,29 +190,39 @@ async function main(): Promise<void> {
         }
       }).then(() => {})
     );
-    rows.push({ scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search+facets', medianMs: faceted.medianMs, p95Ms: faceted.p95Ms });
+    rows.push({ scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search+facets', medianMs: faceted.medianMs, p95Ms: faceted.p95Ms, samples: faceted.samples });
 
     // U2D4 persistence profile only on the 10k grid to bound runtime.
+    // Sampled 10× with warmup like every other row (previously n=1).
     if (count === 10_000) {
-      const tSer0 = performance.now();
+      const serSamples = await timeSamples(async () => {
+        index.serialize();
+      }, 1, 10);
       const snapshot = index.serialize();
-      const serMs = performance.now() - tSer0;
+      if (snapshot.byteLength < 56) {
+        throw new Error('[bench-v04-matrix] snapshot shorter than U2D4 header');
+      }
       const header = new DataView(snapshot, 0, 56);
       const columnarLen = header.getUint32(44, true);
       const schemaLen = header.getUint32(36, true);
       const docsLen = header.getUint32(40, true);
+      const resSamples = await timeSamples(async () => {
+        const r = await DocumentIndex.fromSnapshot(snapshot);
+        r.destroy();
+      }, 1, 10);
       const tRes0 = performance.now();
       const restored = await DocumentIndex.fromSnapshot(snapshot);
-      const resMs = performance.now() - tRes0;
+      const resSingleMs = performance.now() - tRes0;
+      void resSingleMs;
       const probe = await restored.search('timeout', { mode: 'fuzzy', limit: 5 });
       rows.push({
         scenario: 'log-grid-10k', docs: count, operation: 'u2d4-serialize',
-        medianMs: Number(serMs.toFixed(3)), p95Ms: Number(serMs.toFixed(3)),
+        medianMs: serSamples.medianMs, p95Ms: serSamples.p95Ms, samples: serSamples.samples,
         extra: { snapshotBytes: snapshot.byteLength, schemaBytes: schemaLen, columnarBytes: columnarLen, docsBytes: docsLen }
       });
       rows.push({
         scenario: 'log-grid-10k', docs: count, operation: 'u2d4-restore',
-        medianMs: Number(resMs.toFixed(3)), p95Ms: Number(resMs.toFixed(3)),
+        medianMs: resSamples.medianMs, p95Ms: resSamples.p95Ms, samples: resSamples.samples,
         extra: { restoredMatches: probe.totalMatches }
       });
       restored.destroy();
@@ -218,7 +246,15 @@ async function main(): Promise<void> {
 
   if (outPath) {
     const { writeFileSync } = await import('node:fs');
-    writeFileSync(outPath!, JSON.stringify({ generatedAt: new Date().toISOString(), rows }, null, 2));
+    const environment = {
+      engine: 'cpu',
+      preferGpu: false,
+      headless: true,
+      runtime: typeof (globalThis as any).Bun !== 'undefined' ? `bun/${(globalThis as any).Bun.version}` : `node/${process.version}`,
+      platform: `${process.platform}-${process.arch}`,
+      note: 'Headless CPU numbers; not comparable to browser/WebGPU runs.'
+    };
+    writeFileSync(outPath!, JSON.stringify({ generatedAt: new Date().toISOString(), environment, rows }, null, 2));
     console.log(`Matrix written to ${outPath}`);
   }
 }

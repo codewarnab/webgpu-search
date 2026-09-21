@@ -182,7 +182,10 @@ const COMPONENT_KINDS: Array<{ kind: SymbolKind; ext: string; lang: string }> = 
   { kind: 'shader', ext: '.wgsl', lang: 'wgsl' },
   { kind: 'type', ext: '.ts', lang: 'typescript' },
   { kind: 'constant', ext: '.json', lang: 'json' },
-  { kind: 'file', ext: '.md', lang: 'markdown' }
+  { kind: 'file', ext: '.md', lang: 'markdown' },
+  // Rust records so the `rust` language filter resolves to generated docs
+  // (previously only a single CORE_FILES seed record matched).
+  { kind: 'class', ext: '.rs', lang: 'rust' }
 ];
 
 export function generateMonacoRecords(count: number = 600): MonacoFileRecord[] {
@@ -202,6 +205,13 @@ export function generateMonacoRecords(count: number = 600): MonacoFileRecord[] {
 
     switch (comp.kind) {
       case 'class':
+        if (comp.lang === 'rust') {
+          filename = `${mod}_context_${idx}.rs`;
+          path = `src/runtime/${mod}/${filename}`;
+          symbols = `${capitalizedMod}Context${idx}, acquire_device, submit_command_buffer`;
+          desc = `Rust runtime adapter context for ${mod} headless compute`;
+          break;
+        }
         filename = `${mod}_service_${idx}.ts`;
         path = `packages/services/${mod}/${filename}`;
         symbols = `${capitalizedMod}Service${idx}, initialize, handleRequest, flushBuffer, shutdown`;

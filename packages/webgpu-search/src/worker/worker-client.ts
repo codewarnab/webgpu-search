@@ -20,8 +20,8 @@ import {
   type WorkerSearchPayload
 } from './protocol';
 import { abortError, throwIfAborted } from '../runtime-guards';
-import { deserializeDocumentSnapshotHeader } from '../persistence';
-import { SERIALIZED_DOC_HEADER_BYTES, U2D4_HEADER_BYTES, U2D4_MAGIC } from '../text-profile';
+import { deserializeDocumentSnapshotHeader, MAX_SNAPSHOT_BYTES } from '../persistence';
+import { SERIALIZED_DOC_HEADER_BYTES, U2D4_HEADER_BYTES, U2D4_MAGIC, IncompatibleIndexError } from '../text-profile';
 import { IncompatibleHookError } from '../errors';
 import { hasAnyHook, normalizeSearchExtensionHooks } from '../extensions';
 
@@ -668,6 +668,9 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     if (!buffer || typeof (buffer as any).byteLength !== 'number') {
       throw new TypeError('[webgpu-search] restore expects an ArrayBuffer.');
     }
+    if ((buffer as ArrayBuffer).byteLength > MAX_SNAPSHOT_BYTES) {
+      throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
+    }
     if (options?.options?.extensions) {
       assertNoWorkerExtensions(options.options.extensions, 'restore');
     }
@@ -679,6 +682,10 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
 
     try {
       const header = deserializeDocumentSnapshotHeader(buffer);
+      // Version-aware header width: U2D4 is 56 B, legacy U2D3 is 48 B.
+      // Derive before the length guard so truncated U2D4 buffers cannot
+      // slip through the legacy 48 B threshold.
+      const headerBytesForGuard = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
       const userFields = options?.options?.fields;
       const userFieldMap = new Map<string, any>();
       if (Array.isArray(userFields)) {
@@ -691,7 +698,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         }
       }
 
-      if (buffer.byteLength >= SERIALIZED_DOC_HEADER_BYTES + header.schemaByteLength) {
+      if (buffer.byteLength >= headerBytesForGuard + header.schemaByteLength) {
         // U2D4 inserts a columnar segment between offsets and docs; derive
         // header width and columnar length from the parsed header so legacy
         // U2D3 snapshots (no columnar segment) still stage correctly.

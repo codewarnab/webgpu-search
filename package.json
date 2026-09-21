@@ -33,6 +33,7 @@
     "test:browser": "bun scripts/test-regression.ts",
     "test:benchmark": "bun scripts/run-all-benchmarks.ts",
     "test:benchmark:fuzzy": "bun scripts/run-fuzzy-benchmark.ts",
+    "bench:v04-matrix": "bun scripts/bench-v04-matrix.ts",
     "test:all": "bun run test:mock && bun run test:m1 && bun run test:m2 && bun run test:m3 && bun run test:m4 && bun run test:m5 && bun run test:m6 && bun run test:m7 && bun run test:m8 && bun run test:preprocess && bun run test:preprocess:tr && bun run test:filter && bun run test:facets && bun run test:search-modes && bun run test:parity",
     "check:shaders": "turbo check:shaders",
     "typecheck": "turbo typecheck && bun x tsc -p examples/tsconfig.json --noEmit",

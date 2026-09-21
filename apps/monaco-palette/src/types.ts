@@ -32,7 +32,7 @@ export interface MonacoPaletteSearchResult {
 export interface MonacoPaletteState {
   records: MonacoFileRecord[];
   query: string;
-  mode: 'fuzzy' | 'substring';
+  mode: 'fuzzy' | 'substring' | 'prefix' | 'token';
   engine: 'webgpu' | 'cpu';
   useWorker: boolean;
   highlight: boolean;

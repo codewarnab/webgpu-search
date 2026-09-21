@@ -93,6 +93,9 @@ jobs:
       - name: Run M4 Token/Prefix/Typo Search-Mode Tests
         run: bun run test:search-modes
 
+      - name: Validate v0.4 Benchmark Matrix JSON (schema, not timing)
+        run: bun -e "const j=await Bun.file('benchmark_v04_matrix.json').json(); const rows=j.rows; if(!Array.isArray(rows)||rows.length!==15) throw new Error('expected 15 rows, got '+(rows?.length)); for(const r of rows){ if(typeof r.medianMs!=='number'||typeof r.p95Ms!=='number') throw new Error('bad timing in '+r.operation); if(!Array.isArray(r.samples)||r.samples.length===0) throw new Error('missing samples in '+r.operation);} if(!j.environment||j.environment.headless!==true) throw new Error('missing environment.headless'); console.log('bench matrix schema ok: '+rows.length+' rows');"
+
       - name: Setup Chrome (browser regression gate)
         id: setup-chrome
         uses: browser-actions/setup-chrome@v1

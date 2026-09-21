@@ -104,6 +104,16 @@
  * documented rationale.
  * Budget: 82 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
+ * Issue #10 M8 (U2D4 persistence hardening + custom getter guard) review fixes:
+ * Multi-agent PR #35 review required fail-closed hardening (+~1.4 KB gzip):
+ * snapshot size caps (schema/columnar/docs/total/docCount/tokenCount) before
+ * decode, BigInt/function/symbol JSON-safe columnar encoding, `hasGetter`
+ * persistence + restore guard (mirrors hookIds), version-aware worker staging
+ * guard, and strict empty-columnar integrity signal. Delta +33,419 B exceeds
+ * the 32 KB cap; total stays within 82 KB.
+ * Delta cap bumped 32 KB -> 34 KB with this documented rationale.
+ * Budget: 82 KB gzip total per file (dist/index.js + dist/index.cjs).
+ *
  * Fail-closed: missing dist or dist older than src/fold-table.ts fails
  * (a size gate that passes when there is nothing to measure is decoration).
  *
@@ -115,7 +125,7 @@ import { stat, readFile } from 'node:fs/promises';
 
 const BASELINE_RAW = 234907;
 const BASELINE_GZIP = 49246;
-const DELTA_CAP_GZIP = 32 * 1024;
+const DELTA_CAP_GZIP = 34 * 1024;
 const TOTAL_BUDGET_GZIP = 82 * 1024;
 
 

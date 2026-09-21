@@ -188,16 +188,28 @@ export class LogEngine {
     const latencyRange = options?.latencyRange;
     if (latencyRange !== undefined && (latencyRange.minMs !== undefined || latencyRange.maxMs !== undefined)) {
       const comp: Record<string, number> = {};
-      if (latencyRange.minMs !== undefined) comp.gte = latencyRange.minMs;
-      if (latencyRange.maxMs !== undefined) comp.lt = latencyRange.maxMs;
-      clauses.push({ latencyMs: comp as { gte?: number; lt?: number } });
+      if (latencyRange.minMs !== undefined && Number.isFinite(latencyRange.minMs)) {
+        comp.gte = latencyRange.minMs;
+      }
+      if (latencyRange.maxMs !== undefined && Number.isFinite(latencyRange.maxMs)) {
+        comp.lt = latencyRange.maxMs;
+      }
+      if (Object.keys(comp).length > 0) {
+        clauses.push({ latencyMs: comp as { gte?: number; lt?: number } });
+      }
     }
     const timestampRange = options?.timestampRange;
     if (timestampRange !== undefined && (timestampRange.from !== undefined || timestampRange.to !== undefined)) {
       const comp: Record<string, string> = {};
-      if (timestampRange.from !== undefined) comp.gte = timestampRange.from;
-      if (timestampRange.to !== undefined) comp.lt = timestampRange.to;
-      clauses.push({ timestamp: comp as { gte?: string; lt?: string } });
+      if (typeof timestampRange.from === 'string' && timestampRange.from.trim() !== '' && !Number.isNaN(new Date(timestampRange.from).getTime())) {
+        comp.gte = timestampRange.from;
+      }
+      if (typeof timestampRange.to === 'string' && timestampRange.to.trim() !== '' && !Number.isNaN(new Date(timestampRange.to).getTime())) {
+        comp.lt = timestampRange.to;
+      }
+      if (Object.keys(comp).length > 0) {
+        clauses.push({ timestamp: comp as { gte?: string; lt?: string } });
+      }
     }
     if (clauses.length === 0) return undefined;
     if (clauses.length === 1) return clauses[0];
@@ -365,6 +377,14 @@ export class LogEngine {
   }
 
   async restoreSnapshot(buffer: ArrayBuffer): Promise<void> {
+    if (!buffer || typeof (buffer as ArrayBuffer).byteLength !== 'number') {
+      throw new TypeError('[LogEngine] restoreSnapshot expects an ArrayBuffer.');
+    }
+    const { MAX_SNAPSHOT_BYTES } = await import('webgpu-search');
+    if ((buffer as ArrayBuffer).byteLength > (MAX_SNAPSHOT_BYTES as number)) {
+      const { IncompatibleIndexError } = await import('webgpu-search');
+      throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
+    }
     if (this.useWorker && this.workerClient) {
       await this.workerClient.restore(buffer);
       this.records = this.workerClient.getRecords();

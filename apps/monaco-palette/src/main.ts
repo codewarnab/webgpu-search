@@ -74,6 +74,22 @@ function escapeHtml(s: string): string {
   }[c] || c));
 }
 
+/**
+ * Defense-in-depth sanitizer for `highlightedText` inserted via `innerHTML`.
+ * Re-escapes everything except `<mark>` tags.
+ */
+function sanitizeHighlighted(html: string): string {
+  return escapeHtml(html)
+    .replace(/&lt;mark&gt;/g, '<mark>')
+    .replace(/&lt;\/mark&gt;/g, '</mark>');
+}
+
+/** Guarded select assignment: unknown facet values reset to ALL. */
+function setSelectGuarded(sel: HTMLSelectElement, value: string): void {
+  const exists = Array.from(sel.options).some((o) => o.value === value);
+  sel.value = exists ? value : 'ALL';
+}
+
 async function updateTelemetry(): Promise<void> {
   const stats = await engine.getStats();
   if (!stats) return;
@@ -147,9 +163,9 @@ function renderResults(): void {
     const kind = res.doc.type;
     const kindLabel = escapeHtml(kind.charAt(0).toUpperCase());
 
-    const highlightedFilename = res.highlightedText?.filename || escapeHtml(res.doc.filename);
-    const highlightedPath = res.highlightedText?.path || escapeHtml(res.doc.path);
-    const highlightedSymbols = res.highlightedText?.symbols || escapeHtml(res.doc.symbols);
+    const highlightedFilename = res.highlightedText?.filename ? sanitizeHighlighted(res.highlightedText.filename) : escapeHtml(res.doc.filename);
+    const highlightedPath = res.highlightedText?.path ? sanitizeHighlighted(res.highlightedText.path) : escapeHtml(res.doc.path);
+    const highlightedSymbols = res.highlightedText?.symbols ? sanitizeHighlighted(res.highlightedText.symbols) : escapeHtml(res.doc.symbols);
 
     li.innerHTML = `
       <div class="item-header">
@@ -224,7 +240,7 @@ function renderFacets(facets: Record<string, any> | undefined): void {
     chip.className = 'facet-chip';
     chip.textContent = `${String(b.value)} · ${b.count}`;
     chip.addEventListener('click', () => {
-      typeSelect.value = String(b.value);
+      setSelectGuarded(typeSelect, String(b.value));
       performSearch();
     });
     facetList.appendChild(chip);

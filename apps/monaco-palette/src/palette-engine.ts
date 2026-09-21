@@ -242,16 +242,15 @@ export class PaletteEngine {
     options?: SuggestOptions
   ): Promise<{ suggestions: SuggestionItem<MonacoFileRecord>[]; queryDurationMs: number }> {
     if (this.useWorker && this.workerClient) {
-      // Worker client has no dedicated suggest RPC; fan out via inline
-      // search suggest on the main-thread mirror is unavailable, so resolve
-      // against a lightweight main-thread re-search is avoided — instead
-      // perform a worker search with suggest-only shape.
+      const t0 = performance.now();
+      // Worker client has no dedicated suggest RPC; fan out via a
+      // suggest-only worker search (suggestions stay index-wide by design).
       const res = await this.workerClient.search(query, {
         limit: 1,
         highlight: false,
         suggest: options ?? { mode: 'prefix', limit: 5 }
       } as any);
-      return { suggestions: res.suggestions ?? [], queryDurationMs: 0 };
+      return { suggestions: res.suggestions ?? [], queryDurationMs: performance.now() - t0 };
     } else if (this.mainIndex) {
       return this.mainIndex.suggest(query, options);
     }
@@ -310,6 +309,13 @@ export class PaletteEngine {
   }
 
   async restoreSnapshot(buffer: ArrayBuffer): Promise<void> {
+    if (!buffer || typeof (buffer as ArrayBuffer).byteLength !== 'number') {
+      throw new TypeError('[PaletteEngine] restoreSnapshot expects an ArrayBuffer.');
+    }
+    const { MAX_SNAPSHOT_BYTES, IncompatibleIndexError } = await import('webgpu-search');
+    if ((buffer as ArrayBuffer).byteLength > (MAX_SNAPSHOT_BYTES as number)) {
+      throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
+    }
     if (this.useWorker && this.workerClient) {
       await this.workerClient.restore(buffer);
       this.records = this.workerClient.getRecords();
