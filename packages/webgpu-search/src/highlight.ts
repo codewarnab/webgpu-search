@@ -1,20 +1,22 @@
 import type { HighlightRange, PrefixSearchOptions, SearchMode, TokenMatchOptions, TypoToleranceOptions } from './types';
-import { toWellFormedSafe, normalizeText } from './unicode-preprocess';
-import { foldCodePoint } from './fold-table';
-import { scoreSubstringTokens, scoreSubstringTypoTokens } from './cpu-reference';
-import { normalizeTypoTolerance, allowedDistanceForTerm } from './modes/typo-distance';
-import { normalizeTokenMatchOptions, splitQueryTerms, scoreTokenTokens } from './modes/token-search';
-import { normalizePrefixOptions, assertPrefixLengthForQuery, scorePrefixTokens } from './modes/prefix-search';
+import { toWellFormedSafe, normalizeText } from './text-normalization';
+import { foldCaseScalar } from './case-fold-table';
+import { scoreSubstringTokens, scoreSubstringTypoTokens } from './exact-scorer';
+import { normalizeTypoTolerance, allowedDistanceForTerm } from './search/typo-tolerance';
+import { normalizeTokenMatchOptions, splitQueryTerms, scoreTokenTokens } from './search/token-search';
+import { normalizePrefixOptions, assertPrefixLengthForQuery, scorePrefixTokens } from './search/prefix-search';
 import { IncompatibleOptionError, ProfileMismatchError } from './text-profile';
 
 export interface SourceMappedText {
-  /** Post-fold NFC scalar stream (u32 code points). */
+  /** Post-normalization NFC scalar stream (u32 code points). */
   tokens: Uint32Array;
-  /** Post-fold token count. */
+  /** Post-normalization token count. */
   tokenCount: number;
   /** True when tokenCount === 0. */
   isEmpty: boolean;
-  /** Whether C+F folding was applied. */
+  /** Whether default case folding was applied. */
+  normalized: boolean;
+  /** @deprecated Use normalized. */
   folded: boolean;
   /** Start index in UTF-16 code units in the original JS string for each token. */
   starts: Uint32Array;
@@ -29,7 +31,9 @@ export interface AlignHighlightOptions {
   mode?: SearchMode;
   /** If true, folding is skipped (caseSensitive). Default: false */
   caseSensitive?: boolean;
-  /** Alternative to caseSensitive (folded = !caseSensitive). */
+  /** Alternative to caseSensitive (normalized = !caseSensitive). */
+  normalized?: boolean;
+  /** @deprecated Use normalized. */
   folded?: boolean;
   /** Optional pre-computed source map for raw string. */
   sourceMap?: SourceMappedText;
@@ -42,7 +46,7 @@ export interface AlignHighlightOptions {
   /** Bounded typo tolerance (honored by 'substring', 'token', 'prefix'). */
   typoTolerance?: TypoToleranceOptions | boolean;
   /**
-   * v0.4 M6: pre-split custom tokenizer terms for `'token'` mode.
+   * pre-split custom tokenizer terms for `'token'` mode.
    * When provided, replaces `splitQueryTerms(queryTokens)` so highlight
    * ranges track the serving scorer (score-highlight symmetry with custom
    * tokenizers). Empty override yields no ranges.
@@ -113,7 +117,7 @@ function appendSegmentTokens(
   const foldedScalars: number[] = [];
   for (const ch of nfc1) {
     const cp = ch.codePointAt(0) as number;
-    const mapped = foldCodePoint(cp);
+    const mapped = foldCaseScalar(cp);
     if (mapped === null) {
       foldedScalars.push(cp);
     } else {
@@ -132,7 +136,7 @@ function appendSegmentTokens(
 }
 
 /**
- * Normalizes raw string to post-fold tokens with an exact coordinate source map
+ * Normalizes raw string to post-normalization tokens with an exact coordinate source map
  * linking every token to its UTF-16 code unit span in the original raw string.
  *
  * Accounts for:
@@ -141,10 +145,10 @@ function appendSegmentTokens(
  * 3. Lone surrogates replaced safely with U+FFFD (1 code unit).
  * 4. NFC composition (combining marks compose into base starter).
  * 5. Full C+F case folding expansions ('ß' -> 'ss', 'İ' -> 'i' + dot, 'ﬁ' -> 'fi').
- *    Every expanded token inherits the full original span of the atomic character.
+ * Every expanded token inherits the full original span of the atomic character.
  * 6. Grapheme cluster boundary protection (no broken multi-code-point sequences).
  */
-export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMappedText {
+export function normalizeWithSourceMap(raw: string, normalized: boolean): SourceMappedText {
   if (typeof raw !== 'string') {
     throw new TypeError(`[webgpu-search] normalizeWithSourceMap expects a string, got ${typeof raw}`);
   }
@@ -157,7 +161,8 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
       tokens: new Uint32Array(0),
       tokenCount: 0,
       isEmpty: true,
-      folded,
+      normalized,
+      folded: normalized,
       starts: new Uint32Array(0),
       ends: new Uint32Array(0),
       leadingTrimOffset
@@ -173,7 +178,7 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
 
     for (let i = 0; i < len; i++) {
       const cu = trimmed.charCodeAt(i);
-      tokens[i] = folded && cu >= 0x41 && cu <= 0x5a ? cu + 32 : cu;
+      tokens[i] = normalized && cu >= 0x41 && cu <= 0x5a ? cu + 32 : cu;
       starts[i] = leadingTrimOffset + i;
       ends[i] = leadingTrimOffset + i + 1;
     }
@@ -182,7 +187,8 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
       tokens,
       tokenCount: len,
       isEmpty: false,
-      folded,
+      normalized,
+      folded: normalized,
       starts,
       ends,
       leadingTrimOffset
@@ -201,7 +207,7 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
       const segStr = seg.segment;
       const spanStart = leadingTrimOffset + seg.index;
       const spanEnd = spanStart + segStr.length;
-      appendSegmentTokens(segStr, folded, spanStart, spanEnd, allTokens, allStarts, allEnds);
+      appendSegmentTokens(segStr, normalized, spanStart, spanEnd, allTokens, allStarts, allEnds);
     }
   } else {
     // Fallback grapheme iteration for environments without Intl.Segmenter
@@ -231,7 +237,7 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
       const segStr = wellFormed.slice(segStart, i);
       const spanStart = leadingTrimOffset + segStart;
       const spanEnd = leadingTrimOffset + i;
-      appendSegmentTokens(segStr, folded, spanStart, spanEnd, allTokens, allStarts, allEnds);
+      appendSegmentTokens(segStr, normalized, spanStart, spanEnd, allTokens, allStarts, allEnds);
     }
   }
 
@@ -240,7 +246,8 @@ export function normalizeWithSourceMap(raw: string, folded: boolean): SourceMapp
     tokens: new Uint32Array(allTokens),
     tokenCount,
     isEmpty: tokenCount === 0,
-    folded,
+    normalized,
+    folded: normalized,
     starts: new Uint32Array(allStarts),
     ends: new Uint32Array(allEnds),
     leadingTrimOffset
@@ -348,7 +355,7 @@ export function alignHighlights(
   query: string,
   options: AlignHighlightOptions = {}
 ): HighlightRange[] {
-  // v0.4 M6: fail-closed custom tokenizer terms validation before any early
+  // fail-closed custom tokenizer terms validation before any early
   // exit so malformed overrides throw identically on empty corpora/queries.
   if (options.tokenTermsOverride !== undefined) {
     if (!Array.isArray(options.tokenTermsOverride)) {
@@ -363,16 +370,15 @@ export function alignHighlights(
   if (typeof raw !== 'string' || typeof query !== 'string') return [];
   if (raw.length === 0 || query.length === 0) return [];
 
-  const folded = options.folded !== undefined
-    ? options.folded
-    : options.caseSensitive !== undefined
-      ? !options.caseSensitive
-      : (options.sourceMap ? options.sourceMap.folded : true);
+  const folded = options.normalized ?? options.folded ?? (options.caseSensitive !== undefined
+    ? !options.caseSensitive
+    : (options.sourceMap ? (options.sourceMap.normalized ?? options.sourceMap.folded) : true));
 
-  if (options.sourceMap && options.folded !== undefined && options.sourceMap.folded !== options.folded) {
+  const requestedNormalized = options.normalized ?? options.folded;
+  if (options.sourceMap && requestedNormalized !== undefined && (options.sourceMap.normalized ?? options.sourceMap.folded) !== requestedNormalized) {
     throw new IncompatibleOptionError(
-      'folded',
-      `[webgpu-search] alignHighlights sourceMap.folded (${options.sourceMap.folded}) diverges from requested folded mode (${options.folded}).`
+      'normalized',
+      `[webgpu-search] alignHighlights sourceMap.normalized (${options.sourceMap.normalized ?? options.sourceMap.folded}) diverges from requested normalized mode (${requestedNormalized}).`
     );
   }
 
@@ -418,7 +424,7 @@ export function alignHighlights(
     return [];
   }
 
-  /** Map a post-fold token span to one UTF-16 range (cluster-guarded). */
+  /** Map a post-normalization token span to one UTF-16 range (cluster-guarded). */
   const spanToRange = (tokenStart: number, tokenLength: number): HighlightRange | null => {
     if (tokenStart < 0 || tokenLength <= 0 || tokenStart + tokenLength > sourceMap.tokenCount) return null;
     const start = sourceMap.starts[tokenStart];
@@ -430,7 +436,7 @@ export function alignHighlights(
 
   if (mode === 'token') {
     // Multi-term highlights: one range per matched term, merged.
-    // v0.4 M6: custom tokenizer terms replace the default split when supplied.
+    // custom tokenizer terms replace the default split when supplied.
     const tokenOpts = normalizeTokenMatchOptions(options.tokenMatch);
     const typo = normalizeTypoTolerance(options.typoTolerance);
     const terms = options.tokenTermsOverride ?? splitQueryTerms(queryTokens);
@@ -448,7 +454,7 @@ export function alignHighlights(
   if (mode === 'prefix') {
     // Anchored prefix highlight: the winning token-start span.
     const prefixOpts = normalizePrefixOptions(options.prefixMatch);
-    // Mirror index polarity enforcement (document-index/hybrid-index):
+    // Mirror index polarity enforcement (document-index/search-index):
     // prefixMatch.exactCase must agree with the folded mode.
     if (prefixOpts.exactCase !== !folded) {
       throw new ProfileMismatchError(!folded, prefixOpts.exactCase, 'prefixMatch.exactCase');

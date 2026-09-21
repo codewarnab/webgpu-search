@@ -1,8 +1,8 @@
 /**
- * M3 parity-path lint: bans locale/UTF-16 helpers in the parity path.
+ * parity-path lint: bans locale/UTF-16 helpers in the parity path.
  *
- * Strict targets (fail on hit): unicode-preprocess.ts, cpu-reference.ts,
- * runtime-guards.ts, fold-table.ts, buffer.ts, webgpu-engine.ts. Extended
+ * Strict targets (fail on hit): unicode-preprocess.ts, exact-scorer.ts,
+ * guard.ts, fold-table.ts, buffer.ts, webgpu-engine.ts. Extended
  * bans: charCodeAt (except the vetted ASCII/surrogate-scan contexts below),
  * toLowerCase, toUpperCase, toLocaleLowerCase, toLocaleUpperCase,
  * localeCompare, indexOf, `.includes(` (as indexOf substitute), charAt.
@@ -10,11 +10,11 @@
  * unit access splits surrogates; substring search must use scalar ===.
  * `codePointAt` / `fromCodePoint` are the approved replacements.
  *
- * M3 promotion: buffer.ts + webgpu-engine.ts moved from info-only to strict —
- * the M3 representation swap makes them parity code (u32 scalars, pure `==`
+ * promotion: buffer.ts + webgpu-engine.ts moved from info-only to strict —
+ * the representation swap makes them parity code (u32 scalars, pure `==`
  * shaders, `normalizeText` queries). Legacy `sanitizeStringForSlot` /
- * `packStringsToGPUBuffer` stay exported behind a `@deprecated` shim (M6
- * migration, removal v0.3) and were rewritten to use `codePointAt` so the
+ * `packStringsToGPUBuffer` stay exported behind a `@deprecated` shim (
+ * migration, removal ) and were rewritten to use `codePointAt` so the
  * strict gate holds without deleting them.
  *
  * Legacy-quarantined files (cpu-engine.ts) use banned helpers behind the
@@ -29,7 +29,7 @@ import { readFile } from 'node:fs/promises';
 
 const strictTargets = [
   '../packages/webgpu-search/src/unicode-preprocess.ts',
-  '../packages/webgpu-search/src/cpu-reference.ts',
+  '../packages/webgpu-search/src/exact-scorer.ts',
   '../packages/webgpu-search/src/modes/typo-distance.ts',
   '../packages/webgpu-search/src/modes/token-search.ts',
   '../packages/webgpu-search/src/modes/prefix-search.ts',

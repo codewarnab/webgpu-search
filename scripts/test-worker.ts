@@ -24,7 +24,7 @@ interface BookDoc {
 }
 
 async function runM5Tests() {
-  console.log('--- Running Milestone 5: First-Party Worker Client & Protocol Tests ---');
+  console.log('--- Running  First-Party Worker Client & Protocol Tests ---');
 
   // =========================================================================
   // 1. SSR & Main-Thread Safety
@@ -500,7 +500,7 @@ async function runM5Tests() {
       preferGpu: false
     });
 
-    // Test serialize (implemented in M6)
+    // Test serialize (snapshot persistence)
     const serializedBuf = await client.serialize();
     assert(serializedBuf instanceof ArrayBuffer, 'client.serialize() must return an ArrayBuffer');
     assert(serializedBuf.byteLength >= 48, 'Serialized buffer must contain at least 48 bytes header');
@@ -737,7 +737,7 @@ async function runM5Tests() {
     console.log('   ✅ Multi-agent review hardening & edge-cases verified');
   }
 
-  console.log('\n--- All Milestone 5 First-Party Worker Client & Protocol Tests Passed! ✅ ---');
+  console.log('\n--- All First-Party Worker Client & Protocol Tests Passed! ✅ ---');
 }
 
 runM5Tests()
@@ -745,6 +745,6 @@ runM5Tests()
     process.exit(0);
   })
   .catch((err) => {
-    console.error('Milestone 5 test failed:', err);
+    console.error('test failed:', err);
     process.exit(1);
   });

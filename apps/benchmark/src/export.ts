@@ -82,7 +82,7 @@ export function generateBenchmarkCsv(
   lines.push('# ========================================================');
   lines.push('');
 
-  // 2. Data Table with M5 Metrics in Every Single Row
+  // 2. Data Table with Metrics in Every Single Row
   lines.push([
     'Algorithm',
     'Corpus',
@@ -265,7 +265,7 @@ export function generateMarkdownSummary(
     `- **Date**: ${dateStr}`,
     `- **Methodology**: Warm median and p95 latency metrics over 5 warmups and 20 randomized/interleaved samples per engine.`,
     `- **UI Telemetry**: Real requestAnimationFrame interval measurement; frame durations > 16.7ms recorded as jank spikes and dropped frames.`,
-    `- **Parity Fallback Budget**: Evaluates contracted v0.2 fallback \`searchCpuReference\` (\`cpuAlgorithm: 'parity'\`) directly against GPU compute.`,
+    `- **Exact Fallback Budget**: Evaluates the contracted fallback \`scoreExactMatches\` (\`cpuScorer: 'exact'\`) directly against GPU compute.`,
     '',
     formatTable(substringResults, '1. Exact Substring Search Matrix'),
     '',

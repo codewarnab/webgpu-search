@@ -1,5 +1,5 @@
 import { DocumentIndex } from '../document-index';
-import { restoreDocumentIndex } from '../persistence';
+import { restoreDocumentIndex } from '../snapshot-codec';
 import {
   serializeError,
   type WorkerAbortPayload,

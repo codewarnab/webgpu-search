@@ -4,12 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   DocumentIndex,
-  serializeDocumentIndex,
-  restoreDocumentIndex,
-  deserializeDocumentSnapshotHeader,
-  U2D4_MAGIC,
-  U2D4_FORMAT_VERSION,
-  U2D4_HEADER_BYTES,
+  encodeSnapshot,
+  restoreSnapshot,
+  decodeSnapshotHeader,
+  SNAPSHOT_MAGIC,
+  SNAPSHOT_FORMAT_VERSION,
+  SNAPSHOT_HEADER_BYTES,
   type DocumentId,
   type DocumentIndexStats,
   type HighlightRange
@@ -23,8 +23,8 @@ import { generateStructuredLogs } from '../apps/log-viewer/src/log-generator';
 import { LogEngine } from '../apps/log-viewer/src/log-engine';
 import type { StructuredLogRecord } from '../apps/log-viewer/src/types';
 
-async function runM8Tests() {
-  console.log('--- Running Milestone 8: Proof Applications & Verification Tests ---');
+async function runProofAppTests() {
+  console.log('--- Running  Proof Applications & Verification Tests ---');
 
   const rootDir = path.resolve(__dirname, '..');
   const monacoDir = path.join(rootDir, 'apps/monaco-palette');
@@ -269,9 +269,9 @@ async function runM8Tests() {
   }
 
   // =========================================================================
-  // 4. Versioned Snapshot Persistence (U2D4 Binary Format Roundtrip)
+  // 4. Versioned Snapshot Persistence (snapshot Binary Format Roundtrip)
   // =========================================================================
-  console.log('4. Testing U2D4 Little-Endian binary format serialization & restore roundtrip...');
+  console.log('4. Testing snapshot Little-Endian binary format serialization & restore roundtrip...');
   {
     const testLogs = generateStructuredLogs(5000);
     const docIndex = await DocumentIndex.create(testLogs, {
@@ -284,16 +284,16 @@ async function runM8Tests() {
     const baselineQuery = 'deadlock';
     const baselineSearch = await docIndex.search(baselineQuery, { mode: 'fuzzy', limit: 25 });
 
-    // B. Serialize to U2D4 binary buffer
-    const snapshotBuffer = serializeDocumentIndex(docIndex);
-    assert(snapshotBuffer.byteLength > 56, 'Snapshot must be larger than 56-byte U2D4 header');
+    // B. Serialize to snapshot binary buffer
+    const snapshotBuffer = encodeSnapshot(docIndex);
+    assert(snapshotBuffer.byteLength > 56, 'Snapshot must be larger than 56-byte snapshot header');
 
     // C. Inspect 56-byte Little-Endian Header (8-byte aligned)
-    const header = deserializeDocumentSnapshotHeader(snapshotBuffer);
-    assert.strictEqual(header.magic, U2D4_MAGIC); // 0x55324434 ('U2D4')
-    assert.strictEqual(header.formatVersion, U2D4_FORMAT_VERSION); // 4
-    assert.strictEqual(U2D4_HEADER_BYTES, 56);
-    assert.strictEqual(U2D4_HEADER_BYTES % 8, 0, 'U2D4 header must be 8-byte aligned');
+    const header = decodeSnapshotHeader(snapshotBuffer);
+    assert.strictEqual(header.magic, SNAPSHOT_MAGIC); // 0x55324434 ('snapshot')
+    assert.strictEqual(header.formatVersion, SNAPSHOT_FORMAT_VERSION); // 4
+    assert.strictEqual(SNAPSHOT_HEADER_BYTES, 56);
+    assert.strictEqual(SNAPSHOT_HEADER_BYTES % 8, 0, 'snapshot header must be 8-byte aligned');
     assert.strictEqual(header.profileId, 'unicode-default');
     assert.strictEqual(header.unicodeVersion, '16.0.0');
     assert.strictEqual(header.scoringVersion, 'parity-v1');
@@ -306,7 +306,7 @@ async function runM8Tests() {
     assert(typeof header.checksum === 'number');
 
     // D. Restore from binary buffer
-    const restoredIndex = await restoreDocumentIndex<StructuredLogRecord>(snapshotBuffer, {
+    const restoredIndex = await restoreSnapshot<StructuredLogRecord>(snapshotBuffer, {
       options: { preferGpu: false }
     });
 
@@ -346,13 +346,13 @@ async function runM8Tests() {
     assert.deepStrictEqual(restoredFiltered.facets, baselineFiltered.facets);
 
     // F. Decoupled Document Storage Persistence (docsByteLength = 0)
-    const decoupledBuffer = serializeDocumentIndex(docIndex, { decoupled: true });
-    const decoupledHeader = deserializeDocumentSnapshotHeader(decoupledBuffer);
+    const decoupledBuffer = encodeSnapshot(docIndex, { decoupled: true });
+    const decoupledHeader = decodeSnapshotHeader(decoupledBuffer);
     assert.strictEqual(decoupledHeader.docsByteLength, 0, 'Decoupled snapshot must have docsByteLength = 0');
     assert(decoupledBuffer.byteLength < snapshotBuffer.byteLength, 'Decoupled snapshot must be smaller');
 
     // Restore decoupled with external documents
-    const restoredDecoupled = await restoreDocumentIndex<StructuredLogRecord>(decoupledBuffer, {
+    const restoredDecoupled = await restoreSnapshot<StructuredLogRecord>(decoupledBuffer, {
       documents: testLogs,
       options: { preferGpu: false }
     });
@@ -363,13 +363,13 @@ async function runM8Tests() {
     docIndex.destroy();
     restoredIndex.destroy();
     restoredDecoupled.destroy();
-    console.log('   ✅ U2D4 Little-Endian binary format serialization & decoupled restore verified');
+    console.log('   ✅ snapshot Little-Endian binary format serialization & decoupled restore verified');
   }
 
   // =========================================================================
-  // 5. v0.4 Proof-App Feature Integration (prefix, filters, facets, suggest)
+  // 5. Proof-App Feature Integration (prefix, filters, facets, suggest)
   // =========================================================================
-  console.log('5. Testing v0.4 proof-app feature integration (prefix + type filter + autocomplete)...');
+  console.log('5. Testing  proof-app feature integration (prefix + type filter + autocomplete)...');
   {
     // A. Monaco palette: prefix symbol search with structured type filter.
     const palette = new PaletteEngine({ useWorker: false, preferGpu: false });
@@ -404,12 +404,12 @@ async function runM8Tests() {
     });
     assert((inlineSuggest.suggestions?.length ?? 0) >= 1, 'inline suggest must return completions');
 
-    // Palette U2D4 snapshot roundtrip preserves prefix + type filtering.
+    // Palette snapshot snapshot roundtrip preserves prefix + type filtering.
     {
       const snap = await palette.serializeSnapshot();
-      const snapHeader = deserializeDocumentSnapshotHeader(snap);
-      assert.strictEqual(snapHeader.magic, U2D4_MAGIC);
-      assert.strictEqual(snapHeader.formatVersion, U2D4_FORMAT_VERSION);
+      const snapHeader = decodeSnapshotHeader(snap);
+      assert.strictEqual(snapHeader.magic, SNAPSHOT_MAGIC);
+      assert.strictEqual(snapHeader.formatVersion, SNAPSHOT_FORMAT_VERSION);
       const fresh = new PaletteEngine({ useWorker: false, preferGpu: false });
       await fresh.init([]);
       await fresh.restoreSnapshot(snap);
@@ -451,12 +451,12 @@ async function runM8Tests() {
       assert(r.doc.timestamp >= mid && r.doc.timestamp < newest, 'range result timestamp in-window');
     }
 
-    // U2D4 snapshot roundtrip preserves structured filtering (restore + search parity).
+    // snapshot snapshot roundtrip preserves structured filtering (restore + search parity).
     const snap = await logEngine.serializeSnapshot();
-    const snapHeader = deserializeDocumentSnapshotHeader(snap);
-    assert.strictEqual(snapHeader.magic, U2D4_MAGIC);
+    const snapHeader = decodeSnapshotHeader(snap);
+    assert.strictEqual(snapHeader.magic, SNAPSHOT_MAGIC);
     assert.strictEqual(snapHeader.formatVersion, 4);
-    const restoredSnap = await restoreDocumentIndex<StructuredLogRecord>(snap, {
+    const restoredSnap = await restoreSnapshot<StructuredLogRecord>(snap, {
       options: { preferGpu: false }
     });
     const snapBaseline = await logEngine.search('timeout', {
@@ -472,7 +472,7 @@ async function runM8Tests() {
     assert.strictEqual(snapAfter.totalMatches, snapBaseline.totalMatches);
     restoredSnap.destroy();
     logEngine.destroy();
-    console.log('   ✅ v0.4 proof-app feature integration verified');
+    console.log('   ✅  proof-app feature integration verified');
   }
 
   // =========================================================================
@@ -603,7 +603,7 @@ async function runM8Tests() {
       const content = fs.readFileSync(file, 'utf8');
       // Strip comments + string literals before matching so prose like
       // "sliding window" does not trip the bare-global scan (same approach
-      // as scripts/check-parity-lint.ts and the M4 search-modes DOM test).
+      // as scripts/check-parity-lint.ts and the search-modes DOM test).
       const noBlock = content.replace(/\/\*[\s\S]*?\*\//g, (m) => '\n'.repeat((m.match(/\n/g) || []).length));
       const code = noBlock
         .split('\n')
@@ -643,10 +643,10 @@ async function runM8Tests() {
     console.log('   ✅ Core library 100% portable: zero unguarded DOM globals & zero runtime dependencies');
   }
 
-  console.log('\n--- All Milestone 8 Proof Applications & Verification Tests Passed! ✅ ---');
+  console.log('\n--- All Proof Applications & Verification Tests Passed! ✅ ---');
 }
 
-runM8Tests().catch((err) => {
-  console.error('Fatal test failure in test-m8-proof-apps:', err);
+runProofAppTests().catch((err) => {
+  console.error('Fatal test failure in test-proof-apps:', err);
   process.exit(1);
 });

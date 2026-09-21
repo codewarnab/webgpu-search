@@ -11,7 +11,7 @@ export interface SampleDoc {
 const SAMPLE_DATA: SampleDoc[] = [
   { id: '1', title: 'WebGPU Compute Pipelines', category: 'Graphics', description: 'Deep dive into GPU workgroups and bind groups in WGSL' },
   { id: '2', title: 'Unicode Canonical Decomposition', category: 'Text', description: 'NFD vs NFC composition, astral plane surrogate pairs, and case folding' },
-  { id: '3', title: 'IndexedDB Snapshot Persistence', category: 'Storage', description: 'Transaction-safe binary caching using Little-Endian U2D3 headers and CRC32' },
+  { id: '3', title: 'IndexedDB Snapshot Persistence', category: 'Storage', description: 'Transaction-safe binary caching using Little-Endian snapshot headers and CRC32' },
   { id: '4', title: 'Monaco QuickOpen Palette', category: 'IDE', description: 'Sub-millisecond fuzzy file navigation for in-browser developer environments' },
   { id: '5', title: 'Off-Thread Search Workers', category: 'Concurrency', description: 'Non-blocking UI architecture with dedicated Web Workers and AbortControllers' },
 ];

@@ -1,6 +1,15 @@
 # Logs
 logs
 *.log
+
+# Benchmark evidence (archived under docs/archive/benchmark-evidence/)
+benchmark_*.json
+fuzzy-benchmark-results.json
+chart_*.png
+*chart*.png
+full-benchmark-ui.png
+render_*.js
+generate_*.py
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

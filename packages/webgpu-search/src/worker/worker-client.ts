@@ -19,29 +19,29 @@ import {
   type WorkerResponse,
   type WorkerSearchPayload
 } from './protocol';
-import { abortError, throwIfAborted } from '../runtime-guards';
-import { deserializeDocumentSnapshotHeader, MAX_SNAPSHOT_BYTES } from '../persistence';
-import { SERIALIZED_DOC_HEADER_BYTES, U2D4_HEADER_BYTES, U2D4_MAGIC, IncompatibleIndexError } from '../text-profile';
+import { abortError, throwIfAborted } from '../guard';
+import { decodeSnapshotHeader, MAX_SNAPSHOT_BYTES } from '../snapshot-codec';
+import { LEGACY_SNAPSHOT_HEADER_BYTES, SNAPSHOT_HEADER_BYTES, SNAPSHOT_MAGIC, IncompatibleIndexError } from '../text-profile';
 import { IncompatibleHookError } from '../errors';
-import { hasAnyHook, normalizeSearchExtensionHooks } from '../extensions';
+import { hasAnyHook, normalizeSearchHooks } from '../hooks';
 
 /**
- * Fail-closed worker extensions guard: empty `{}` is a no-op (consistent
- * with `normalizeSearchExtensionHooks`), any real hook rejects with
+ * Fail-closed worker hooks guard: empty `{}` is a no-op (consistent
+ * with `normalizeSearchHooks`), any real hook rejects with
  * `IncompatibleHookError`. Malformed shapes throw `TypeError` via normalize.
  */
 function assertNoWorkerExtensions(
-  extensions: unknown,
+  hooks: unknown,
   method: 'init' | 'search' | 'restore'
 ): void {
-  if (extensions === undefined) return;
-  const normalized = normalizeSearchExtensionHooks(
-    extensions as Parameters<typeof normalizeSearchExtensionHooks>[0]
+  if (hooks === undefined) return;
+  const normalized = normalizeSearchHooks(
+    hooks as Parameters<typeof normalizeSearchHooks>[0]
   );
   if (hasAnyHook(normalized)) {
     throw new IncompatibleHookError(
-      'extensions',
-      `SearchExtensionHooks contain function closures which cannot be cloned across Web Worker boundaries (${method} rejected fail-closed).`
+      'hooks',
+      `SearchHooks contain function closures which cannot be cloned across Web Worker boundaries (${method} rejected fail-closed).`
     );
   }
 }
@@ -421,8 +421,8 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       }
     }
 
-    if (options.extensions) {
-      assertNoWorkerExtensions(options.extensions, 'init');
+    if (options.hooks ?? options.extensions) {
+      assertNoWorkerExtensions(options.hooks ?? options.extensions, 'init');
     }
 
     const workerFields = this.fieldDefinitions.map((f) => ({
@@ -441,7 +441,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       });
     }
 
-    const { extensions, filterFields, ...restInitOptions } = options;
+    const { extensions: _omitExtensionsInit, hooks: _omitHooksInit, filterFields, ...restInitOptions } = options;
     const workerOptions = {
       ...restInitOptions,
       ...(workerFilterFields ? { filterFields: workerFilterFields } : {}),
@@ -470,11 +470,11 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
 
     throwIfAborted(options?.signal);
 
-    if (options?.extensions) {
-      assertNoWorkerExtensions(options.extensions, 'search');
+    if (options?.hooks ?? options?.extensions) {
+      assertNoWorkerExtensions(options?.hooks ?? options?.extensions, 'search');
     }
 
-    const { filter, signal, limit, maxResults, extensions: _omitExtensions, ...restOptions } = options || {};
+    const { filter, signal, limit, maxResults, extensions: _omitExtensions, hooks: _omitHooks, ...restOptions } = options || {};
 
     if (filter !== undefined && typeof filter !== 'function') {
       if (typeof filter !== 'object' || filter === null) {
@@ -671,8 +671,8 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     if ((buffer as ArrayBuffer).byteLength > MAX_SNAPSHOT_BYTES) {
       throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
     }
-    if (options?.options?.extensions) {
-      assertNoWorkerExtensions(options.options.extensions, 'restore');
+    if (options?.options?.hooks ?? options?.options?.extensions) {
+      assertNoWorkerExtensions(options?.options?.hooks ?? options?.options?.extensions, 'restore');
     }
 
     let stagedFieldDefs = this.fieldDefinitions;
@@ -681,11 +681,11 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     const stagedDocMap = new Map<DocumentId, TDoc>();
 
     try {
-      const header = deserializeDocumentSnapshotHeader(buffer);
-      // Version-aware header width: U2D4 is 56 B, legacy U2D3 is 48 B.
-      // Derive before the length guard so truncated U2D4 buffers cannot
+      const header = decodeSnapshotHeader(buffer);
+      // Version-aware header width: snapshot is 56 B, legacy legacy snapshot is 48 B.
+      // Derive before the length guard so truncated snapshot buffers cannot
       // slip through the legacy 48 B threshold.
-      const headerBytesForGuard = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+      const headerBytesForGuard = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
       const userFields = options?.options?.fields;
       const userFieldMap = new Map<string, any>();
       if (Array.isArray(userFields)) {
@@ -699,10 +699,10 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       }
 
       if (buffer.byteLength >= headerBytesForGuard + header.schemaByteLength) {
-        // U2D4 inserts a columnar segment between offsets and docs; derive
+        // snapshot inserts a columnar segment between offsets and docs; derive
         // header width and columnar length from the parsed header so legacy
-        // U2D3 snapshots (no columnar segment) still stage correctly.
-        const headerBytes = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+        // legacy snapshot snapshots (no columnar segment) still stage correctly.
+        const headerBytes = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
         const schemaBytes = new Uint8Array(buffer, headerBytes, header.schemaByteLength);
         const schemaStr = new TextDecoder().decode(schemaBytes);
         const schema = JSON.parse(schemaStr);
@@ -762,7 +762,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
           stagedDocMap.set(id, doc);
         }
       } else if (header.docsByteLength > 0) {
-        const headerBytes = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+        const headerBytes = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
         const columnarLen = header.columnarByteLength ?? 0;
         const docsOffset =
           headerBytes +
@@ -796,6 +796,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       options: options.options ? {
         ...options.options,
         device: undefined,
+        hooks: undefined,
         extensions: undefined,
         fields: options.options.fields?.map((f) =>
           typeof f === 'string' ? f : { name: f.name, weight: f.weight }

@@ -1,12 +1,11 @@
 /**
  * Full Matrix Benchmark Engine & Performance Characterization Runner.
  *
- * M5 (Issue #7):
  * - Replaces legacy mean-of-3 with warm median and p95 latency metrics over configurable
  *   warmups (default 5) and samples (default 20).
  * - Implements randomized/interleaved execution across 4 engines:
  *   1. WebGPU (retained storage buffers in VRAM)
- *   2. CPU Reference Parity (`searchCpuReference`, `cpuAlgorithm: 'parity'`)
+ *   2. CPU Exact Reference (`scoreExactMatches`, `cpuScorer: 'exact'`)
  *   3. uFuzzy (CPU opt-in baseline)
  *   4. JS Native (`String.prototype.includes` baseline)
  * - Eliminates invented FPS: captures real rAF frame intervals, jank spikes (>16.7ms), and dropped frames.
@@ -17,7 +16,7 @@
 import {
   WebGPUEngine,
   CPUEngine,
-  searchCpuReference,
+  scoreExactMatches,
   normalizeText,
   type AdapterInfo
 } from 'webgpu-search';
@@ -279,7 +278,7 @@ export class BenchmarkRunner {
   }
 
   /**
-   * Run the upgraded M5 benchmark suite across dataset sizes with randomized/interleaved
+   * Run the benchmark suite across dataset sizes with randomized/interleaved
    * execution, median + p95 statistics, and real UI thread telemetry.
    */
   async runBenchmark(
@@ -359,7 +358,7 @@ export class BenchmarkRunner {
       let coldTotalMs = 0;
 
       if (this.gpuEngine.isReady) {
-        const cold = await this.gpuEngine.searchCold(dataset.serializedU2F2, query, { mode, maxResults: 1000 });
+        const cold = await this.gpuEngine.searchCold(dataset.serializedDataset, query, { mode, maxResults: 1000 });
         coldUploadMs = Number(cold.datasetUploadMs.toFixed(2));
         coldTotalMs = Number(cold.coldTotalMs.toFixed(2));
       }
@@ -417,13 +416,13 @@ export class BenchmarkRunner {
                 }
                 break;
               case 'cpu-parity':
-                searchCpuReference(dataset.recordTokens, normalizedQuery.tokens, mode, 1000, dataset.strings);
+                scoreExactMatches(dataset.recordTokens, normalizedQuery.tokens, mode, 1000, dataset.strings);
                 break;
               case 'ufuzzy':
-                this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
+                this.cpuEngine.searchWithUFuzzy(dataset.strings, query, 1000);
                 break;
               case 'js-native':
-                this.cpuEngine.searchNative(dataset.strings, query, 1000);
+                this.cpuEngine.searchNaiveScan(dataset.strings, query, 1000);
                 break;
             }
             await new Promise(r => setTimeout(r, 2));
@@ -461,7 +460,7 @@ export class BenchmarkRunner {
                 break;
 
               case 'cpu-parity': {
-                const res = searchCpuReference(
+                const res = scoreExactMatches(
                   dataset.recordTokens,
                   normalizedQuery.tokens,
                   mode,
@@ -474,14 +473,14 @@ export class BenchmarkRunner {
               }
 
               case 'ufuzzy': {
-                const res = this.cpuEngine.searchUFuzzy(dataset.strings, query, 1000);
+                const res = this.cpuEngine.searchWithUFuzzy(dataset.strings, query, 1000);
                 ufuzzySamples.push(res.durationMs);
                 ufuzzyMatches = res.totalMatches;
                 break;
               }
 
               case 'js-native': {
-                const res = this.cpuEngine.searchNative(dataset.strings, query, 1000);
+                const res = this.cpuEngine.searchNaiveScan(dataset.strings, query, 1000);
                 jsNativeSamples.push(res.durationMs);
                 jsNativeMatches = res.totalMatches;
                 break;

@@ -1,5 +1,5 @@
 /**
- * Milestone 3 Test Suite (Issue #10 v0.4): Facet Aggregation Engine
+ * Test Suite (): Facet Aggregation Engine
  * Tests terms & range facets, exact vs approximate semantics, force-exact
  * fallback, disjunctive multi-facet navigation, mutation sync, worker
  * boundary, GPU overflow behavior, and sub-2ms aggregation performance.
@@ -58,8 +58,8 @@ function productIndexOpts(extra?: Partial<DocumentIndexOptions<Product>>): Docum
   };
 }
 
-async function runMilestone3Tests() {
-  console.log('=== Running Issue #10 Milestone 3: Facet Aggregation Engine ===\n');
+async function runTests() {
+  console.log('=== Running Issue #10  Facet Aggregation Engine ===\n');
 
   // =========================================================================
   // 1. Terms facets: exact counts, ordering, limit, sortBy
@@ -431,7 +431,7 @@ async function runMilestone3Tests() {
   // 7. GPU parity + overflow semantics (mock adapter + stubbed engine)
   //
   // NOTE: the vgpu mock stubs compute dispatch (it never produces match
-  // rows), so the repo-wide convention (test-vgpu-mock.ts, M2 filter tests)
+  // rows), so the repo-wide convention (test-vgpu-mock.ts, filter tests)
   // asserts GPU *routing*, not GPU match quality. Overflow/approximate
   // routing — which needs a capped candidate pool — is covered with a
   // stubbed WebGPUEngine behind the same readback contract.
@@ -653,7 +653,7 @@ async function runMilestone3Tests() {
     const filesToAudit = [
       'packages/webgpu-search/src/facets/facet-engine.ts',
       'packages/webgpu-search/src/document-index.ts',
-      'packages/webgpu-search/src/cpu-reference.ts',
+      'packages/webgpu-search/src/exact-scorer.ts',
       'packages/webgpu-search/src/filter/columnar-store.ts',
     ];
     for (const filePath of filesToAudit) {
@@ -668,8 +668,8 @@ async function runMilestone3Tests() {
       // Direct document/window/self/globalThis DOM use (typeof checks ok).
       const stripped = code.replace(/typeof\s+(document|window|navigator|self)\b/g, '');
       assert(!/(^|[^\w$.])document\s*\./.test(stripped), `Unexpected bare document use in ${filePath}`);
-      // v0.4 M4: boundary-aware (`window` must not continue into an
-      // identifier): M4 names like `windowLength`/`findBestTypoWindow` are
+      // boundary-aware (`window` must not continue into an
+      // identifier): names like `windowLength`/`findBestTypoWindow` are
       // record spans, not the DOM global. Still catches `window.foo`,
       // `window `, and `(window)`.
       assert(!/(^|[^\w$.])window(?![\w$])/.test(stripped.replace(/worker-client|search-worker/gi, '')), `Unexpected bare window in ${filePath}`);
@@ -824,7 +824,7 @@ async function runMilestone3Tests() {
   console.log('\n🎉 ALL MILESTONE 3 TESTS PASSED SUCCESSFULLY! 🎉\n');
 }
 
-runMilestone3Tests().catch((err) => {
-  console.error('Milestone 3 test failed:', err);
+runTests().catch((err) => {
+  console.error('test failed:', err);
   process.exit(1);
 });

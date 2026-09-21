@@ -65,7 +65,7 @@ export class LogEngine {
   ];
 
   /**
-   * v0.4 M8: columnar filter attributes. `timestamp` stays a string so ISO-8601
+   * columnar filter attributes. `timestamp` stays a string so ISO-8601
    * lexicographic range compares equal chronological order on both the main
    * thread and the string-isolated worker (no custom getter crosses the
    * worker boundary).
@@ -171,7 +171,7 @@ export class LogEngine {
   }
 
   /**
-   * v0.4 M8: compiles level/service/latency/timestamp constraints into a
+   * compiles level/service/latency/timestamp constraints into a
    * single structured `FilterExpression` evaluated via columnar bitsets
    * (pre-match, O(N/32) bitwise) instead of per-record predicates.
    */

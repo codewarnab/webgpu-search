@@ -4,17 +4,17 @@ import {
     CPUEngine,
     SearchIndex,
     packStringsToGPUBuffer,
-    packUnicodeToGPUBuffer,
-    serializeUnicodeDataset,
-    deserializeUnicodeDataset,
+    packDataset,
+    serializeDataset,
+    deserializeDataset,
     validatePackedOffsets,
     checkMemoryBudget,
     normalizeText,
     tokensEqual,
-    compareParityResults,
+    compareExactResults,
     scoreFuzzyTokens,
     scoreSubstringTokens,
-    searchCpuReference,
+    scoreExactMatches,
     IncompatibleIndexError,
     IncompatibleOptionError,
     ProfileMismatchError,
@@ -65,13 +65,13 @@ async function runMockTests() {
     }
     console.log('   ✅ WebGPUEngine initialized successfully with mock device');
 
-    console.log('2. Verifying M3 buffers and pipelines (32 B uniform + 512 B query)...');
+    console.log('2. Verifying  buffers and pipelines (32 B uniform + 512 B query)...');
     const mockInstrumentation = (mockDevice as any).__vgpuMockInstrumentation;
     if (mockInstrumentation) {
         console.log(`   - Buffers created: ${mockInstrumentation.createBufferDescriptors.length}`);
         console.log(`   - Compute pipelines created: ${mockInstrumentation.createComputePipelineDescriptors.length}`);
 
-        // M3 uniform header: 32 B (16 B-aligned), NOT the v0.1 272 B blob.
+        // uniform header: 32 B (16 B-aligned), NOT the 272 B blob.
         const uniformBufferDesc = mockInstrumentation.createBufferDescriptors.find(
             (b: any) => b.label === 'Uniform Buffer'
         );
@@ -80,7 +80,7 @@ async function runMockTests() {
         }
         console.log('   ✅ Uniform buffer (32 bytes) verified');
 
-        // M3 persistent storage query buffer: 128 tokens * 4 = 512 B.
+        // persistent storage query buffer: 128 tokens * 4 = 512 B.
         const queryBufferDesc = mockInstrumentation.createBufferDescriptors.find(
             (b: any) => b.label === 'Query Buffer'
         );
@@ -107,11 +107,11 @@ async function runMockTests() {
         console.log('   ✅ Staging buffer (65,544 bytes) verified');
     }
 
-    console.log('3. Testing packUnicodeToGPUBuffer (u32 scalars, no re-normalization)...');
+    console.log('3. Testing packDataset (u32 scalars, no re-normalization)...');
     if (normalizeText(STRASSE, true).tokenCount !== 7) {
         throw new Error('Strasse fold sanity failed: expected 7 post-fold tokens');
     }
-    const packedTokens = packUnicodeToGPUBuffer([STRASSE, 'ab', GRIN], { folded: true });
+    const packedTokens = packDataset([STRASSE, 'ab', GRIN], { folded: true });
     if (packedTokens.rowCount !== 3 || packedTokens.tokenCount !== 7 + 2 + 1) {
         throw new Error(`packUnicode counts wrong: ${packedTokens.rowCount}/${packedTokens.tokenCount}`);
     }
@@ -123,33 +123,33 @@ async function runMockTests() {
     }
     // Pre-tokenized input takes the zero-renorm path (no strings involved).
     const preTok = [new Uint32Array([1, 2, 3]), new Uint32Array([4])];
-    const packedPre = packUnicodeToGPUBuffer(preTok, { folded: true });
+    const packedPre = packDataset(preTok, { folded: true });
     if (packedPre.tokenCount !== 4 || packedPre.offsets[2] !== 4 || packedPre.tokens[3] !== 4) {
         throw new Error('packUnicode Uint32Array[] path wrong');
     }
     // Empty input returns rowCount 0 before input[0] discrimination.
-    const packedEmpty = packUnicodeToGPUBuffer([], { folded: true });
+    const packedEmpty = packDataset([], { folded: true });
     if (packedEmpty.rowCount !== 0 || packedEmpty.tokenCount !== 0) {
         throw new Error('packUnicode empty input wrong');
     }
     // slotBytes is throw-on-use.
     let slotThrew = false;
     try {
-        packUnicodeToGPUBuffer(['a'], { slotBytes: 64 } as any);
+        packDataset(['a'], { slotBytes: 64 } as any);
     } catch (e: any) {
         slotThrew = e instanceof IncompatibleOptionError;
     }
     if (!slotThrew) throw new Error('packUnicode slotBytes must throw IncompatibleOptionError');
-    console.log('   ✅ packUnicodeToGPUBuffer verified (folded tokens, offsets, empty, slotBytes)');
+    console.log('   ✅ packDataset verified (folded tokens, offsets, empty, slotBytes)');
 
-    console.log('4. Testing U2F2 serialization roundtrip + corrupt-header rejection...');
-    const rt = packUnicodeToGPUBuffer(['hello', STRASSE, GRIN], { folded: true });
-    const bytes = serializeUnicodeDataset(rt);
+    console.log('4. Testing dataset serialization roundtrip + corrupt-header rejection...');
+    const rt = packDataset(['hello', STRASSE, GRIN], { folded: true });
+    const bytes = serializeDataset(rt);
     const header = new Uint32Array(bytes, 0, 9);
     if (header[0] !== 0x55324632 || header[1] !== 2) {
-        throw new Error(`U2F2 magic/version wrong: ${header[0].toString(16)}/${header[1]}`);
+        throw new Error(`dataset magic/version wrong: ${header[0].toString(16)}/${header[1]}`);
     }
-    const back = deserializeUnicodeDataset(bytes);
+    const back = deserializeDataset(bytes);
     if (back.rowCount !== 3 || back.folded !== true || back.profileId !== 'unicode-default' ||
         back.unicodeVersion !== '16.0.0' || back.scoringVersion !== 'parity-v1' ||
         back.formatVersion !== 2 || back.nfcProbedVersion !== null) {
@@ -170,28 +170,28 @@ async function runMockTests() {
     expectIncompatible('bad-magic', () => {
         const bad = new ArrayBuffer(36);
         new Uint32Array(bad)[0] = 0xdeadbeef;
-        deserializeUnicodeDataset(bad);
+        deserializeDataset(bad);
     });
-    expectIncompatible('truncated', () => deserializeUnicodeDataset(bytes.slice(0, bytes.byteLength - 4)));
+    expectIncompatible('truncated', () => deserializeDataset(bytes.slice(0, bytes.byteLength - 4)));
     expectIncompatible('bad-checksum', () => {
         const tampered = bytes.slice(0);
         new Uint8Array(tampered)[40] ^= 0xff;
-        deserializeUnicodeDataset(tampered);
+        deserializeDataset(tampered);
     });
-    expectIncompatible('neutered', () => deserializeUnicodeDataset(new ArrayBuffer(0)));
-    expectIncompatible('legacy-v0.1', () => {
+    expectIncompatible('neutered', () => deserializeDataset(new ArrayBuffer(0)));
+    expectIncompatible('legacy-', () => {
         const legacy = packStringsToGPUBuffer(['abc', 'def']);
-        deserializeUnicodeDataset(legacy.recordsBufferData);
+        deserializeDataset(legacy.recordsBufferData);
     });
-    console.log('   ✅ U2F2 roundtrip + 5 corrupt/legacy rejections verified');
+    console.log('   ✅ dataset roundtrip + 5 corrupt/legacy rejections verified');
 
     console.log('5. Testing buffer packer and mock VRAM loading (packed/string/serialized)...');
     const strings = generateTestStrings(500);
-    const packed = packUnicodeToGPUBuffer(strings, { folded: true });
+    const packed = packDataset(strings, { folded: true });
     const { uploadTimeMs } = await engine.loadDataset(packed);
     console.log(`   ✅ Packed dataset loaded (500 items, ${packed.combinedByteLength} bytes, ${uploadTimeMs.toFixed(2)}ms)`);
     await engine.loadDataset(strings);
-    await engine.loadDataset(serializeUnicodeDataset(packed));
+    await engine.loadDataset(serializeDataset(packed));
     console.log('   ✅ string[] + serialized ArrayBuffer overloads verified');
 
     console.log('6. Testing search execution, empty query, and 0-row early return...');
@@ -231,7 +231,7 @@ async function runMockTests() {
     }
     console.log(`   ✅ SearchIndex search routed to WebGPU successfully (query: '${gpuSearchRes.query}')`);
 
-    console.log('8. Testing M3 routing: non-ASCII + long queries reach WebGPU (M2 gate deleted)...');
+    console.log('8. Testing  routing: non-ASCII + long queries reach WebGPU (gate deleted)...');
     for (const q of [STRASSE, GRIN, CJK, 'a'.repeat(100)]) {
         const r = await searchIndex.search(q, { mode: 'substring', limit: 5 });
         if (r.engine !== 'webgpu') {
@@ -385,7 +385,7 @@ async function runMockTests() {
     if (veryLongString.length <= 100) {
         throw new Error('Test string must be > 100 chars');
     }
-    const dynamicPacked = packUnicodeToGPUBuffer([veryLongString], { folded: true });
+    const dynamicPacked = packDataset([veryLongString], { folded: true });
     if (dynamicPacked.tokenCount !== veryLongString.length) {
         throw new Error(`Expected packed tokenCount ${veryLongString.length}, got ${dynamicPacked.tokenCount}`);
     }
@@ -482,12 +482,12 @@ async function runMockTests() {
         }
         const cf = scoreFuzzyTokens(rec, qry);
         // Fuzzy oracle: brute-force subsequence check + score shape sanity
-        // (exact formula pinned by cpu-reference unit vectors below).
+        // (exact formula pinned by exact-scorer unit vectors below).
         if (cf.matched) {
             if (!Number.isInteger(cf.score)) throw new Error('fuzzy score must be integer');
-            const ref = searchCpuReference([rec], qry, 'fuzzy', 10, ['x']);
+            const ref = scoreExactMatches([rec], qry, 'fuzzy', 10, ['x']);
             if (ref.totalMatches !== 1 || ref.results[0].score !== cf.score) {
-                throw new Error('fuzzy searchCpuReference/score mismatch');
+                throw new Error('fuzzy scoreExactMatches/score mismatch');
             }
         }
     }
@@ -506,9 +506,9 @@ async function runMockTests() {
         }
     }
     // Sort contract: score desc, index asc.
-    const sorted = [{ score: 5, index: 2 }, { score: 5, index: 1 }, { score: 9, index: 0 }].sort(compareParityResults);
+    const sorted = [{ score: 5, index: 2 }, { score: 5, index: 1 }, { score: 9, index: 0 }].sort(compareExactResults);
     if (sorted[0].score !== 9 || sorted[1].index !== 1 || sorted[2].index !== 2) {
-        throw new Error('compareParityResults contract broken');
+        throw new Error('compareExactResults contract broken');
     }
     console.log('   ✅ Parity formulas pinned (substring WGSL mirror + fuzz + sort)');
 
@@ -551,9 +551,9 @@ async function runMockTests() {
     gateEngine.destroy();
     console.log('   ✅ 129 boundary + ProfileMismatch + mode/caseSensitive + no-device gates verified');
 
-    console.log('22. Testing U2F2 hostile headers + engine-level rejections...');
-    const good = packUnicodeToGPUBuffer(['hello', 'world'], { folded: true });
-    const goodBytes = serializeUnicodeDataset(good);
+    console.log('22. Testing dataset hostile headers + engine-level rejections...');
+    const good = packDataset(['hello', 'world'], { folded: true });
+    const goodBytes = serializeDataset(good);
     const hostile = (label: string, fn: () => void) => {
         try { fn(); } catch (e: any) {
             if (e instanceof IncompatibleIndexError) return;
@@ -565,7 +565,7 @@ async function runMockTests() {
         const b = goodBytes.slice(0);
         const h = new Uint32Array(b, 0, 9);
         h[1] = 1;
-        deserializeUnicodeDataset(b);
+        deserializeDataset(b);
     });
     hostile('bad-enum', () => {
         const b = goodBytes.slice(0);
@@ -580,21 +580,21 @@ async function runMockTests() {
         const parts = [new Uint8Array(b, 0, 32), new Uint8Array(b, 36, recLen), new Uint8Array(b, 36 + recLen, offLen)];
         for (const p of parts) for (let i = 0; i < p.length; i++) crc = (T[(crc ^ p[i]) & 0xff] as number) ^ (crc >>> 8);
         h[8] = ((crc ^ 0xffffffff) >>> 0);
-        deserializeUnicodeDataset(b);
+        deserializeDataset(b);
     });
     hostile('folded-2', () => {
         const b = goodBytes.slice(0);
         new Uint32Array(b, 0, 9)[7] = 2;
-        deserializeUnicodeDataset(b);
+        deserializeDataset(b);
     });
     hostile('non-monotonic', () => {
-        const p = packUnicodeToGPUBuffer(['ab', 'cd'], { folded: true });
-        const b = serializeUnicodeDataset(p);
+        const p = packDataset(['ab', 'cd'], { folded: true });
+        const b = serializeDataset(p);
         const h = new Uint32Array(b, 0, 9);
         const recLen = (h[6] as number) * 4;
         const off = new Uint32Array(b, 36 + recLen, 3);
         off[1] = 999;
-        deserializeUnicodeDataset(b);
+        deserializeDataset(b);
     });
     // Engine-level forged packed object must fail closed (was trust-by-construction).
     const forgedEngine = new WebGPUEngine();
@@ -616,18 +616,18 @@ async function runMockTests() {
     console.log('23. Testing packer/serialize/budget edge cases...');
     // totalTokens hint validated.
     let ttThrew = false;
-    try { packUnicodeToGPUBuffer([new Uint32Array([1, 2])], { folded: true, totalTokens: 99 }); } catch (e: any) { ttThrew = e instanceof IncompatibleIndexError; }
+    try { packDataset([new Uint32Array([1, 2])], { folded: true, totalTokens: 99 }); } catch (e: any) { ttThrew = e instanceof IncompatibleIndexError; }
     if (!ttThrew) throw new Error('totalTokens mismatch must throw IncompatibleIndexError');
-    packUnicodeToGPUBuffer([new Uint32Array([1, 2])], { folded: true, totalTokens: 2 });
+    packDataset([new Uint32Array([1, 2])], { folded: true, totalTokens: 2 });
     // Unknown versions fail at pack time (not just serialize).
     let uvThrew = false;
-    try { packUnicodeToGPUBuffer(['a'], { unicodeVersion: 'nope' }); } catch (e: any) { uvThrew = e instanceof IncompatibleIndexError; }
+    try { packDataset(['a'], { unicodeVersion: 'nope' }); } catch (e: any) { uvThrew = e instanceof IncompatibleIndexError; }
     if (!uvThrew) throw new Error('unknown unicodeVersion must throw at pack time');
     // serialize shape validation (not raw RangeError).
     let serThrew = false;
     try {
-        const p = packUnicodeToGPUBuffer(['ab'], { folded: true });
-        serializeUnicodeDataset({ ...p, recordsByteLength: 999 } as any);
+        const p = packDataset(['ab'], { folded: true });
+        serializeDataset({ ...p, recordsByteLength: 999 } as any);
     } catch (e: any) { serThrew = e instanceof IncompatibleIndexError; }
     if (!serThrew) throw new Error('serialize shape mismatch must throw IncompatibleIndexError');
     // Legacy packer deprecation warning + offsets length honesty (was 8 B buffer claiming 16 B).
@@ -636,8 +636,8 @@ async function runMockTests() {
     console.warn = (...args: any[]) => { warnMsgs.push(args.join(' ')); origWarn(...args); };
     const leg = packStringsToGPUBuffer(['a']);
     console.warn = origWarn;
-    if (!warnMsgs.some(m => m.includes('legacy-ascii-v0.1') && m.includes('v0.3'))) {
-        throw new Error('legacy packStringsToGPUBuffer must emit deprecation warning with legacy-ascii-v0.1 and v0.3');
+    if (!warnMsgs.some(m => m.includes('legacy-ascii') && m.includes('deprecated'))) {
+        throw new Error('legacy packStringsToGPUBuffer must emit deprecation warning with legacy-ascii and deprecated');
     }
     if ((leg.offsetsBufferData as ArrayBuffer).byteLength !== leg.offsetsByteLength) {
         throw new Error('legacy offsets buffer must match claimed byteLength');
@@ -651,7 +651,7 @@ async function runMockTests() {
     if (typeof exactFit.allowed !== 'boolean') throw new Error('exact-boundary budget must return boolean');
     // Mixed input rejected.
     let mixedThrew = false;
-    try { packUnicodeToGPUBuffer(['a', new Uint32Array([1])] as any, { folded: true }); } catch (e: any) { mixedThrew = e instanceof TypeError; }
+    try { packDataset(['a', new Uint32Array([1])] as any, { folded: true }); } catch (e: any) { mixedThrew = e instanceof TypeError; }
     if (!mixedThrew) throw new Error('mixed string/Uint32Array must throw TypeError');
     console.log('   ✅ Packer/serialize/budget edge cases verified');
 
@@ -683,15 +683,15 @@ async function runMockTests() {
     if (postDestroy.totalMatches !== 0) throw new Error('post-destroy search must return noHits');
     console.log('   ✅ Abort/destroy/re-init/Uint32Array[] verified');
 
-    console.log('25. Testing M4 contract sentinels (harness scripts-only, ufuzzy conflict, worker unicode path)...');
+    console.log('25. Testing contract sentinels (harness scripts-only, ufuzzy conflict, worker unicode path)...');
     const fsSentinel = await import('node:fs/promises');
     // Harness must stay scripts-only: shipped src/index.ts must never import
     // it (bundle gate), while the harness itself must exist for CI.
     const srcIndex = await fsSentinel.readFile(new URL('../packages/webgpu-search/src/index.ts', import.meta.url), 'utf8');
-    if (srcIndex.includes('test-m4-parity')) {
-        throw new Error('src/index.ts must not import scripts/test-m4-parity (bundle gate)');
+    if (srcIndex.includes('test-parity-harness')) {
+        throw new Error('src/index.ts must not import scripts/test-parity-harness (bundle gate)');
     }
-    await fsSentinel.stat(new URL('./test-m4-parity.ts', import.meta.url));
+    await fsSentinel.stat(new URL('./test-parity-harness.ts', import.meta.url));
     // preferGpu:true + cpuAlgorithm:'ufuzzy' is a hard conflict (CPU-only scorer).
     const conflictIndex = await SearchIndex.create(['hello'], { device: mockDevice, preferGpu: true });
     let conflictThrew = false;
@@ -707,23 +707,23 @@ async function runMockTests() {
     const workerSrc = await fsSentinel.readFile(new URL('../apps/benchmark/src/search.worker.ts', import.meta.url), 'utf8');
     const workerCode = workerSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
     if (/packStringsToGPUBuffer\s*\(/.test(workerCode) || /import[^;]*packStringsToGPUBuffer/.test(workerCode)) {
-        throw new Error('search.worker.ts must not use legacy packStringsToGPUBuffer (M4 blocker)');
+        throw new Error('search.worker.ts must not use legacy packStringsToGPUBuffer (blocker)');
     }
-    for (const token of ['packUnicodeToGPUBuffer', 'deserializeUnicodeDataset', 'STRING_ISOLATED_ENRICHMENT', 'latestQueryId', 'SEARCH_ERROR', 'datasetGeneration']) {
-        if (!workerSrc.includes(token)) throw new Error(`search.worker.ts missing M4 token: ${token}`);
+    for (const token of ['packDataset', 'deserializeDataset', 'STRING_ISOLATED_ENRICHMENT', 'latestQueryId', 'SEARCH_ERROR', 'datasetGeneration']) {
+        if (!workerSrc.includes(token)) throw new Error(`search.worker.ts missing  token: ${token}`);
     }
-    // Main thread enriches compact hits and transfers the U2F2 buffer.
+    // Main thread enriches compact hits and transfers the dataset buffer.
     const mainSrc = await fsSentinel.readFile(new URL('../apps/benchmark/src/main.ts', import.meta.url), 'utf8');
     if (mainSrc.includes('recordsBufferData.slice(0)')) {
-        throw new Error('main.ts must not clone legacy byte buffers to the worker (M4 blocker)');
+        throw new Error('main.ts must not clone legacy byte buffers to the worker (blocker)');
     }
-    if (!mainSrc.includes('gpuCompact') || !mainSrc.includes('serializedU2F2.slice(0)')) {
-        throw new Error('main.ts missing string-isolated enrichment / U2F2 transfer (M4 blocker)');
+    if (!mainSrc.includes('gpuCompact') || !mainSrc.includes('serializedDataset.slice(0)')) {
+        throw new Error('main.ts missing string-isolated enrichment / dataset transfer (blocker)');
     }
     for (const token of ['SEARCH_ERROR', 'activeDatasetGeneration', 'requestGeneration']) {
-        if (!mainSrc.includes(token)) throw new Error(`main.ts missing M4 token: ${token}`);
+        if (!mainSrc.includes(token)) throw new Error(`main.ts missing  token: ${token}`);
     }
-    console.log('   ✅ M4 sentinels verified (scripts-only, ufuzzy conflict, worker unicode path)');
+    console.log('   ✅ sentinels verified (scripts-only, ufuzzy conflict, worker unicode path)');
 
     console.log('\n--- All vgpu/mock Tests Passed! (0ms GPU, 100% in-memory) ✅ ---');
 }

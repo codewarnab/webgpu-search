@@ -1,5 +1,5 @@
 /**
- * Milestone 2 Test Suite: Columnar Attribute Index & Structured Pre-Filtering
+ * Test Suite: Columnar Attribute Index & Structured Pre-Filtering
  * Tests DocumentBitset, ColumnarStore, compileFilter, DocumentIndex pre-filtering,
  * mutations sync, SearchWorkerClient integration, and sub-50µs performance.
  */
@@ -18,8 +18,8 @@ import {
   type DocumentIndexOptions
 } from '../packages/webgpu-search/src/index';
 
-async function runMilestone2Tests() {
-  console.log('=== Running Issue #10 Milestone 2: Columnar Attribute Index & Pre-Filtering ===\n');
+async function runTests() {
+  console.log('=== Running Issue #10  Columnar Attribute Index & Pre-Filtering ===\n');
 
   // =========================================================================
   // 1. DocumentBitset Unit Verification
@@ -443,7 +443,7 @@ async function runMilestone2Tests() {
   console.log('\n🎉 ALL MILESTONE 2 TESTS PASSED SUCCESSFULLY! 🎉\n');
 }
 
-runMilestone2Tests().catch((err) => {
-  console.error('Milestone 2 test failed:', err);
+runTests().catch((err) => {
+  console.error('test failed:', err);
   process.exit(1);
 });

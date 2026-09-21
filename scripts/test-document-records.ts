@@ -1,7 +1,7 @@
 import assert from 'node:assert';
 import {
   DocumentIndex,
-  searchMultiFieldCpuReference,
+  scoreExactMatchesMultiField,
   WebGPUEngine,
   DuplicateIdError,
   QueryTooLongError,
@@ -20,7 +20,7 @@ interface ArticleDoc {
 }
 
 async function runM2Tests() {
-  console.log('--- Running Milestone 2: Document Record Engine & Multi-Field Indexing Tests ---');
+  console.log('--- Running  Document Record Engine & Multi-Field Indexing Tests ---');
 
   // =========================================================================
   // 1. Field Weighting and Primary / Auxiliary Match Resolution
@@ -718,10 +718,10 @@ async function runM2Tests() {
     console.log('   ✅ Multi-agent review hardening and validation guards verified');
   }
 
-  console.log('\n--- All Milestone 2 Document Record Engine & Multi-Field Tests Passed! ✅ ---');
+  console.log('\n--- All Document Record Engine & Multi-Field Tests Passed! ✅ ---');
 }
 
 runM2Tests().catch((err) => {
-  console.error('Milestone 2 test failed:', err);
+  console.error('test failed:', err);
   process.exit(1);
 });

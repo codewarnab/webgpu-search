@@ -1,58 +1,48 @@
-# Unicode Contract — v0.2 Code-Point-Safe Matching (M4: parity harness landed)
-
-> Source of truth for Issue #7. Frozen values in this file gate M4/M5.
-> Plan: `ISSUE-7-PLAN.md`. Status: M0 spikes recorded (HW latency A/B deferred
-> to M5 — see §3), M1 contract shape landed, M2 CPU parity landed (post-fold
-> sizing + `cpu-reference.ts` + fold table), M3 WebGPU representation swap
-> landed (u32 scalar packing + pure-`==` WGSL + 32 B uniform / 512 B query),
-> M4 differential harness + worker migration landed (`scripts/test-m4-parity.ts`
-> scripts-only; `search.worker.ts` on the unicode pipeline with string-isolated
-> enrichment; true WGSL-execution parity release-gated by the browser subset
-> in `scripts/test-regression.ts`).
+# Text Normalization
 
 ## 1. Pipeline (byte-exact order)
 
 ```
 raw JS string
-  → String.trim
-  → String.prototype.toWellFormed() where available,
-    else pair-preserving fallback /([\uD800-\uDBFF][\uDC00-\uDFFF])|[\uD800-\uDFFF]/g
-    (group 1 = valid pair preserved, else lone surrogate → U+FFFD; lookbehind-free
-    for Safari <16.4 / old Hermes; each lone surrogate → exactly one U+FFFD:
-    high+high = 2, high+EOF = 1, low-without-high = 1; genuine U+FFFD
-    indistinguishable by design)
-  → NFC (host String.normalize('NFC'), probe §6)
-  → full default case fold (C+F only, S+T excluded) when folded, else NFC-only
-  → NFC again (fold is not NFC-closed: U+0130 → U+0069 U+0307 + neighbors)
-  → u32 scalar token stream
+ → String.trim
+ → String.prototype.toWellFormed() where available,
+ else pair-preserving fallback /([\uD800-\uDBFF][\uDC00-\uDFFF])|[\uD800-\uDFFF]/g
+ (group 1 = valid pair preserved, else lone surrogate → U+FFFD; lookbehind-free
+ for Safari <16.4 / old Hermes; each lone surrogate → exactly one U+FFFD:
+ high+high = 2, high+EOF = 1, low-without-high = 1; genuine U+FFFD
+ indistinguishable by design)
+ → NFC (host String.normalize('NFC'), probe §6)
+ → full default case fold (C+F only, S+T excluded) when normalized, else NFC-only
+ → NFC again (fold is not NFC-closed: U+0130 → U+0069 U+0307 + neighbors)
+ → u32 scalar token stream
 ```
 
 Single function `normalizeText()` serves records and queries. `sanitizeStringForSlot`
-is deleted from the parity path (kept behind the deprecated legacy export only;
-removal in v0.3). Limit/empty checks apply to **post-fold token count**;
+is deleted from the exact path (kept behind the deprecated legacy export only;
+removal in ). Limit/empty checks apply to **post-normalization token count**;
 whitespace-only (incl. U+3000) / empty queries return unified empty results
 (`query: ''`). Lone-mark / VS-only / ZWJ-only / tatweel-only inputs survive
 NFC+C+F as single tokens per the survival rule, so they search normally
 (usually 0 hits, echoing the original query) — pinned by test §8b. Scores,
-spans, `str_len − query_len` are in **post-fold code points**. Highlighting
-caveat: `"Straße"` → `"strasse"` (6→7 tokens); folded coordinates must NOT
+spans, `str_len − query_len` are in **post-normalization code points**. Highlighting
+caveat: `"Straße"` → `"strasse"` (6→7 tokens); normalized coordinates must NOT
 slice the original string.
 
-M3 representation swap (landed): GPU packs the same post-fold u32 scalars via
+ representation swap (landed): GPU packs the same post-normalization u32 scalars via
 `packUnicodeToGPUBuffer` (pre-tokenized fast path, no second normalization)
 and searches with a pure-`==` scalar WGSL comparator (32 B uniform header +
 512 B persistent storage query buffer, 5 bindings). `flagsAndProfile` (word 3)
-is reserved wire format for the M4 harness/debug — shaders do not read it;
+is reserved wire format for the harness/debug — shaders do not read it;
 profile enforcement lives host-side (`ProfileMismatchError`). All valid
-queries up to 128 post-fold tokens route to WebGPU when available; failures
-fall back to the parity CPU scorer with identical semantics.
+queries up to 128 post-normalization tokens route to WebGPU when available; failures
+fall back to the exact CPU scorer with identical semantics.
 
-M4 parity position (landed): `scripts/test-m4-parity.ts` pins the (a)-(n)
+ differential position: `scripts/test-parity-harness.ts` pins the (a)-(n)
 matrix corrections, echo contracts, failure-injection delta, and
 concurrency/abort against the mock device (110+ asserts green; exact
 GPU-order cells report `pending-hardware` because `vgpu/mock` never executes
 WGSL -- mock-green alone ships nothing). The benchmark worker migrates with
-it: `LOAD_DATASET` takes `{strings}` / U2F2 `{serialized}` (legacy v0.1 byte
+it: `LOAD_DATASET` takes `{strings}` / dataset `{serialized}` (legacy byte
 buffers rejected even in combo, neutered `byteLength===0` guarded,
 fail-closed empty payload, state commits only on success) and SEARCH returns
 compact `{index,score}[]` behind `STRING_ISOLATED_ENRICHMENT` for main-thread
@@ -60,8 +50,8 @@ text enrichment (~6x smaller worker->main clone per keystroke by byte math,
 order-of-magnitude: per-object clone overhead and UTF-16-vs-bytes ignored;
 browser-ms confirmation is pending-hardware). SEARCH failures post
 `SEARCH_ERROR` (never silent stale); dataset switches carry a generation so
-stale-dataset hits are dropped. True ordered `(index,score,text)` parity on
-executing hardware is gated by the M4 browser block in
+stale-dataset hits are dropped. True ordered `(index,score,text)` matching on
+executing hardware is gated by the browser block in
 `scripts/test-regression.ts` (per-PR CI gate and release gate; oracle in
 Bun/Node vs subject in Chrome -- same-host assumption, see in-file note).
 By type design that block is order/text-only: `WebGPUSearchResult` (engine
@@ -75,29 +65,29 @@ identity is pinned at the `SearchIndex` level in the mock harness instead
 |---|---|---|
 | `UNICODE_VERSION` | `16.0.0` | `CaseFolding-16.0.0.txt` (Unicode 16.0.0, Sept 2024), UCD terms |
 | `SCORING_VERSION` | `parity-v1` | Bump on any scoring/boundary change |
-| `FORMAT_VERSION` | `2` | `MAGIC 0x55324632 ('U2F2')` + enums + counts + checksum |
-| `QUERY_TOKENS_MAX` | `128` | Post-fold tokens; bounds `str_len × query_len` shader loops |
+| `DATASET_FORMAT_VERSION` | `2` | `MAGIC 0x55324632` + enums + counts + checksum |
+| `QUERY_TOKENS_MAX` | `128` | Post-normalization tokens; bounds `str_len × query_len` shader loops |
 | `RESULT_LIMIT_MAX` | `8192` | Clamp, tested |
-| `TextProfileId` | `'unicode-default'` | Only parity profile; legacy internal-only, removed v0.3 |
-| `folded` | index-construction-time | `IndexOptions.caseSensitive` (default `false`); per-query mismatch → `ProfileMismatchError` (breaking v0.2: build one index per mode) |
-| `CpuAlgorithm` | `'parity' \| 'ufuzzy'`, default `'parity'` | uFuzzy explicit opt-in only (CPU-only, explicitly non-conforming scores, skips GPU, excluded from parity matrix); default and GPU-failure fallback serve parity `cpu-reference.ts`. `preferGpu:true + cpuAlgorithm:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
-| `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. M2: enforced on the exact post-fold token count (`normalizeText(query, folded)` vs `QUERY_TOKENS_MAX`), with a cheap raw-length pre-gate before NFC+fold. `'cpu-fallback'` forces the CPU path for that query. |
+| `TextProfileId` | `'unicode-default'` | Only text profile |
+| `normalized` | index-construction-time | `IndexOptions.caseSensitive` (default `false`); per-query mismatch → `ProfileMismatchError` (breaking : build one index per mode) |
+| `CpuScorer` | `'exact' \| 'ufuzzy'`, default `'exact'` | uFuzzy explicit opt-in only (CPU-only, explicitly non-conforming scores, skips GPU, excluded from differential matrix); default and GPU-failure fallback serve the exact `exact-scorer.ts` (legacy `'parity'` value maps to `'exact'`). `preferGpu:true + cpuScorer:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
+| `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. : enforced on the exact post-normalization token count (`normalizeText(query, normalized)` vs `QUERY_TOKENS_MAX`), with a cheap raw-length pre-gate before NFC+folding. `'cpu-fallback'` forces the CPU path for that query. |
 
-**M3 status (parity on both paths, harness in M4):** comparator, parity scorer,
-post-fold sizing, u32 packing, and scalar WGSL are enforced on both paths.
-GPU/CPU differential parity is asserted by the M4 harness (see limitation note
+**Differential status (exact matching on both paths):** comparator, exact scorer,
+post-normalization sizing, u32 packing, and scalar WGSL are enforced on both paths.
+GPU/CPU differential matching is asserted by the harness (see limitation note
 in §1).
 
 Comparator both paths: score desc, index asc (wrap-free comparisons;
-`Math.imul`/`|0` retained for the score formulas only). M2 CPU
-(`cpu-reference.ts`) and M2 GPU readback sort share it; the WGSL scalar
-rewrite landed in M3 (pure-`==`, i32-arithmetic form). `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
-in v0.2 (breaking; see `unicode-preprocess.ts` JSDoc). Determinism guaranteed iff
+`Math.imul`/`|0` retained for the score formulas only). CPU
+(`exact-scorer.ts`) and GPU readback sort share it; the WGSL scalar
+rewrite landed in (pure-`==`, i32-arithmetic form). `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
+in (breaking; see `unicode-preprocess.ts` JSDoc). Determinism guaranteed iff
 `hasOverflow === false`; above cap assert `totalMatches + hasOverflow + score
-multiset` only (M1 doc-only; CPU `hasOverflow` fix lands in M3/M4).
-`mode:'fuzzy'` semantic change (uFuzzy → parity-subsequence) is
+multiset` only.
+`mode:'fuzzy'` semantic change (uFuzzy → exact-subsequence) is
 a documented breaking change. `slotBytes` throws `IncompatibleOptionError`
-with migration message (throw-on-use in v0.2, removal in v0.3).
+with migration message (throw-on-use in, removal in ).
 
 ## 3. M0 spike results (measured 2026-09-17, Bun 1.4.2; method notes inline)
 
@@ -113,9 +103,9 @@ binding, marginal), 650k → ~146 MiB (**projected binding exceedance**, not an
 observed crash), 1M → ~224 MiB (projected exceedance). CJK 1M → ~118 MiB
 (marginal). Decision: **u32 default stands** on code-point safety (astral/emoji
 survive without surrogate splitting), not on a measured latency win; ALU vs
-bandwidth timing was not measured in M0 and is deferred to M5 browser runs.
-u16-BMP and UTF-8 remain post-v0.2 experiments (u16 needs surrogate-aware
-parity proof). Oversize datasets fail closed to CPU (no paging in v0.2).
+bandwidth timing was not measured in M0 and is deferred to browser runs.
+u16-BMP and UTF-8 remain post- experiments (u16 needs surrogate-aware
+differential proof). Oversize datasets fail closed to CPU (no paging).
 
 Max-rows guide (records+offsets vs binding limit; ~48 tokens/row ASCII,
 ~30 tokens/row CJK):
@@ -133,10 +123,10 @@ actuals; always read `device.limits` at runtime.
 **Query placement (no HW in CI — interim default, A/B deferred):** 128 tokens
 = 512 B + 32 B header ≪ 64 KiB `maxUniformBufferBindingSize` guarantee, so an
 expanded uniform would preserve constant-cache broadcast while storage adds a
-binding + LD/ST path. No GPU hardware in CI image → latency A/B deferred to M5
+binding + LD/ST path. No GPU hardware in CI image → latency A/B deferred to 
 browser runs; **interim default: persistent storage query buffer** (stable
-bindings, avoids uniform churn). Revisit if M5 short-query p95 on browser
-hardware regresses beyond the M5-measured baseline (not the §5 CPU-parity
+bindings, avoids uniform churn). Revisit if short-query p95 on browser
+hardware regresses beyond the measured baseline (not the §5 CPU-exact
 threshold, which is a different metric).
 
 **Fold table (CaseFolding-16.0.0, C+F only):** 1,557 entries with status C or F,
@@ -144,25 +134,24 @@ of which 104 have status F — all multi-char mappings (88 × 1→2, 16 × 1→3
 1→2+ = 104 ⊃ 1→3 = 16). Naive literal table ≈ 15,628 chars → **7,387 B gzip**
 (`gzip -c`, ~68% of ~11 KB headroom — marginal). Sparse range/delta ≈ 3,770 B
 raw → est. ~1.8 KB gzip (comfortable; estimate, not a built artifact).
-Generator script + packed bytes + `minify:true` delta land in M2.
+Generator script + packed bytes + `minify:true` delta land in.
 Decision: **sparse-encoded eager table, delta cap ≤8 KB gzip over baseline**;
 Simple-only (C+S) is fallback only (drops contracted `ß/ss`: ß is F-only).
 
-**Bundle baseline (measured 2026-09-17 post-M1-fix working tree):**
+**Bundle baseline (measured 2026-09-17 post--fix working tree):**
 `packages/webgpu-search/dist/index.js` 44,581 B raw / 10,206 B gzip
-(historical `gzip -c` numbers; the M2 gate `scripts/check-m2-bundle.ts` uses
+(historical `gzip -c` numbers; the gate `scripts/check-m2-bundle.ts` uses
 deterministic gzip level 6 mtime=0, which differs from `gzip -c` by ~200–300 B
 filename/mtime bytes — do not compare across methods; re-baseline with the
 gate method before enforcing byte-tight deltas. `tsup` with `minify:false` —
 i.e. gzip of the current unminified build, not a shipped min+gzip). Headroom
-to the 20 KB gzip budget ≈ 10 KB at M1. Pre-PR baseline was 40,428 B / ~9,125 B;
-the delta is the M1 contract code itself. M2 asserted the fold-table delta
-against the ≤8 KB **gzip** cap (M2 measured +8,137 B deterministic over the
-post-M1 baseline). M3 re-baselined to the post-M2 tree (`dist/index.js`
-70,455 B raw / 18,343 B gzip, gate method): M3 base +1,841 B, review hardening
+to the 20 KB gzip budget ≈ 10 KB at. Pre-PR baseline was 40,428 B / ~9,125 B;
+the delta is the contract code itself. asserted the case-fold-table delta
+against the ≤8 KB **gzip** cap. re-baselined to the post- tree (`dist/index.js`
+70,455 B raw / 18,343 B gzip, gate method): base +1,841 B, review hardening
 (fail-closed trust boundaries) +~1.2 KB → ~21.4 KB gzip vs the 22 KB budget
 (delta cap 4 KB) — see `scripts/check-m2-bundle.ts` (re-baseline + bump
-rationale inline, not exemption). M4 needs a budget re-plan before adding
+rationale inline, not exemption). needs a budget re-plan before adding
 harness weight.
 
 ## 4. Buffers and bindings
@@ -171,7 +160,7 @@ Per-buffer checks vs `min(maxBufferSize, maxStorageBufferBindingSize)` from
 adapter limits (surfaced via `device.limits`; 128 MB fallback mock-only):
 `records = tokenCount×4`, `offsets = (rows+1)×4`, `query = 128×4`,
 `output = 8 + cap×8`. `vramAllocatedBytes` = actual packed bytes. No paging in
-v0.2 — oversize fails closed to CPU. Storage-wins header (32 B, 16 B-aligned):
+ — oversize fails closed to CPU. Storage-wins header (32 B, 16 B-aligned):
 `struct Q { total_rows, query_len, max_candidates, flagsAndProfile, _pad }`;
 bindings `0:uniform, 1:offsets:read, 2:records:read, 3:query:read,
 4:output:read_write` (4 bindings if uniform-wins).
@@ -179,15 +168,14 @@ bindings `0:uniform, 1:offsets:read, 2:records:read, 3:query:read,
 ## 5. Budgets
 
 CPU parity search budget (relative threshold, absolute TBD pending-hardware):
-retained p95 ≤1.1× v0.1 ASCII-substring@100k. The v0.1 baseline (commit, corpus,
-hardware, warmups/samples, median/p95) is not yet pinned — M5 pins it on
+retained p95 ≤1.1× ASCII-substring@100k. The baseline (commit, corpus,
+hardware, warmups/samples, median/p95) is not yet pinned — pins it on
 browser hardware before enforcing; until then the threshold is a formula, not
-a gate. Bloom 64-bit pre-filter allowed post-parity in M5, never as parity
+a gate. Bloom 64-bit pre-filter allowed post-exact-match, never as the exact path
 substitute. `loadDataset` reports `normalizeMs/packMs/uploadMs` with
-chunked/yielded packing (M2 design: 1M×48 ICU calls must not block the main
-thread). Worker `LOAD_DATASET` clone cost measured in M4/M5
+chunked/yielded packing. Worker `LOAD_DATASET` clone cost measured in /
 (`search.worker.ts` `LOAD_DATASET` clones `strings`; `main.ts`
-`switchDataset` moves a `.slice(0)` copy of `serializedU2F2` with a transfer
+`switchDataset` moves a `.slice(0)` copy of `serializeddataset` with a transfer
 list -- copy-then-move, not zero-copy, since the original is retained);
 string-isolated enrichment as measured optimization; `loadDataset` guards
 neutered buffers (`byteLength===0`).
@@ -195,27 +183,27 @@ neutered buffers (`byteLength===0`).
 ## 6. Versioning, probe, locale ban
 
 `CaseFolding-<V>.txt` URL + revision + license in generator provenance header.
-Host `normalize('NFC')` ≠ pinned version: M1 conformance probe runs pinned
+Host `normalize('NFC')` ≠ pinned version: conformance probe runs pinned
 `NormalizationTest.txt` excerpts at `create()`; mismatch warns + records
 `nfcProbedVersion`, never reports pinned as fact. NOTE: `nfcProbedVersion` is
 currently always `null` (probe deferred — pack/deserialize hardcode null);
-the warn+record behavior above is the contracted M4/M5 target, not today's
+the warn+record behavior above is the contracted / target, not today's
 runtime. `toLowerCase/toUpperCase/
-indexOf/charCodeAt` banned in parity path (lint) + `tr-TR` locale CI run.
+indexOf/charCodeAt` banned in exact path (lint) + `tr-TR` locale CI run.
 
-Match matrix (each × folded true/false): `I/i/İ/ı` (I→i via C, never ı;
+Match matrix (each × normalized true/false): `I/i/İ/ı` (I→i via C, never ı;
 İ→i+dot via F, never bare i; ı identity), `ß/ss/SS` (F; S excluded),
 `ς/σ/Σ` (C), `ﬀ/ff` (F), `ϴ/θ` (U+03F4 has C→U+03B8 in Unicode 16.0.0, so C+F
 folds it), `e/é` (no match), ZWJ-family partial,
 flag/keycap splits, Arabic bare-vs-vocalized (no match), presentation forms
 (distinct, NFC≠NFKC), Bengali/Devanagari conjuncts (visually-equal-but-unequal
 → no match), CJK `U+3000`/Unicode spaces (no word bonus — documented ASCII
-`\/ _ - . space : \` limitation). Code points ≠ graphemes (`Intl.Segmenter`
+`\/ _ -. space : \` limitation). Code points ≠ graphemes (`Intl.Segmenter`
 pointer at call site); no locale mappings, ever.
 
-## 7. Rejected for v0.2 (rationale)
+## 7. Rejected for (rationale)
 
 u16-BMP packing (astral split) · Simple-only folding (drops `ß/ss`) ·
-universal word boundaries (scoring-version change, backlogged) · LDS-as-parity-fix
-(contention only, not top-K) · in-shader fold table (divergence; CPU-fold keeps
+universal word boundaries (scoring-version change, backlogged)
+(contention only, not top-K) · in-shader case-fold table (divergence; CPU-fold keeps
 pure-`==` shader).

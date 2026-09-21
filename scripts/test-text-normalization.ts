@@ -1,19 +1,19 @@
 /**
- * M2 unit tests: shared preprocessing + CPU reference (Issue #7).
+ * unit tests: shared preprocessing + CPU reference ().
  * ASCII-only source: all non-ASCII strings built via String.fromCodePoint.
- * Run: bun scripts/test-m2-preprocess.ts
+ * Run: bun scripts/test-text-normalization.ts
  */
 import {
   SearchIndex,
   normalizeText,
   tokensEqual,
-  searchCpuReference,
+  scoreExactMatches,
   scoreSubstringTokens,
   scoreFuzzyTokens,
-  compareParityResults,
-  foldCodePoint,
-  FOLD_C_COUNT,
-  FOLD_F_COUNT,
+  compareExactResults,
+  foldCaseScalar,
+  CASE_FOLD_C_COUNT,
+  CASE_FOLD_F_COUNT,
   QUERY_TOKENS_MAX,
   RESULT_LIMIT_MAX,
   QueryTooLongError,
@@ -70,22 +70,22 @@ function arr(t: Uint32Array): number[] {
 }
 
 async function main(): Promise<void> {
-  console.log('--- M2 preprocessing + CPU reference tests ---');
+  console.log('---  preprocessing + CPU reference tests ---');
 
   console.log('1. Fold-table counts + spot fixtures');
-  ok('C count = 1453', FOLD_C_COUNT === 1453, `got ${FOLD_C_COUNT}`);
-  ok('F count = 104', FOLD_F_COUNT === 104, `got ${FOLD_F_COUNT}`);
-  ok('A->a', JSON.stringify(foldCodePoint(0x41)) === JSON.stringify([0x61]));
-  ok('sharp-s -> ss', JSON.stringify(foldCodePoint(0xdf)) === JSON.stringify([0x73, 0x73]));
-  ok('dotted-I -> i+dot', JSON.stringify(foldCodePoint(0x130)) === JSON.stringify([0x69, 0x307]));
-  ok('Sigma -> sigma', JSON.stringify(foldCodePoint(0x3a3)) === JSON.stringify([0x3c3]));
-  ok('final-sigma -> sigma', JSON.stringify(foldCodePoint(0x3c2)) === JSON.stringify([0x3c3]));
-  ok('ff-ligature -> ff', JSON.stringify(foldCodePoint(0xfb00)) === JSON.stringify([0x66, 0x66]));
-  ok('I -> i (never dotless)', JSON.stringify(foldCodePoint(0x49)) === JSON.stringify([0x69]));
-  ok('dotless-i identity', foldCodePoint(0x131) === null);
-  ok('1E9E -> ss (S excluded)', JSON.stringify(foldCodePoint(0x1e9e)) === JSON.stringify([0x73, 0x73]));
-  ok('theta-symbol -> theta via C', JSON.stringify(foldCodePoint(0x3f4)) === JSON.stringify([0x3b8]));
-  ok('FF01 distinct (no fold)', foldCodePoint(0xff01) === null);
+  ok('C count = 1453', CASE_FOLD_C_COUNT === 1453, `got ${CASE_FOLD_C_COUNT}`);
+  ok('F count = 104', CASE_FOLD_F_COUNT === 104, `got ${CASE_FOLD_F_COUNT}`);
+  ok('A->a', JSON.stringify(foldCaseScalar(0x41)) === JSON.stringify([0x61]));
+  ok('sharp-s -> ss', JSON.stringify(foldCaseScalar(0xdf)) === JSON.stringify([0x73, 0x73]));
+  ok('dotted-I -> i+dot', JSON.stringify(foldCaseScalar(0x130)) === JSON.stringify([0x69, 0x307]));
+  ok('Sigma -> sigma', JSON.stringify(foldCaseScalar(0x3a3)) === JSON.stringify([0x3c3]));
+  ok('final-sigma -> sigma', JSON.stringify(foldCaseScalar(0x3c2)) === JSON.stringify([0x3c3]));
+  ok('ff-ligature -> ff', JSON.stringify(foldCaseScalar(0xfb00)) === JSON.stringify([0x66, 0x66]));
+  ok('I -> i (never dotless)', JSON.stringify(foldCaseScalar(0x49)) === JSON.stringify([0x69]));
+  ok('dotless-i identity', foldCaseScalar(0x131) === null);
+  ok('1E9E -> ss (S excluded)', JSON.stringify(foldCaseScalar(0x1e9e)) === JSON.stringify([0x73, 0x73]));
+  ok('theta-symbol -> theta via C', JSON.stringify(foldCaseScalar(0x3f4)) === JSON.stringify([0x3b8]));
+  ok('FF01 distinct (no fold)', foldCaseScalar(0xff01) === null);
 
   console.log('2. Surrogate / noncharacter matrix');
   const FFFD = 0xfffd;
@@ -181,7 +181,7 @@ async function main(): Promise<void> {
     ok('fuzzy exact abc=215', rf.matched && rf.score === 215, `got ${rf.score}`);
     const a = { index: 5, score: 100 };
     const b = { index: 2, score: 100 };
-    ok('two-key tie-break', compareParityResults(a, b) > 0 && compareParityResults(b, a) < 0);
+    ok('two-key tie-break', compareExactResults(a, b) > 0 && compareExactResults(b, a) < 0);
     const longRec = normalizeText(`${'a'.repeat(2000)}xyz`, true).tokens;
     const qx = normalizeText('xyz', true).tokens;
     const rn = scoreSubstringTokens(longRec, qx);
@@ -257,8 +257,8 @@ async function main(): Promise<void> {
     const rExact = await idx2.search(q, { mode: 'substring', limit: 8192 });
     ok('8192 total -> hasOverflow false', rExact.hasOverflow === false && rExact.totalMatches === 8192);
     const lim0 = await idx2.search(q, { mode: 'substring', limit: 0 });
-    const lim1 = await idx2.search(q, { mode: 'substring', limit: 1 });
-    const lim2 = await idx2.search(q, { mode: 'substring', limit: 2 });
+    const limit1 = await idx2.search(q, { mode: 'substring', limit: 1 });
+    const limit2 = await idx2.search(q, { mode: 'substring', limit: 2 });
     const limNaN = await idx2.search(q, { mode: 'substring', limit: NaN });
     const limUndef = await idx2.search(q, { mode: 'substring' });
     const limHuge = await idx.search(q, { mode: 'substring', limit: 9000 });
@@ -266,8 +266,8 @@ async function main(): Promise<void> {
     const limFloat = await idx2.search(q, { mode: 'substring', limit: 2.7 });
     const limInf = await idx.search(q, { mode: 'substring', limit: Infinity });
     ok('limit=0 clamps to 1', lim0.results.length === 1);
-    ok('limit=1 -> 1', lim1.results.length === 1);
-    ok('limit=2 -> 2', lim2.results.length === 2);
+    ok('limit=1 -> 1', limit1.results.length === 1);
+    ok('limit=2 -> 2', limit2.results.length === 2);
     ok('limit=NaN -> 50', limNaN.results.length === 50);
     ok('limit=undef -> 50', limUndef.results.length === 50);
     ok('limit=9000 clamps 8192 (8193 corpus)', limHuge.results.length === 8192 && limHuge.hasOverflow === true);
@@ -278,10 +278,10 @@ async function main(): Promise<void> {
     {
       const recT = items.map((s) => normalizeText(s, true).tokens);
       const qT = normalizeText(q, true).tokens;
-      const direct = searchCpuReference(recT, qT, 'substring', 9000, items);
-      ok('direct searchCpuReference clamps 9000->8192', direct.results.length === 8192);
-      const directInf = searchCpuReference(recT, qT, 'substring', Infinity, items);
-      ok('direct searchCpuReference Infinity->50', directInf.results.length === 50);
+      const direct = scoreExactMatches(recT, qT, 'substring', 9000, items);
+      ok('direct scoreExactMatches clamps 9000->8192', direct.results.length === 8192);
+      const directInf = scoreExactMatches(recT, qT, 'substring', Infinity, items);
+      ok('direct scoreExactMatches Infinity->50', directInf.results.length === 50);
     }
     idx.destroy();
     idx2.destroy();
@@ -333,12 +333,12 @@ async function main(): Promise<void> {
     ok('ufuzzy echo', ufuzzy.cpuAlgorithm === 'ufuzzy');
     const recT = items.map((s) => normalizeText(s, true).tokens);
     const qT = normalizeText('hello', true).tokens;
-    const ref = searchCpuReference(recT, qT, 'substring', 10, items);
+    const ref = scoreExactMatches(recT, qT, 'substring', 10, items);
     ok('parity substring finds exactly hello', ref.totalMatches === 1 && ref.results[0]?.index === 0);
     idx.destroy();
   }
 
-  console.log(`\n--- M2 tests: ${passed} passed, ${failed} failed ---`);
+  console.log(`\n---  tests: ${passed} passed, ${failed} failed ---`);
   if (failed > 0) process.exit(1);
   if (QUERY_TOKENS_MAX !== 128 || RESULT_LIMIT_MAX !== 8192) {
     console.error('Frozen caps drifted!');

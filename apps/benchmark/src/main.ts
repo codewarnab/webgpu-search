@@ -1,7 +1,7 @@
 import {
     WebGPUEngine,
     CPUEngine,
-    searchCpuReference,
+    scoreExactMatches,
     normalizeText,
     type SearchResult,
     type CPUSearchResult
@@ -161,7 +161,7 @@ async function init() {
                 ) {
                     return;
                 }
-                // M4 string-isolated enrichment: the worker returns compact
+                // String-isolated enrichment: the worker returns compact
                 // `{index,score}[]` + meta (no text clone); re-attach display
                 // strings by index from our own copy (same contract as
                 // SearchIndex enrichment over token-only engine results).
@@ -198,7 +198,7 @@ async function init() {
                 let parityResult = payload.parityResult ?? null;
                 if (!parityResult && currentDataset && payload.query) {
                     const norm = normalizeText(payload.query, true);
-                    parityResult = searchCpuReference(
+                    parityResult = scoreExactMatches(
                         currentDataset.recordTokens,
                         norm.tokens,
                         (payload.gpuMeta?.mode || 'substring') as 'substring' | 'fuzzy',
@@ -476,17 +476,17 @@ async function switchDataset(size: number, corpusType: CorpusType = 'ascii') {
 
     const { uploadTimeMs } = await gpuEngine.loadDataset(currentDataset.strings);
 
-    // Sync dataset with background Web Worker (M4 unicode path). The U2F2
+    // Sync dataset with background Web Worker. The dataset
     // serialized buffer is transferable: the `.slice(0)` copy is moved with
     // a transfer list (copy-then-move, not zero-copy, since the original is
     // retained for reuse; neutered on arrival is a worker-side error, never
     // silent). `strings` still structured-clones in full -- that clone cost
     // is real and reported by the worker (`stringsChars`); it is irreducible
-    // while the worker runs CPU comparison. Legacy v0.1 byte buffers are
-    // gone (the M3 engine ignored them whenever `strings` was present --
+    // while the worker runs CPU comparison. Legacy byte buffers are
+    // gone (the engine ignored them whenever `strings` was present --
     // pure clone waste).
     if (searchWorker && currentDataset) {
-        const serializedCopy = currentDataset.serializedU2F2.slice(0);
+        const serializedCopy = currentDataset.serializedDataset.slice(0);
         searchWorker.postMessage({
             type: 'LOAD_DATASET',
             payload: {
@@ -633,7 +633,7 @@ async function executeLiveSearch() {
     let parityResult: { durationMs: number; totalMatches: number; results: any[] } | null = null;
     if (currentDataset && query) {
         const norm = normalizeText(query, true);
-        parityResult = searchCpuReference(
+        parityResult = scoreExactMatches(
             currentDataset.recordTokens,
             norm.tokens,
             mode,
@@ -642,8 +642,8 @@ async function executeLiveSearch() {
         );
     }
 
-    const ufuzzyResult: CPUSearchResult = cpuEngine.searchUFuzzy(currentDataset.strings, query, 1000);
-    const nativeResult: CPUSearchResult = cpuEngine.searchNative(currentDataset.strings, query, 1000);
+    const ufuzzyResult: CPUSearchResult = cpuEngine.searchWithUFuzzy(currentDataset.strings, query, 1000);
+    const nativeResult: CPUSearchResult = cpuEngine.searchNaiveScan(currentDataset.strings, query, 1000);
 
     if (queryId === activeQuerySeq) {
         handleSearchResults(gpuResult, parityResult, ufuzzyResult, nativeResult, query);
@@ -743,7 +743,7 @@ async function runFullBenchmark() {
 
     try {
         if (runSubstring) {
-            // PHASE 1: Substring Algorithm
+            // Stage 1: Substring Algorithm
             tabBtnSubstring.click(); // Focus substring tab
             const subResults = await benchmarkRunner.runBenchmark(
                 sizes,
@@ -779,7 +779,7 @@ async function runFullBenchmark() {
         }
 
         if (runFuzzy) {
-            // PHASE 2: Fuzzy Algorithm
+            // Stage 2: Fuzzy Algorithm
             tabBtnFuzzy.click(); // Focus fuzzy tab
             const stepOffset = runSubstring ? sizes.length : 0;
             const fuzResults = await benchmarkRunner.runBenchmark(

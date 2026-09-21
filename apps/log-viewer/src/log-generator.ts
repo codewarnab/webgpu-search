@@ -19,7 +19,7 @@ const ERROR_TEMPLATES = [
   'Heap out of memory: VRAM buffer allocation exceeded 134217728 bytes',
   'Connection pool exhausted: maximum active connections reached (500/500)',
   'Worker thread pool crashed unexpectedly with uncaught DOMException',
-  'CRC32 checksum mismatch on restored U2D3 binary header: expected 0x5a2f1b, got 0x3e8a91'
+  'CRC32 checksum mismatch on restored snapshot binary header: expected 0x5a2f1b, got 0x3e8a91'
 ];
 
 const WARN_TEMPLATES = [

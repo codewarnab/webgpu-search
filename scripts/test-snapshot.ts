@@ -2,21 +2,21 @@ import assert from 'node:assert';
 import {
   DocumentIndex,
   SearchWorkerClient,
-  serializeDocumentIndex,
-  deserializeDocumentSnapshot,
-  deserializeDocumentSnapshotHeader,
-  restoreDocumentIndex,
+  encodeSnapshot,
+  decodeSnapshot,
+  decodeSnapshotHeader,
+  restoreSnapshot,
   saveIndexToIDB,
   loadIndexFromIDB,
   deleteIndexFromIDB,
   restoreIndexFromIDB,
   IncompatibleIndexError,
-  SERIALIZED_DOC_MAGIC,
-  DOC_FORMAT_VERSION,
-  SERIALIZED_DOC_HEADER_BYTES,
-  U2D4_MAGIC,
-  U2D4_FORMAT_VERSION,
-  U2D4_HEADER_BYTES,
+  LEGACY_SNAPSHOT_MAGIC,
+  LEGACY_SNAPSHOT_VERSION,
+  LEGACY_SNAPSHOT_HEADER_BYTES,
+  SNAPSHOT_MAGIC,
+  SNAPSHOT_FORMAT_VERSION,
+  SNAPSHOT_HEADER_BYTES,
   DEFAULT_IDB_DATABASE_NAME,
   DEFAULT_SNAPSHOT_STORE_NAME,
   DEFAULT_DOCUMENT_STORE_NAME,
@@ -286,8 +286,8 @@ function createMockWorkerScope(): { clientWorker: any; workerScope: any } {
   return { clientWorker, workerScope };
 }
 
-async function runM6Tests() {
-  console.log('--- Running Milestone 6: Versioned Snapshot Persistence (U2D4 canonical, U2D3 legacy read) & IndexedDB Tests ---');
+async function runSnapshotTests() {
+  console.log('--- Running  Versioned Snapshot Persistence (canonical + legacy read) & IndexedDB Tests ---');
 
   // Sample multi-field documents with Unicode characters
   const sampleArticles: ArticleDoc[] = [
@@ -312,18 +312,18 @@ async function runM6Tests() {
   ];
 
   // =========================================================================
-  // 1. U2D3 Legacy Constants & U2D4 Canonical Constants
+  // 1. legacy snapshot Legacy Constants & snapshot Canonical Constants
   // =========================================================================
   console.log('1. Testing binary specification constants and header layout...');
   {
-    assert.strictEqual(SERIALIZED_DOC_MAGIC, 0x55324433, 'SERIALIZED_DOC_MAGIC must be 0x55324433 ("U2D3")');
-    assert.strictEqual(DOC_FORMAT_VERSION, 3, 'DOC_FORMAT_VERSION must be 3');
-    assert.strictEqual(SERIALIZED_DOC_HEADER_BYTES, 48, 'SERIALIZED_DOC_HEADER_BYTES must be 48 bytes');
-    assert.strictEqual(U2D4_MAGIC, 0x55324434, 'U2D4_MAGIC must be 0x55324434 ("U2D4")');
-    assert.strictEqual(U2D4_FORMAT_VERSION, 4, 'U2D4_FORMAT_VERSION must be 4');
-    assert.strictEqual(U2D4_HEADER_BYTES, 56, 'U2D4_HEADER_BYTES must be 56 bytes (8-byte aligned)');
-    assert.strictEqual(U2D4_HEADER_BYTES % 8, 0, 'U2D4 header must be 8-byte aligned');
-    console.log('   ✅ Binary constants confirmed (U2D3 legacy read path + U2D4 canonical write path)');
+    assert.strictEqual(LEGACY_SNAPSHOT_MAGIC, 0x55324433, 'LEGACY_SNAPSHOT_MAGIC must be 0x55324433 ("legacy snapshot")');
+    assert.strictEqual(LEGACY_SNAPSHOT_VERSION, 3, 'LEGACY_SNAPSHOT_VERSION must be 3');
+    assert.strictEqual(LEGACY_SNAPSHOT_HEADER_BYTES, 48, 'LEGACY_SNAPSHOT_HEADER_BYTES must be 48 bytes');
+    assert.strictEqual(SNAPSHOT_MAGIC, 0x55324434, 'SNAPSHOT_MAGIC must be 0x55324434 ("snapshot")');
+    assert.strictEqual(SNAPSHOT_FORMAT_VERSION, 4, 'SNAPSHOT_FORMAT_VERSION must be 4');
+    assert.strictEqual(SNAPSHOT_HEADER_BYTES, 56, 'SNAPSHOT_HEADER_BYTES must be 56 bytes (8-byte aligned)');
+    assert.strictEqual(SNAPSHOT_HEADER_BYTES % 8, 0, 'snapshot header must be 8-byte aligned');
+    console.log('   ✅ Binary constants confirmed (legacy snapshot legacy read path + snapshot canonical write path)');
   }
 
   // =========================================================================
@@ -341,10 +341,10 @@ async function runM6Tests() {
 
     const snapshot = originalIndex.serialize();
     assert(snapshot instanceof ArrayBuffer, 'serialize() must return an ArrayBuffer');
-    assert(snapshot.byteLength >= U2D4_HEADER_BYTES, 'snapshot length must exceed 56-byte U2D4 header');
+    assert(snapshot.byteLength >= SNAPSHOT_HEADER_BYTES, 'snapshot length must exceed 56-byte snapshot header');
 
-    // Parse header directly (canonical U2D4 write path)
-    const header = deserializeDocumentSnapshotHeader(snapshot);
+    // Parse header directly (canonical snapshot write path)
+    const header = decodeSnapshotHeader(snapshot);
     assert.strictEqual(header.magic, 0x55324434);
     assert.strictEqual(header.formatVersion, 4);
     assert.strictEqual(header.docCount, 3);
@@ -411,7 +411,7 @@ async function runM6Tests() {
 
     assert.strictEqual(index.getStats().tombstoneCount, 0, 'serialize() must compact all tombstones in live index');
 
-    const header = deserializeDocumentSnapshotHeader(snapshot);
+    const header = decodeSnapshotHeader(snapshot);
     // Active docs: 9
     assert.strictEqual(header.docCount, 9);
     assert.strictEqual(header.rowCount, 18); // 9 docs * 2 fields
@@ -438,7 +438,7 @@ async function runM6Tests() {
 
     // Serialize with decoupled: true
     const decoupledSnapshot = index.serialize({ decoupled: true });
-    const header = deserializeDocumentSnapshotHeader(decoupledSnapshot);
+    const header = decodeSnapshotHeader(decoupledSnapshot);
 
     assert.strictEqual(header.docsByteLength, 0, 'Decoupled snapshot must have docsByteLength = 0');
 
@@ -478,7 +478,7 @@ async function runM6Tests() {
 
     // 1. Truncated buffer (< 48 bytes)
     assert.throws(
-      () => deserializeDocumentSnapshotHeader(validBuffer.slice(0, 30)),
+      () => decodeSnapshotHeader(validBuffer.slice(0, 30)),
       (err: any) => err instanceof IncompatibleIndexError
     );
 
@@ -486,7 +486,7 @@ async function runM6Tests() {
     const badMagicBuf = validBuffer.slice(0);
     new DataView(badMagicBuf).setUint32(0, 0x11223344, true);
     assert.throws(
-      () => deserializeDocumentSnapshotHeader(badMagicBuf),
+      () => decodeSnapshotHeader(badMagicBuf),
       (err: any) => err instanceof IncompatibleIndexError
     );
 
@@ -494,7 +494,7 @@ async function runM6Tests() {
     const badVerBuf = validBuffer.slice(0);
     new DataView(badVerBuf).setUint32(4, 999, true);
     assert.throws(
-      () => deserializeDocumentSnapshotHeader(badVerBuf),
+      () => decodeSnapshotHeader(badVerBuf),
       (err: any) => err instanceof IncompatibleIndexError
     );
 
@@ -503,15 +503,15 @@ async function runM6Tests() {
     const u8 = new Uint8Array(tamperedPayloadBuf);
     u8[60] ^= 0xff; // Flip bits in schema segment
     assert.rejects(
-      async () => restoreDocumentIndex(tamperedPayloadBuf),
+      async () => restoreSnapshot(tamperedPayloadBuf),
       (err: any) => err instanceof IncompatibleIndexError
     );
 
     // 5. Tampered Offsets (non-monotonic)
-    const rawSnapshot = deserializeDocumentSnapshot(validBuffer);
+    const rawSnapshot = decodeSnapshot(validBuffer);
     const tamperedOffsetsBuf = validBuffer.slice(0);
-    const header = deserializeDocumentSnapshotHeader(tamperedOffsetsBuf);
-    const offsetsPos = U2D4_HEADER_BYTES + header.schemaByteLength + header.tokenCount * 4;
+    const header = decodeSnapshotHeader(tamperedOffsetsBuf);
+    const offsetsPos = SNAPSHOT_HEADER_BYTES + header.schemaByteLength + header.tokenCount * 4;
     // Set offsets[1] > offsets[2]
     new DataView(tamperedOffsetsBuf).setUint32(offsetsPos + 4, 999999, true);
     // Recompute CRC with the bad offset to bypass CRC check and test offset validation directly
@@ -520,25 +520,25 @@ async function runM6Tests() {
     const { crc32Parts } = await import('../packages/webgpu-search/src/index');
     const newCrc = crc32Parts([
       new Uint8Array(tamperedOffsetsBuf, 0, 52),
-      new Uint8Array(tamperedOffsetsBuf, U2D4_HEADER_BYTES)
+      new Uint8Array(tamperedOffsetsBuf, SNAPSHOT_HEADER_BYTES)
     ]);
     tamperedDv.setUint32(52, newCrc, true);
 
     assert.rejects(
-      async () => restoreDocumentIndex(tamperedOffsetsBuf),
+      async () => restoreSnapshot(tamperedOffsetsBuf),
       (err: any) => err instanceof IncompatibleIndexError
     );
 
     // 6. Duck-typed non-ArrayBuffer ({ byteLength: 50 })
     assert.throws(
-      () => deserializeDocumentSnapshotHeader({ byteLength: 50 } as any),
+      () => decodeSnapshotHeader({ byteLength: 50 } as any),
       (err: any) => err instanceof IncompatibleIndexError
     );
 
     // 7. Tampered schema.docIds length mismatch
     const badDocIdsBuf = validBuffer.slice(0);
-    const badDocIdsHeader = deserializeDocumentSnapshotHeader(badDocIdsBuf);
-    const schemaBytes = new Uint8Array(badDocIdsBuf, U2D4_HEADER_BYTES, badDocIdsHeader.schemaByteLength);
+    const badDocIdsHeader = decodeSnapshotHeader(badDocIdsBuf);
+    const schemaBytes = new Uint8Array(badDocIdsBuf, SNAPSHOT_HEADER_BYTES, badDocIdsHeader.schemaByteLength);
     const parsedSchema = JSON.parse(new TextDecoder().decode(schemaBytes));
     parsedSchema.docIds = ['doc-1']; // length 1 instead of 3
     const newSchemaBytes = new TextEncoder().encode(JSON.stringify(parsedSchema));
@@ -552,11 +552,11 @@ async function runM6Tests() {
       const tamperedDv2 = new DataView(badDocIdsBuf);
       const newCrc2 = crc32Parts([
         new Uint8Array(badDocIdsBuf, 0, 52),
-        new Uint8Array(badDocIdsBuf, U2D4_HEADER_BYTES)
+        new Uint8Array(badDocIdsBuf, SNAPSHOT_HEADER_BYTES)
       ]);
       tamperedDv2.setUint32(52, newCrc2, true);
       assert.rejects(
-        async () => restoreDocumentIndex(badDocIdsBuf),
+        async () => restoreSnapshot(badDocIdsBuf),
         (err: any) => err instanceof IncompatibleIndexError
       );
     }
@@ -693,9 +693,9 @@ async function runM6Tests() {
     // Serialize across worker boundary
     const workerSnapshot = await workerClient.serialize();
     assert(workerSnapshot instanceof ArrayBuffer);
-    assert(workerSnapshot.byteLength >= U2D4_HEADER_BYTES);
+    assert(workerSnapshot.byteLength >= SNAPSHOT_HEADER_BYTES);
 
-    const header = deserializeDocumentSnapshotHeader(workerSnapshot);
+    const header = decodeSnapshotHeader(workerSnapshot);
     assert.strictEqual(header.docCount, 3);
 
     // Create a fresh worker client and restore directly from snapshot (without init)
@@ -806,9 +806,9 @@ async function runM6Tests() {
   }
 
   // =========================================================================
-  // 9. U2D4 Columnar Segment & Filter/Facet Restore Parity (v0.4 M8)
+  // 9. snapshot Columnar Segment & Filter/Facet Restore Parity (8)
   // =========================================================================
-  console.log('9. Testing U2D4 columnar filter metadata roundtrip & facet parity...');
+  console.log('9. Testing snapshot columnar filter metadata roundtrip & facet parity...');
   {
     interface FilterDoc {
       id: string;
@@ -829,13 +829,13 @@ async function runM6Tests() {
     });
 
     const snapshot = index.serialize();
-    const header = deserializeDocumentSnapshotHeader(snapshot);
-    assert.strictEqual(header.magic, U2D4_MAGIC);
-    assert.strictEqual(header.formatVersion, U2D4_FORMAT_VERSION);
+    const header = decodeSnapshotHeader(snapshot);
+    assert.strictEqual(header.magic, SNAPSHOT_MAGIC);
+    assert.strictEqual(header.formatVersion, SNAPSHOT_FORMAT_VERSION);
     assert(header.columnarByteLength! > 0, 'filter-configured snapshot must carry a columnar segment');
 
     // Columnar segment is 8-byte aligned by construction (56-byte header).
-    assert.strictEqual(U2D4_HEADER_BYTES % 8, 0);
+    assert.strictEqual(SNAPSHOT_HEADER_BYTES % 8, 0);
 
     const baseline = await index.search('timeout', {
       mode: 'fuzzy',
@@ -866,10 +866,10 @@ async function runM6Tests() {
 
     // Corrupted columnar payload must fail closed (CRC mismatch / corruption detection).
     const corruptCol = snapshot.slice(0);
-    const colStart = U2D4_HEADER_BYTES + header.schemaByteLength + header.tokenCount * 4 + (header.rowCount + 1) * 4;
+    const colStart = SNAPSHOT_HEADER_BYTES + header.schemaByteLength + header.tokenCount * 4 + (header.rowCount + 1) * 4;
     new Uint8Array(corruptCol, colStart, 1)[0] ^= 0xff;
     await assert.rejects(
-      async () => restoreDocumentIndex(corruptCol),
+      async () => restoreSnapshot(corruptCol),
       (err: any) => err instanceof IncompatibleIndexError
     );
 
@@ -884,20 +884,20 @@ async function runM6Tests() {
       const columnarLen = header.columnarByteLength ?? 0;
       assert.strictEqual(
         snapshot.byteLength,
-        U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets + columnarLen + header.docsByteLength,
+        SNAPSHOT_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets + columnarLen + header.docsByteLength,
         'canonical byte length must equal header+schema+tokens+offsets+columnar+docs'
       );
-      assert.strictEqual(U2D4_HEADER_BYTES % 8, 0);
+      assert.strictEqual(SNAPSHOT_HEADER_BYTES % 8, 0);
       const recomputed = crc32Parts([
         new Uint8Array(snapshot, 0, 52),
-        new Uint8Array(snapshot, U2D4_HEADER_BYTES, header.schemaByteLength),
-        new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength, wantTokens),
-        new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens, wantOffsets),
+        new Uint8Array(snapshot, SNAPSHOT_HEADER_BYTES, header.schemaByteLength),
+        new Uint8Array(snapshot, SNAPSHOT_HEADER_BYTES + header.schemaByteLength, wantTokens),
+        new Uint8Array(snapshot, SNAPSHOT_HEADER_BYTES + header.schemaByteLength + wantTokens, wantOffsets),
         columnarLen > 0
-          ? new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets, columnarLen)
+          ? new Uint8Array(snapshot, SNAPSHOT_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets, columnarLen)
           : new Uint8Array(0),
         header.docsByteLength > 0
-          ? new Uint8Array(snapshot, U2D4_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets + columnarLen, header.docsByteLength)
+          ? new Uint8Array(snapshot, SNAPSHOT_HEADER_BYTES + header.schemaByteLength + wantTokens + wantOffsets + columnarLen, header.docsByteLength)
           : new Uint8Array(0)
       ]);
       assert.strictEqual(recomputed, header.checksum, 'independent CRC recompute must match header checksum');
@@ -905,24 +905,24 @@ async function runM6Tests() {
 
     index.destroy();
     restored.destroy();
-    console.log('   ✅ U2D4 columnar segment, filter/facet parity, and corruption detection confirmed');
+    console.log('   ✅ snapshot columnar segment, filter/facet parity, and corruption detection confirmed');
   }
 
   // =========================================================================
-  // 10. U2D3 Legacy Migration Read Path (48 B header, no columnar segment)
+  // 10. legacy snapshot Legacy Migration Read Path (48 B header, no columnar segment)
   // =========================================================================
-  console.log('10. Testing U2D3 legacy snapshot migration read path...');
+  console.log('10. Testing legacy snapshot legacy snapshot migration read path...');
   {
     const { crc32Parts } = await import('../packages/webgpu-search/src/index');
     const legacyDocs = [
       { id: 'u2d3-1', title: 'legacy snapshot migration alpha' },
       { id: 'u2d3-2', title: 'legacy snapshot migration beta' }
     ];
-    // Build a canonical U2D4 snapshot with no filter fields (columnarLen 0),
-    // then reframe its payloads as a genuine 48 B U2D3 snapshot.
+    // Build a canonical snapshot snapshot with no filter fields (columnarLen 0),
+    // then reframe its payloads as a genuine 48 B legacy snapshot snapshot.
     const u2d4Index = await DocumentIndex.create(legacyDocs, { fields: ['title'] });
     const u2d4Snap = u2d4Index.serialize();
-    const u2d4Header = deserializeDocumentSnapshotHeader(u2d4Snap);
+    const u2d4Header = decodeSnapshotHeader(u2d4Snap);
     assert.strictEqual(u2d4Header.columnarByteLength ?? 0, 0);
     const u2d4Dv = new DataView(u2d4Snap);
     const profileEnum = u2d4Dv.getUint32(8, true);
@@ -934,23 +934,23 @@ async function runM6Tests() {
     const foldedVal = u2d4Dv.getUint32(32, true);
     const schemaLen = u2d4Dv.getUint32(36, true);
     const docsLen = u2d4Dv.getUint32(40, true);
-    const schemaBytes = new Uint8Array(u2d4Snap, U2D4_HEADER_BYTES, schemaLen);
-    const tokensBytes = new Uint8Array(u2d4Snap, U2D4_HEADER_BYTES + schemaLen, tokenCount * 4);
+    const schemaBytes = new Uint8Array(u2d4Snap, SNAPSHOT_HEADER_BYTES, schemaLen);
+    const tokensBytes = new Uint8Array(u2d4Snap, SNAPSHOT_HEADER_BYTES + schemaLen, tokenCount * 4);
     const offsetsBytes = new Uint8Array(
       u2d4Snap,
-      U2D4_HEADER_BYTES + schemaLen + tokenCount * 4,
+      SNAPSHOT_HEADER_BYTES + schemaLen + tokenCount * 4,
       (rowCount + 1) * 4
     );
     const docsBytes = new Uint8Array(
       u2d4Snap,
-      U2D4_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4,
+      SNAPSHOT_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4,
       docsLen
     );
-    const u2d3Total = SERIALIZED_DOC_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4 + docsLen;
+    const u2d3Total = LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4 + docsLen;
     const u2d3Buf = new ArrayBuffer(u2d3Total);
     const u2d3Dv = new DataView(u2d3Buf);
-    u2d3Dv.setUint32(0, SERIALIZED_DOC_MAGIC, true);
-    u2d3Dv.setUint32(4, DOC_FORMAT_VERSION, true);
+    u2d3Dv.setUint32(0, LEGACY_SNAPSHOT_MAGIC, true);
+    u2d3Dv.setUint32(4, LEGACY_SNAPSHOT_VERSION, true);
     u2d3Dv.setUint32(8, profileEnum, true);
     u2d3Dv.setUint32(12, unicodeEnum, true);
     u2d3Dv.setUint32(16, scoringEnum, true);
@@ -960,40 +960,40 @@ async function runM6Tests() {
     u2d3Dv.setUint32(32, foldedVal, true);
     u2d3Dv.setUint32(36, schemaLen, true);
     u2d3Dv.setUint32(40, docsLen, true);
-    new Uint8Array(u2d3Buf, SERIALIZED_DOC_HEADER_BYTES, schemaLen).set(schemaBytes);
-    new Uint8Array(u2d3Buf, SERIALIZED_DOC_HEADER_BYTES + schemaLen, tokensBytes.length).set(tokensBytes);
+    new Uint8Array(u2d3Buf, LEGACY_SNAPSHOT_HEADER_BYTES, schemaLen).set(schemaBytes);
+    new Uint8Array(u2d3Buf, LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen, tokensBytes.length).set(tokensBytes);
     new Uint8Array(
       u2d3Buf,
-      SERIALIZED_DOC_HEADER_BYTES + schemaLen + tokensBytes.length,
+      LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen + tokensBytes.length,
       offsetsBytes.length
     ).set(offsetsBytes);
     new Uint8Array(
       u2d3Buf,
-      SERIALIZED_DOC_HEADER_BYTES + schemaLen + tokensBytes.length + offsetsBytes.length,
+      LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen + tokensBytes.length + offsetsBytes.length,
       docsBytes.length
     ).set(docsBytes);
     const u2d3Crc = crc32Parts([
       new Uint8Array(u2d3Buf, 0, 44),
-      new Uint8Array(u2d3Buf, SERIALIZED_DOC_HEADER_BYTES)
+      new Uint8Array(u2d3Buf, LEGACY_SNAPSHOT_HEADER_BYTES)
     ]);
     u2d3Dv.setUint32(44, u2d3Crc, true);
 
-    const legacyHeader = deserializeDocumentSnapshotHeader(u2d3Buf);
-    assert.strictEqual(legacyHeader.magic, SERIALIZED_DOC_MAGIC);
-    assert.strictEqual(legacyHeader.formatVersion, DOC_FORMAT_VERSION);
+    const legacyHeader = decodeSnapshotHeader(u2d3Buf);
+    assert.strictEqual(legacyHeader.magic, LEGACY_SNAPSHOT_MAGIC);
+    assert.strictEqual(legacyHeader.formatVersion, LEGACY_SNAPSHOT_VERSION);
     assert.strictEqual(legacyHeader.columnarByteLength ?? 0, 0);
     assert.strictEqual(legacyHeader.docCount, 2);
-    const legacyRestored = await restoreDocumentIndex(u2d3Buf);
+    const legacyRestored = await restoreSnapshot(u2d3Buf);
     assert.strictEqual(legacyRestored.getStats().docCount, 2);
     const legacyRes = await legacyRestored.search('migration');
     assert.strictEqual(legacyRes.totalMatches, 2);
     // Legacy tamper still fails closed.
     const badLegacy = u2d3Buf.slice(0);
-    new Uint8Array(badLegacy, SERIALIZED_DOC_HEADER_BYTES, 1)[0] ^= 0xff;
-    await assert.rejects(async () => restoreDocumentIndex(badLegacy));
+    new Uint8Array(badLegacy, LEGACY_SNAPSHOT_HEADER_BYTES, 1)[0] ^= 0xff;
+    await assert.rejects(async () => restoreSnapshot(badLegacy));
     u2d4Index.destroy();
     legacyRestored.destroy();
-    console.log('   ✅ U2D3 legacy migration read path confirmed');
+    console.log('   ✅ legacy snapshot legacy migration read path confirmed');
   }
 
   // =========================================================================
@@ -1016,26 +1016,26 @@ async function runM6Tests() {
       filterFields: [{ name: 'level' }]
     });
     const baseSnap = negIndex.serialize();
-    const baseHeader = deserializeDocumentSnapshotHeader(baseSnap);
+    const baseHeader = decodeSnapshotHeader(baseSnap);
     const colStart =
-      U2D4_HEADER_BYTES + baseHeader.schemaByteLength + baseHeader.tokenCount * 4 + (baseHeader.rowCount + 1) * 4;
+      SNAPSHOT_HEADER_BYTES + baseHeader.schemaByteLength + baseHeader.tokenCount * 4 + (baseHeader.rowCount + 1) * 4;
     const colLen = baseHeader.columnarByteLength ?? 0;
     assert(colLen > 0);
     const recomputeCrc = (buf: ArrayBuffer): number => {
-      const h = deserializeDocumentSnapshotHeader(buf);
+      const h = decodeSnapshotHeader(buf);
       const cLen = h.columnarByteLength ?? 0;
       const tBytes = h.tokenCount * 4;
       const oBytes = (h.rowCount + 1) * 4;
       return crc32Parts([
         new Uint8Array(buf, 0, 52),
-        new Uint8Array(buf, U2D4_HEADER_BYTES, h.schemaByteLength),
-        new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength, tBytes),
-        new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength + tBytes, oBytes),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES, h.schemaByteLength),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + h.schemaByteLength, tBytes),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + h.schemaByteLength + tBytes, oBytes),
         cLen > 0
-          ? new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength + tBytes + oBytes, cLen)
+          ? new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + h.schemaByteLength + tBytes + oBytes, cLen)
           : new Uint8Array(0),
         h.docsByteLength > 0
-          ? new Uint8Array(buf, U2D4_HEADER_BYTES + h.schemaByteLength + tBytes + oBytes + cLen, h.docsByteLength)
+          ? new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + h.schemaByteLength + tBytes + oBytes + cLen, h.docsByteLength)
           : new Uint8Array(0)
       ]);
     };
@@ -1055,7 +1055,7 @@ async function runM6Tests() {
     };
     // Field-name mismatch (same-length alias preserves columnar bytes).
     await assert.rejects(
-      async () => restoreDocumentIndex(withColumnar((p) => { p.fields[0].name = 'LEVEL'; })),
+      async () => restoreSnapshot(withColumnar((p) => { p.fields[0].name = 'LEVEL'; })),
       (err: any) => err instanceof IncompatibleIndexError
     );
     // Type mismatch via direct validator (adding a type changes JSON length,
@@ -1097,13 +1097,13 @@ async function runM6Tests() {
       new Uint8Array(buf, colStart, colLen).fill(0x41);
       new DataView(buf).setUint32(52, recomputeCrc(buf), true);
       await assert.rejects(
-        async () => restoreDocumentIndex(buf),
+        async () => restoreSnapshot(buf),
         (err: any) => err instanceof IncompatibleIndexError
       );
     }
     // Envelope version mismatch (v !== 1).
     await assert.rejects(
-      async () => restoreDocumentIndex(withColumnar((p) => { p.v = 2; })),
+      async () => restoreSnapshot(withColumnar((p) => { p.v = 2; })),
       (err: any) => err instanceof IncompatibleIndexError
     );
     // Non-zero reserved word (with recomputed CRC to isolate the reserved check).
@@ -1117,19 +1117,19 @@ async function runM6Tests() {
       const cLen = baseHeader.columnarByteLength ?? 0;
       const crcNoHeaderParse = crc32Parts([
         new Uint8Array(buf, 0, 52),
-        new Uint8Array(buf, U2D4_HEADER_BYTES, baseHeader.schemaByteLength),
-        new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength, tBytes),
-        new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength + tBytes, oBytes),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES, baseHeader.schemaByteLength),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + baseHeader.schemaByteLength, tBytes),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + baseHeader.schemaByteLength + tBytes, oBytes),
         cLen > 0
-          ? new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength + tBytes + oBytes, cLen)
+          ? new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + baseHeader.schemaByteLength + tBytes + oBytes, cLen)
           : new Uint8Array(0),
         baseHeader.docsByteLength > 0
-          ? new Uint8Array(buf, U2D4_HEADER_BYTES + baseHeader.schemaByteLength + tBytes + oBytes + cLen, baseHeader.docsByteLength)
+          ? new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + baseHeader.schemaByteLength + tBytes + oBytes + cLen, baseHeader.docsByteLength)
           : new Uint8Array(0)
       ]);
       new DataView(buf).setUint32(52, crcNoHeaderParse, true);
       await assert.rejects(
-        async () => restoreDocumentIndex(buf),
+        async () => restoreSnapshot(buf),
         (err: any) => err instanceof IncompatibleIndexError
       );
     }
@@ -1137,7 +1137,7 @@ async function runM6Tests() {
     {
       const buf = baseSnap.slice(0, baseSnap.byteLength - 1);
       await assert.rejects(
-        async () => restoreDocumentIndex(buf),
+        async () => restoreSnapshot(buf),
         (err: any) => err instanceof IncompatibleIndexError
       );
     }
@@ -1145,7 +1145,7 @@ async function runM6Tests() {
     {
       const plain = await DocumentIndex.create(negDocs, { fields: ['title'] });
       const plainSnap = plain.serialize();
-      const plainHeader = deserializeDocumentSnapshotHeader(plainSnap);
+      const plainHeader = decodeSnapshotHeader(plainSnap);
       assert.strictEqual(plainHeader.columnarByteLength ?? 0, 0);
       plain.destroy();
     }
@@ -1172,15 +1172,15 @@ async function runM6Tests() {
       filterFields: [{ name: 'latencyMs', type: 'number', getter: (d: GetterDoc) => d.perf.latency }]
     });
     const getterSnap = getterIndex.serialize();
-    const getterHeader = deserializeDocumentSnapshotHeader(getterSnap);
+    const getterHeader = decodeSnapshotHeader(getterSnap);
     assert.strictEqual(getterHeader.columnarByteLength! > 0, true);
     // Restore without override must fail closed (default doc[name] would clear presence).
     await assert.rejects(
-      async () => restoreDocumentIndex<GetterDoc>(getterSnap),
+      async () => restoreSnapshot<GetterDoc>(getterSnap),
       (err: any) => err instanceof IncompatibleIndexError
     );
     // Restore with matching getter override succeeds with filter parity.
-    const restoredGetter = await restoreDocumentIndex<GetterDoc>(getterSnap, {
+    const restoredGetter = await restoreSnapshot<GetterDoc>(getterSnap, {
       options: {
         filterFields: [{ name: 'latencyMs', type: 'number', getter: (d: GetterDoc) => d.perf.latency }]
       }
@@ -1231,7 +1231,7 @@ async function runM6Tests() {
       const tampered = snap.slice(0);
       new DataView(tampered).setUint32(36, 20 << 20, true);
       await assert.rejects(
-        async () => restoreDocumentIndex(tampered),
+        async () => restoreSnapshot(tampered),
         (err: any) => err instanceof IncompatibleIndexError
       );
       small.destroy();
@@ -1239,10 +1239,10 @@ async function runM6Tests() {
     console.log('   ✅ Size caps & JSON-safe encoding confirmed');
   }
 
-  console.log('\n--- All Milestone 6 Persistence Tests Passed Successfully! ✅ ---');
+  console.log('\n--- All Persistence Tests Passed Successfully! ✅ ---');
 }
 
-runM6Tests().catch((err) => {
-  console.error('❌ M6 Tests failed:', err);
+runSnapshotTests().catch((err) => {
+  console.error('❌  Tests failed:', err);
   process.exit(1);
 });

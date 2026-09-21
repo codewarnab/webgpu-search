@@ -1,23 +1,23 @@
 /**
- * M4 differential harness (Issue #7): CPU/GPU parity, fallback, CI.
+ * differential harness (): CPU/GPU parity, fallback, CI.
  *
  * Scripts-only: this file must NEVER be imported by `src/index.ts` (bundle
- * gate `scripts/check-m2-bundle.ts` -- harness weight stays out of the
- * shipped library). Run: `bun scripts/test-m4-parity.ts`.
- * Sharding: `M4_SHARD_INDEX` / `M4_SHARD_TOTAL` (defaults 0/1).
+ * gate `scripts/check-bundle-size.ts` -- harness weight stays out of the
+ * shipped library). Run: `bun scripts/test-parity-harness.ts`.
+ * Sharding: `PARITY_SHARD_INDEX` / `PARITY_SHARD_TOTAL` (defaults 0/1).
  * Per-cell timeout 15 s. Durations reported as median/p95 (never mean-of-3).
  *
  * Execution policy (same-host/ICU only):
  * - `vgpu/mock` never executes WGSL (canary: known-hit corpus returns 0 on
- *   the GPU path), so exact GPU-parity cells are recorded as
- *   `pending-hardware`, NOT failures. Under plain bun even a real device
- *   could not execute: unbundled `import x from '*.wgsl'` resolves to an
- *   asset path, not WGSL text (bundler text-loader only), so shader compile
- *   fails before dispatch. The browser subset in
- *   `scripts/test-regression.ts` is the release gate for true parity.
+ * the GPU path), so exact GPU-parity cells are recorded as
+ * `pending-hardware`, NOT failures. Under plain bun even a real device
+ * could not execute: unbundled `import x from '*.wgsl'` resolves to an
+ * asset path, not WGSL text (bundler text-loader only), so shader compile
+ * fails before dispatch. The browser subset in
+ * `scripts/test-regression.ts` is the release gate for true parity.
  * - Everything else here is hard-gated: matrix corrections (a)-(n),
- *   harness self-consistency, echo contracts, failure injection delta,
- *   concurrency/abort, worker contract.
+ * harness self-consistency, echo contracts, failure injection delta,
+ * concurrency/abort, worker contract.
  *
  * ASCII-only source (comments + code): non-ASCII test strings are built
  * only via String.fromCodePoint (FCP). Do not introduce literal non-ASCII
@@ -28,18 +28,18 @@ import { createMockAdapter } from 'vgpu/mock';
 import {
   WebGPUEngine,
   SearchIndex,
-  packUnicodeToGPUBuffer,
-  serializeUnicodeDataset,
-  deserializeUnicodeDataset,
+  packDataset,
+  serializeDataset,
+  deserializeDataset,
   checkMemoryBudget,
   normalizeText,
   toWellFormedSafe,
   tokensEqual,
-  compareParityResults,
-  searchCpuReference,
+  compareExactResults,
+  scoreExactMatches,
   scoreSubstringTokens,
   clampLimit,
-  foldCodePoint,
+  foldCaseScalar,
   WORD_BOUNDARY_PREV,
   LONE_SURROGATE_SOURCE,
   LONE_SURROGATE_PATTERN,
@@ -147,8 +147,15 @@ function parseShardEnv(raw: string | undefined, def: number): number {
   const n = Number(raw);
   return Number.isInteger(n) ? n : NaN;
 }
-const _shardIndexRaw = parseShardEnv(process.env.M4_SHARD_INDEX, 0);
-const _shardTotalRaw = parseShardEnv(process.env.M4_SHARD_TOTAL, 1);
+function readShardEnv(canonical: string, legacy: string, def: number): number {
+  const raw = process.env[canonical] ?? process.env[legacy];
+  if (raw !== undefined && process.env[canonical] === undefined) {
+    console.warn(`[parity-harness] ${legacy} is deprecated, use ${canonical}.`);
+  }
+  return parseShardEnv(raw, def);
+}
+const _shardIndexRaw = readShardEnv('PARITY_SHARD_INDEX', 'M4_SHARD_INDEX', 0);
+const _shardTotalRaw = readShardEnv('PARITY_SHARD_TOTAL', 'M4_SHARD_TOTAL', 1);
 const shardTotal =
   Number.isInteger(_shardTotalRaw) && (_shardTotalRaw as number) >= 1
     ? (_shardTotalRaw as number)
@@ -161,14 +168,16 @@ const shardIndex =
     : 0;
 // Fail-closed validation runs in main(): non-numeric/out-of-range shard env
 // or an empty shard selection is a harness error, never a silent green.
+const _shardIndexEnv = process.env.PARITY_SHARD_INDEX ?? process.env.M4_SHARD_INDEX;
+const _shardTotalEnv = process.env.PARITY_SHARD_TOTAL ?? process.env.M4_SHARD_TOTAL;
 const _shardEnvInvalid =
-  (process.env.M4_SHARD_INDEX !== undefined &&
-    process.env.M4_SHARD_INDEX !== '' &&
+  (_shardIndexEnv !== undefined &&
+    _shardIndexEnv !== '' &&
     (!Number.isInteger(_shardIndexRaw) ||
       (_shardIndexRaw as number) < 0 ||
       (_shardIndexRaw as number) >= shardTotal)) ||
-  (process.env.M4_SHARD_TOTAL !== undefined &&
-    process.env.M4_SHARD_TOTAL !== '' &&
+  (_shardTotalEnv !== undefined &&
+    _shardTotalEnv !== '' &&
     (!Number.isInteger(_shardTotalRaw) || (_shardTotalRaw as number) < 1));
 
 // ---------------------------------------------------------------- corpora
@@ -255,7 +264,7 @@ interface ComparedResponse {
   results: Array<{ index: number; score: number; text: string }>;
   profileId: string;
   scoringVersion: string;
-  cpuAlgorithm: string;
+  cpuScorer: string;
 }
 
 /** Exact-order when under cap, else totalMatches + hasOverflow + score multiset. */
@@ -265,7 +274,7 @@ function compareResponses(a: ComparedResponse, b: ComparedResponse): string | nu
   if (a.hasOverflow !== b.hasOverflow) return `hasOverflow ${a.hasOverflow} vs ${b.hasOverflow}`;
   if (a.profileId !== b.profileId) return `profileId ${a.profileId} vs ${b.profileId}`;
   if (a.scoringVersion !== b.scoringVersion) return `scoringVersion ${a.scoringVersion} vs ${b.scoringVersion}`;
-  if (a.cpuAlgorithm !== b.cpuAlgorithm) return `cpuAlgorithm ${a.cpuAlgorithm} vs ${b.cpuAlgorithm}`;
+  if (a.cpuScorer !== b.cpuScorer) return `cpuScorer ${a.cpuScorer} vs ${b.cpuScorer}`;
   if (!a.hasOverflow) {
     if (a.results.length !== b.results.length) return `results.length ${a.results.length} vs ${b.results.length}`;
     for (let i = 0; i < a.results.length; i++) {
@@ -285,7 +294,7 @@ function compareResponses(a: ComparedResponse, b: ComparedResponse): string | nu
 
 // ---------------------------------------------------------------- main
 async function main(): Promise<void> {
-  console.log('--- M4 differential harness (scripts-only; mock device, browser is release gate) ---');
+  console.log('---  differential harness (scripts-only; mock device, browser is release gate) ---');
   console.log(`shard ${shardIndex}/${shardTotal}, cell timeout ${CELL_TIMEOUT_MS}ms`);
 
   const mockAdapter = createMockAdapter({ features: ['timestamp-query'] as never });
@@ -322,7 +331,7 @@ async function main(): Promise<void> {
 
   // (b) U+03F4 folds via C (not T-only).
   {
-    ok('(b) fold table maps U+03F4->U+03B8', JSON.stringify(foldCodePoint(0x3f4)) === JSON.stringify([0x3b8]));
+    ok('(b) fold table maps U+03F4->U+03B8', JSON.stringify(foldCaseScalar(0x3f4)) === JSON.stringify([0x3b8]));
     ok('(b) folded U+03F4 == theta tokens', tokensEqual(normalizeText(THETA_SYM, true).tokens, normalizeText(THETA, true).tokens));
     ok('(b) NFC-only U+03F4 distinct', !tokensEqual(normalizeText(THETA_SYM, false).tokens, normalizeText(THETA, false).tokens));
   }
@@ -358,7 +367,7 @@ async function main(): Promise<void> {
       const scalars: number[] = [];
       for (const ch of nfc1) {
         const cp = ch.codePointAt(0) as number;
-        const m = foldCodePoint(cp);
+        const m = foldCaseScalar(cp);
         if (m === null) scalars.push(cp);
         else for (const v of m) scalars.push(v);
       }
@@ -390,19 +399,19 @@ async function main(): Promise<void> {
       { score: -2147483648, index: 0 },
       { score: 2147483647, index: 0 },
     ];
-    const sorted = [...wrap].sort(compareParityResults);
+    const sorted = [...wrap].sort(compareExactResults);
     ok(
       '(e) comparator total order at i32 extremes',
       sorted[0]?.index === 0 && sorted[1]?.index === 1 && sorted[2]?.index === 0,
       JSON.stringify(sorted)
     );
     const fs = await import('node:fs/promises');
-    const cpuRef = await fs.readFile(new URL('../packages/webgpu-search/src/cpu-reference.ts', import.meta.url), 'utf8');
+    const cpuRef = await fs.readFile(new URL('../packages/webgpu-search/src/exact-scorer.ts', import.meta.url), 'utf8');
     const codeOnly = cpuRef.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
     const imulHits = (codeOnly.match(/Math\.imul/g) ?? []).length;
-    const cmpBlock = codeOnly.slice(codeOnly.indexOf('export function compareParityResults'));
+    const cmpBlock = codeOnly.slice(codeOnly.indexOf('export function compareExactResults'));
     const cmpBody = cmpBlock.slice(cmpBlock.indexOf('{'), cmpBlock.indexOf('\n}') + 1);
-    // v0.4 M4: 5 = substring start penalty + fuzzy run bonus + fuzzy span
+    // 5 = substring start penalty + fuzzy run bonus + fuzzy span
     // penalty + typo-substring start/distance penalties. Comparator stays
     // imul-free (wrap-free total order).
     ok('(e) Math.imul confined to score formulas', imulHits === 5 && !cmpBody.includes('Math.imul'), `imul x${imulHits}`);
@@ -420,32 +429,32 @@ async function main(): Promise<void> {
   // (g) zero-renorm pack + totalTokens fail-fast + unknown-version throw.
   {
     const pre = [new Uint32Array([5, 6]), new Uint32Array([7])];
-    const p = packUnicodeToGPUBuffer(pre, { folded: true });
+    const p = packDataset(pre, { folded: true });
     ok('(g) Uint32Array[] zero-renorm', p.tokenCount === 3 && p.tokens[2] === 7);
     let tt = false;
     try {
-      packUnicodeToGPUBuffer(pre, { folded: true, totalTokens: 99 });
+      packDataset(pre, { folded: true, totalTokens: 99 });
     } catch (e) {
       tt = e instanceof IncompatibleIndexError;
     }
     ok('(g) totalTokens mismatch fail-fast', tt);
     let uv = false;
     try {
-      packUnicodeToGPUBuffer(['a'], { unicodeVersion: 'nope' });
+      packDataset(['a'], { unicodeVersion: 'nope' });
     } catch (e) {
       uv = e instanceof IncompatibleIndexError;
     }
     ok('(g) unknown version throws at pack-time', uv);
   }
 
-  // (h) U2F2 + CRC32 + cross-realm duck-typing + neutered guard.
+  // (h) dataset + CRC32 + cross-realm duck-typing + neutered guard.
   {
-    const rt = packUnicodeToGPUBuffer(['hello'], { folded: true });
-    const bytes = serializeUnicodeDataset(rt);
-    ok('(h) roundtrip', deserializeUnicodeDataset(bytes).tokenCount === 5);
+    const rt = packDataset(['hello'], { folded: true });
+    const bytes = serializeDataset(rt);
+    ok('(h) roundtrip', deserializeDataset(bytes).tokenCount === 5);
     let neut = false;
     try {
-      deserializeUnicodeDataset(new ArrayBuffer(0));
+      deserializeDataset(new ArrayBuffer(0));
     } catch (e) {
       neut = e instanceof IncompatibleIndexError;
     }
@@ -460,7 +469,7 @@ async function main(): Promise<void> {
     new Uint8Array(xRealmBuf).set(new Uint8Array(bytes));
     let xRealmOk = false;
     try {
-      xRealmOk = deserializeUnicodeDataset(xRealmBuf).tokenCount === 5;
+      xRealmOk = deserializeDataset(xRealmBuf).tokenCount === 5;
     } catch {
       xRealmOk = false;
     }
@@ -468,7 +477,7 @@ async function main(): Promise<void> {
     const xRealmRow = vm.runInNewContext('new Uint32Array([9, 8, 7])') as Uint32Array;
     let xPackOk = false;
     try {
-      xPackOk = packUnicodeToGPUBuffer([xRealmRow], { folded: true }).tokenCount === 3;
+      xPackOk = packDataset([xRealmRow], { folded: true }).tokenCount === 3;
     } catch {
       xPackOk = false;
     }
@@ -610,7 +619,7 @@ async function main(): Promise<void> {
     // field at all (a future warn+record change must add the field AND flip
     // this assert -- no `||` escape).
     ok('echo stats carry no nfcProbedVersion field', !('nfcProbedVersion' in (st as unknown as Record<string, unknown>)));
-    const p = packUnicodeToGPUBuffer(['hello'], { folded: true });
+    const p = packDataset(['hello'], { folded: true });
     ok('echo pack nfcProbedVersion null', p.nfcProbedVersion === null);
     ok('echo scoring/profile versions', st.profileId === 'unicode-default' && st.scoringVersion === 'parity-v1' && st.formatVersion === 2);
     const fs3 = await import('node:fs/promises');
@@ -621,7 +630,7 @@ async function main(): Promise<void> {
     idx.destroy();
   }
 
-  // uFuzzy exclusion proof (M4 gate: never in the differential matrix).
+  // uFuzzy exclusion proof ( gate: never in the differential matrix).
   {
     const idx = await SearchIndex.create(['hello', 'hallo'], { preferGpu: false });
     let conflict = false;
@@ -644,7 +653,7 @@ async function main(): Promise<void> {
     ok(
       'shard env valid',
       false,
-      `M4_SHARD_INDEX=${process.env.M4_SHARD_INDEX ?? ''} M4_SHARD_TOTAL=${process.env.M4_SHARD_TOTAL ?? ''}`
+      `PARITY_SHARD_INDEX=${_shardIndexEnv ?? ''} PARITY_SHARD_TOTAL=${_shardTotalEnv ?? ''}`
     );
     process.exit(1);
   }
@@ -665,12 +674,12 @@ async function main(): Promise<void> {
       const cs = cell.caseSensitive ?? false;
       const idx = await SearchIndex.create(cell.corpus, { preferGpu: false, caseSensitive: cs });
       try {
-        const res = await idx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuAlgorithm: 'parity' });
+        const res = await idx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuScorer: 'exact' });
         if (cellState.timedOut) return;
         const recordTokens = (idx as unknown as { recordTokens: Uint32Array[] }).recordTokens;
-        const folded = (idx as unknown as { folded: boolean }).folded;
+        const folded = (idx as unknown as { normalized?: boolean; folded?: boolean }).normalized ?? (idx as unknown as { folded?: boolean }).folded ?? true;
         const qT = normalizeText(cell.query, folded).tokens;
-        const direct = searchCpuReference(recordTokens, qT, cell.mode, cell.limit, cell.corpus);
+        const direct = scoreExactMatches(recordTokens, qT, cell.mode, cell.limit, cell.corpus);
         const asCompared: ComparedResponse = {
           totalMatches: res.totalMatches,
           candidateCount: res.candidateCount,
@@ -678,7 +687,7 @@ async function main(): Promise<void> {
           results: res.results,
           profileId: res.profileId,
           scoringVersion: res.scoringVersion,
-          cpuAlgorithm: res.cpuAlgorithm,
+          cpuScorer: res.cpuScorer,
         };
         const directCompared: ComparedResponse = {
           totalMatches: direct.totalMatches,
@@ -687,7 +696,7 @@ async function main(): Promise<void> {
           results: direct.results,
           profileId: 'unicode-default',
           scoringVersion: 'parity-v1',
-          cpuAlgorithm: 'parity',
+          cpuScorer: 'exact',
         };
         const drift = compareResponses(asCompared, directCompared);
         // Text enrichment identical at SearchIndex level.
@@ -732,10 +741,10 @@ async function main(): Promise<void> {
     const idx = await SearchIndex.create(items, { preferGpu: false });
     const res = await withTimeout(idx.search('ov-item-', { mode: 'substring', limit: 9000 }), CELL_TIMEOUT_MS, 'overflow');
     const recordTokens = (idx as unknown as { recordTokens: Uint32Array[] }).recordTokens;
-    const direct = searchCpuReference(recordTokens, normalizeText('ov-item-', true).tokens, 'substring', 9000, items);
+    const direct = scoreExactMatches(recordTokens, normalizeText('ov-item-', true).tokens, 'substring', 9000, items);
     const drift = compareResponses(
-      { totalMatches: res.totalMatches, candidateCount: res.candidateCount, hasOverflow: res.hasOverflow, results: res.results, profileId: res.profileId, scoringVersion: res.scoringVersion, cpuAlgorithm: res.cpuAlgorithm },
-      { totalMatches: direct.totalMatches, candidateCount: Math.min(direct.totalMatches, RESULT_LIMIT_MAX), hasOverflow: direct.totalMatches > RESULT_LIMIT_MAX, results: direct.results, profileId: 'unicode-default', scoringVersion: 'parity-v1', cpuAlgorithm: 'parity' }
+      { totalMatches: res.totalMatches, candidateCount: res.candidateCount, hasOverflow: res.hasOverflow, results: res.results, profileId: res.profileId, scoringVersion: res.scoringVersion, cpuScorer: res.cpuScorer },
+      { totalMatches: direct.totalMatches, candidateCount: Math.min(direct.totalMatches, RESULT_LIMIT_MAX), hasOverflow: direct.totalMatches > RESULT_LIMIT_MAX, results: direct.results, profileId: 'unicode-default', scoringVersion: 'parity-v1', cpuScorer: 'exact' }
     );
     ok('overflow multiset scope (9000 > 8192)', drift === null && res.hasOverflow && res.candidateCount === 8192, drift ?? '');
     idx.destroy();
@@ -752,8 +761,8 @@ async function main(): Promise<void> {
     const executing = cGpu.totalMatches === cCpu.totalMatches && cCpu.totalMatches > 0;
     // Echo asserts hold on every path (fallback changes only engine/timings).
     ok(
-      'echo profileId/scoringVersion/cpuAlgorithm identical on GPU path',
-      cGpu.profileId === cCpu.profileId && cGpu.scoringVersion === cCpu.scoringVersion && cGpu.cpuAlgorithm === cCpu.cpuAlgorithm
+      'echo profileId/scoringVersion/cpuScorer identical on GPU path',
+      cGpu.profileId === cCpu.profileId && cGpu.scoringVersion === cCpu.scoringVersion && cGpu.cpuScorer === cCpu.cpuScorer
     );
     if (!executing) {
       pend('gpu-parity cells', `non-executing device (mock GPU total=${cGpu.totalMatches} vs CPU total=${cCpu.totalMatches}); browser subset is the release gate`);
@@ -766,12 +775,12 @@ async function main(): Promise<void> {
             const cpuIdx = await SearchIndex.create(cell.corpus, { preferGpu: false, caseSensitive: cs });
             const gpuIdx = await SearchIndex.create(cell.corpus, { device: mockDevice, preferGpu: true, caseSensitive: cs });
             try {
-              const a = await cpuIdx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuAlgorithm: 'parity' });
-              const b = await gpuIdx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuAlgorithm: 'parity' });
+              const a = await cpuIdx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuScorer: 'exact' });
+              const b = await gpuIdx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuScorer: 'exact' });
               if (gpuState.timedOut) return;
               const drift = compareResponses(
-                { totalMatches: b.totalMatches, candidateCount: b.candidateCount, hasOverflow: b.hasOverflow, results: b.results, profileId: b.profileId, scoringVersion: b.scoringVersion, cpuAlgorithm: b.cpuAlgorithm },
-                { totalMatches: a.totalMatches, candidateCount: a.candidateCount, hasOverflow: a.hasOverflow, results: a.results, profileId: a.profileId, scoringVersion: a.scoringVersion, cpuAlgorithm: a.cpuAlgorithm }
+                { totalMatches: b.totalMatches, candidateCount: b.candidateCount, hasOverflow: b.hasOverflow, results: b.results, profileId: b.profileId, scoringVersion: b.scoringVersion, cpuScorer: b.cpuScorer },
+                { totalMatches: a.totalMatches, candidateCount: a.candidateCount, hasOverflow: a.hasOverflow, results: a.results, profileId: a.profileId, scoringVersion: a.scoringVersion, cpuScorer: a.cpuScorer }
               );
               // Pin the executing path: a silent CPU fallback must not pass
               // as GPU parity. SearchIndex enriches text on both paths, so
@@ -808,8 +817,8 @@ async function main(): Promise<void> {
     // Engine-level token-only text:'' contract (holds vacuously on mock).
     const eng = new WebGPUEngine();
     await eng.init(mockDevice);
-    const packed = packUnicodeToGPUBuffer(['hello', 'world'], { folded: true });
-    await eng.loadDataset(serializeUnicodeDataset(packed));
+    const packed = packDataset(['hello', 'world'], { folded: true });
+    await eng.loadDataset(serializeDataset(packed));
     const er = await eng.search('hello', { mode: 'substring' });
     ok('engine token-only resolves text to empty', er.results.every((r) => r.text === ''));
     eng.destroy();
@@ -818,7 +827,7 @@ async function main(): Promise<void> {
   }
 
   // ============================================================ Part 4: failure injection (delta)
-  console.log('Part 4. Failure injection (delta-only; M3 SS20-24 stay green)');
+  console.log('Part 4. Failure injection (delta-only;  SS20-24 stay green)');
   {
     // Shader-compile throw -> hybrid falls back to CPU with identical semantics.
     const brokenCompile = { ...mockDevice, createShaderModule: () => { throw new Error('injected compile failure'); } } as unknown as GPUDevice;
@@ -953,16 +962,16 @@ async function main(): Promise<void> {
 
     // Context-manager refcount: injected devices never disturb shared state.
     {
-      const { WebGPUContextManager } = await import('../packages/webgpu-search/src/index');
-      const d1 = await WebGPUContextManager.acquireDevice({ device: mockDevice });
-      const d2 = await WebGPUContextManager.acquireDevice({ device: mockDevice });
+      const { GpuDevicePool } = await import('../packages/webgpu-search/src/index');
+      const d1 = await GpuDevicePool.acquireDevice({ device: mockDevice });
+      const d2 = await GpuDevicePool.acquireDevice({ device: mockDevice });
       ok('injected acquire is non-shared', d1 !== null && d2 !== null && d1.isShared === false && d2.isShared === false);
-      WebGPUContextManager.releaseDevice(mockDevice, false);
-      const d3 = await WebGPUContextManager.acquireDevice({ device: mockDevice });
+      GpuDevicePool.releaseDevice(mockDevice, false);
+      const d3 = await GpuDevicePool.acquireDevice({ device: mockDevice });
       ok('non-shared release is a no-op (device still acquirable)', d3 !== null && d3.device === mockDevice);
       // Real subscribe/unsubscribe: the listener set must grow/shrink, double
       // unsubscribe must be safe, and an unsubscribed listener must not fire.
-      const mgr = WebGPUContextManager as unknown as {
+      const mgr = GpuDevicePool as unknown as {
         deviceLostListeners: Set<(reason: string) => void>;
       };
       const sizeBefore = mgr.deviceLostListeners.size;
@@ -974,8 +983,8 @@ async function main(): Promise<void> {
       const listenerB = (): void => {
         firedB = true;
       };
-      const unsubA = WebGPUContextManager.onDeviceLost(listenerA);
-      const unsubB = WebGPUContextManager.onDeviceLost(listenerB);
+      const unsubA = GpuDevicePool.onDeviceLost(listenerA);
+      const unsubB = GpuDevicePool.onDeviceLost(listenerB);
       const grewByTwo = mgr.deviceLostListeners.size === sizeBefore + 2;
       const bothPresent = mgr.deviceLostListeners.has(listenerA) && mgr.deviceLostListeners.has(listenerB);
       unsubA();
@@ -1079,7 +1088,7 @@ async function main(): Promise<void> {
         eng.destroy();
       }
     }
-    // CPU-scan abort (pre-aborted fast path on the parity scorer).
+    // CPU-scan abort (pre-aborted fast path on the exact scorer).
     {
       const idx = await SearchIndex.create(['apple', 'application'], { preferGpu: false });
       const ac = new AbortController();
@@ -1149,11 +1158,11 @@ async function main(): Promise<void> {
       // Legacy buffers without strings/serialized fail fast (no silent repack).
       await send({ type: 'LOAD_DATASET', payload: { recordsBufferData: new ArrayBuffer(16), offsetsBufferData: new ArrayBuffer(16) } });
       const legacy = take('DATASET_LOADED') as Array<{ payload: { error?: string } }>;
-      ok('worker rejects legacy v0.1 buffers explicitly', legacy.length === 1 && typeof legacy[0]?.payload.error === 'string');
+      ok('worker rejects legacy  buffers explicitly', legacy.length === 1 && typeof legacy[0]?.payload.error === 'string');
 
       // Legacy + new fields combo still rejected (no silent clone waste).
-      const comboPacked = packUnicodeToGPUBuffer(['combo'], { folded: true });
-      const comboSer = serializeUnicodeDataset(comboPacked);
+      const comboPacked = packDataset(['combo'], { folded: true });
+      const comboSer = serializeDataset(comboPacked);
       await send({
         type: 'LOAD_DATASET',
         payload: { strings: ['combo'], serialized: comboSer, recordsBufferData: new ArrayBuffer(16) },
@@ -1183,13 +1192,13 @@ async function main(): Promise<void> {
       const genAfterStrings = (loaded[0] as { payload: { datasetGeneration: number } }).payload.datasetGeneration;
 
       // Serialized path carries generation; state only commits on success.
-      const packed = packUnicodeToGPUBuffer(['alpha', 'beta'], { folded: true });
-      const serialized = serializeUnicodeDataset(packed);
+      const packed = packDataset(['alpha', 'beta'], { folded: true });
+      const serialized = serializeDataset(packed);
       await send({ type: 'LOAD_DATASET', payload: { strings: ['alpha', 'beta'], serialized } });
       const sloaded = take('DATASET_LOADED') as Array<{
         payload: { size: number; error?: string; serializedBytes: number; datasetGeneration: number };
       }>;
-      ok('worker serialized LOAD_DATASET (U2F2)', sloaded.length === 1 && sloaded[0]?.payload.size === 2 && sloaded[0]?.payload.serializedBytes === serialized.byteLength);
+      ok('worker serialized LOAD_DATASET (dataset)', sloaded.length === 1 && sloaded[0]?.payload.size === 2 && sloaded[0]?.payload.serializedBytes === serialized.byteLength);
       const genAfterSerialized = (sloaded[0] as { payload: { datasetGeneration: number } }).payload.datasetGeneration;
       ok('worker dataset generation advances on commit', genAfterSerialized !== genAfterStrings);
 
@@ -1238,7 +1247,7 @@ async function main(): Promise<void> {
   }
 
   // ---------------------------------------------------------------- report
-  console.log(`\n--- M4 harness: ${passed} passed, ${failed} failed, ${pending} pending-hardware ---`);
+  console.log(`\n---  harness: ${passed} passed, ${failed} failed, ${pending} pending-hardware ---`);
   if (pendingNotes.length > 0) {
     console.log('pending-hardware slots (require browser GPU, release-gated by test-regression.ts):');
     for (const n of pendingNotes) console.log(`   - ${n}`);

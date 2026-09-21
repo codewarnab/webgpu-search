@@ -1,40 +1,46 @@
 // High-Level Primary API
-export { SearchIndex } from './hybrid-index';
+export { SearchIndex } from './search-index';
 export { DocumentIndex, assertSnapshotFilterGettersSatisfied } from './document-index';
-export { SearchWorkerClient, INTERNAL_WORKER_ID_KEY } from './worker/worker-client';
+export { SearchWorkerClient } from './worker/worker-client';
 
 
 // Low-Level Engines & Hardware Utilities for Power Users & Benchmarks
 export { WebGPUEngine, type DatasetLike, type EngineDataset, type ColdSearchResult, type WebGPUSearchResult, type SearchResult } from './webgpu-engine';
 export { CPUEngine, type CPUSearchResult } from './cpu-engine';
-export { WebGPUContextManager, type AcquiredDeviceContext } from './context-manager';
+export { GpuDevicePool, WebGPUContextManager, type AcquiredDeviceContext } from './gpu-device-pool';
 export {
   packStringsToGPUBuffer,
   sanitizeStringForSlot,
+  sanitizeString,
+  packDataset,
   packUnicodeToGPUBuffer,
+  serializeDataset,
   serializeUnicodeDataset,
+  deserializeDataset,
   deserializeUnicodeDataset,
   validatePackedOffsets,
   crc32Parts,
   checkMemoryBudget,
   computeClampedHeadroomBytes,
   type PackedGPUBuffer,
+  type PackedDataset,
   type PackedUnicodeBufferV2,
+  type DatasetPackOptions,
   type UnicodePackOptions,
   type MemoryBudgetCheck,
   type ClampedHeadroomOptions
-} from './buffer';
+} from './dataset-packing';
 
 // Unified Types
 export type * from './types';
 
-// v0.2 Unicode text profile (versions, errors, caps)
+// Unicode text profile (versions, errors, caps)
 export {
-  FORMAT_VERSION,
+  DATASET_FORMAT_VERSION,
+  DATASET_MAGIC,
   QUERY_TOKENS_MAX,
   RESULT_LIMIT_MAX,
   SCORING_VERSION,
-  SERIALIZED_MAGIC,
   UNICODE_VERSION,
   PROFILE_TO_ENUM,
   ENUM_TO_PROFILE,
@@ -43,26 +49,37 @@ export {
   SCORING_TO_ENUM,
   ENUM_TO_SCORING,
   countUnicodeCodePoints,
+  normalizeCpuScorer,
   IncompatibleIndexError,
   IncompatibleOptionError,
   ProfileMismatchError,
   QueryTooLongError,
+  DuplicateIdError,
+  DocumentNotFoundError,
+  SNAPSHOT_FORMAT_VERSION,
+  SNAPSHOT_MAGIC,
+  SNAPSHOT_HEADER_BYTES,
+  LEGACY_SNAPSHOT_VERSION,
+  LEGACY_SNAPSHOT_MAGIC,
+  LEGACY_SNAPSHOT_HEADER_BYTES,
+  // Deprecated aliases (removal in next major)
+  FORMAT_VERSION,
+  SERIALIZED_MAGIC,
   DOC_FORMAT_VERSION,
   SERIALIZED_DOC_MAGIC,
   SERIALIZED_DOC_HEADER_BYTES,
-  DuplicateIdError,
-  DocumentNotFoundError,
-  U2D4_MAGIC,
-  U2D4_FORMAT_VERSION,
-  FORMAT_VERSION_4,
-  DOC_FORMAT_VERSION_4,
-  U2D4_HEADER_BYTES,
+  U2D4_MAGIC, // deprecated alias for SNAPSHOT_MAGIC
+  U2D4_FORMAT_VERSION, // deprecated alias
+  FORMAT_VERSION_4, // deprecated alias
+  DOC_FORMAT_VERSION_4, // deprecated alias
+  U2D4_HEADER_BYTES, // deprecated alias
+  type CpuScorer,
   type CpuAlgorithm,
   type OnQueryTooLong,
   type TextProfileId,
 } from './text-profile';
 
-// v0.4 Error hierarchy
+// Error hierarchy
 export {
   WebGPUSearchError,
   IncompatibleHookError,
@@ -70,12 +87,12 @@ export {
   InvalidFilterError
 } from './errors';
 
-// v0.4 Structured filtering & columnar metadata (M2)
-export { DocumentBitset } from './filter/bitset';
-export { ColumnarStore, type ColumnarStoreOptions } from './filter/columnar-store';
-export { compileFilter } from './filter/filter-evaluator';
+// Structured filtering & columnar metadata
+export { DocumentBitset } from './filtering/doc-bitset';
+export { ColumnarStore, type ColumnarStoreOptions } from './filtering/columnar-store';
+export { compileFilter } from './filtering/compile-filter';
 
-// v0.4 Facet aggregation engine (M3)
+// Facet aggregation engine
 export {
   FacetEngine,
   normalizeFacetRequests,
@@ -85,9 +102,9 @@ export {
   MAX_FACET_REQUESTS,
   MAX_RANGE_BUCKETS,
   type NormalizedFacet,
-} from './facets/facet-engine';
+} from './faceting/facet-engine';
 
-// v0.4 Deterministic ranking & autocomplete primitives (M5)
+// Deterministic ranking & autocomplete primitives
 export {
   DEFAULT_TIE_BREAKERS,
   compareIdsAsc,
@@ -98,16 +115,24 @@ export {
   type RankableCandidate,
 } from './ranking';
 export {
+  AUTOCOMPLETE_DEFAULT_LIMIT,
+  AUTOCOMPLETE_DEFAULT_MODE,
+  AUTOCOMPLETE_MAX_FUZZY_DISTANCE,
+  normalizeAutocompleteOptions,
   SUGGEST_DEFAULT_LIMIT,
   SUGGEST_DEFAULT_MODE,
   SUGGEST_MAX_FUZZY_DISTANCE,
   normalizeSuggestOptions,
+  type NormalizedAutocompleteOptions,
   type NormalizedSuggestOptions,
   type SuggestCandidateKeys,
-} from './suggest';
+} from './autocomplete';
 
-// v0.4 Query diagnostics, cost budgets & broad-query safeguards (M7)
+// Query diagnostics, cost budgets & broad-search safeguards
 export {
+  BROAD_SEARCH_SELECTIVITY_THRESHOLD,
+  BROAD_SEARCH_MIN_DOCS,
+  BROAD_SEARCH_SHORT_QUERY_TOKENS,
   BROAD_QUERY_SELECTIVITY_THRESHOLD,
   BROAD_QUERY_MIN_DOCS,
   BROAD_QUERY_SHORT_QUERY_TOKENS,
@@ -125,10 +150,11 @@ export {
   type CandidateOverflowWarningOptions,
 } from './diagnostics';
 
-// v0.4 Extensibility pipeline & safe hook architecture (M6)
+// Extensibility pipeline & safe hook architecture
 export {
   defaultTokenizer,
   codeTokenizer,
+  normalizeSearchHooks,
   normalizeSearchExtensionHooks,
   resolveEffectiveHooks,
   hasAnyHook,
@@ -140,9 +166,9 @@ export {
   applyScoringHook,
   applyPostProcess,
   type CodeTokenizerOptions,
-} from './extensions';
+} from './hooks';
 
-// v0.2 shared preprocessing + CPU reference (M2)
+// Shared preprocessing + exact scorer
 export {
   normalizeText,
   toWellFormedSafe,
@@ -150,7 +176,7 @@ export {
   LONE_SURROGATE_PATTERN,
   LONE_SURROGATE_SOURCE,
   type NormalizedText,
-} from './unicode-preprocess';
+} from './text-normalization';
 export {
   clampLimit,
   DEFAULT_LIMIT,
@@ -159,8 +185,8 @@ export {
   throwIfAborted,
   isAsciiTokens,
   isPrintableAsciiTokens,
-} from './runtime-guards';
-// v0.4 Token & prefix search modes with bounded typo tolerance (M4)
+} from './guard';
+// Token & prefix search with bounded typo tolerance
 export {
   damerauLevenshteinBounded,
   damerauLevenshteinBoundedRange,
@@ -174,7 +200,7 @@ export {
   DEFAULT_PREFIX_EXACT_LENGTH,
   type NormalizedTypoOptions,
   type TypoWindowMatch,
-} from './modes/typo-distance';
+} from './search/typo-tolerance';
 export {
   isTokenDelimiter,
   splitQueryTerms,
@@ -182,40 +208,51 @@ export {
   scoreTokenTokens,
   type NormalizedTokenMatchOptions,
   type TokenMatchResult,
-} from './modes/token-search';
+} from './search/token-search';
 export {
   normalizePrefixOptions,
   assertPrefixLengthForQuery,
   scorePrefixTokens,
   type NormalizedPrefixOptions,
   type PrefixMatchResult,
-} from './modes/prefix-search';
+} from './search/prefix-search';
 export {
+  compareExactResults,
   compareParityResults,
   scoreFuzzyTokens,
   scoreSubstringTokens,
   scoreSubstringTypoTokens,
+  scoreExactMatches,
   searchCpuReference,
+  scoreExactMatchesMultiField,
   searchMultiFieldCpuReference,
   WORD_BOUNDARY_PREV,
   type CpuModeOptions,
+  type ExactScorerOutput,
   type CpuReferenceOutput,
   type MultiFieldHit,
   type MultiFieldMatch,
+  type MultiFieldExactScorerOutput,
   type MultiFieldCpuReferenceOutput,
   type MultiFieldRankingOptions,
   type FieldScoreDefinition,
-} from './cpu-reference';
+} from './exact-scorer';
 export {
+  CASE_FOLD_RANGES,
+  CASE_FOLD_EXPANSIONS,
+  CASE_FOLD_C_COUNT,
+  CASE_FOLD_F_COUNT,
+  CASE_FOLD_UNICODE_VERSION,
+  foldCaseScalar,
   FOLD_EXPANSIONS,
   FOLD_RANGES,
   FOLD_C_COUNT,
   FOLD_F_COUNT,
   FOLD_UNICODE_VERSION,
   foldCodePoint,
-} from './fold-table';
+} from './case-fold-table';
 
-// v0.3 Unicode-safe highlighting engine (M3)
+// Unicode-safe highlighting engine
 export {
   alignHighlights,
   normalizeWithSourceMap,
@@ -227,7 +264,7 @@ export {
   type RenderHighlightOptions,
 } from './highlight';
 
-// v0.3 First-party worker client & dedicated worker (M5)
+// First-party worker client & dedicated worker
 export {
   startSearchWorker,
   isDedicatedWorker,
@@ -244,11 +281,15 @@ export {
   type WorkerAbortPayload,
 } from './worker/protocol';
 
-// v0.3 Versioned snapshot persistence & IndexedDB storage (M6)
+// Versioned snapshot persistence & IndexedDB storage
 export {
+  encodeSnapshot,
   serializeDocumentIndex,
+  decodeSnapshot,
   deserializeDocumentSnapshot,
+  decodeSnapshotHeader,
   deserializeDocumentSnapshotHeader,
+  restoreSnapshot,
   restoreDocumentIndex,
   encodeColumnarPayload,
   validateColumnarPayload,
@@ -259,7 +300,7 @@ export {
   MAX_SNAPSHOT_DOC_COUNT,
   MAX_SNAPSHOT_TOKEN_COUNT,
   type RestoredDocumentSnapshot,
-} from './persistence';
+} from './snapshot-codec';
 export {
   DEFAULT_IDB_DATABASE_NAME,
   DEFAULT_SNAPSHOT_STORE_NAME,
@@ -270,7 +311,4 @@ export {
   loadIndexFromIDB,
   deleteIndexFromIDB,
   restoreIndexFromIDB,
-} from './idb-storage';
-
-
-
+} from './snapshot-idb';

@@ -4,9 +4,9 @@
 [![npm version](https://img.shields.io/npm/v/webgpu-search.svg)](https://www.npmjs.com/package/webgpu-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An ultra-fast hybrid fuzzy and substring search engine powered by parallel **WebGPU compute shaders (WGSL)** on retained VRAM, backed by a bit-exact **CPU parity reference scorer** and opt-in **uFuzzy**, with Web Worker offloading that keeps search work completely off the main thread.
+An ultra-fast fuzzy and substring search engine powered by parallel **WebGPU compute shaders (WGSL)** on retained VRAM, backed by a bit-exact **CPU exact scorer** and opt-in **uFuzzy**, with Web Worker offloading that keeps search work completely off the main thread.
 
-> 🚨 **Upgrading to v0.2?** v0.2 is a breaking release that replaces legacy byte-sliced ASCII matching with a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, `U2F2` container). Every v0.1 index must be rebuilt. See the [**v0.2 Migration Guide (`docs/migration-v0.2.md`)**](./docs/migration-v0.2.md).
+> ℹ️ **Text pipeline:** every string is normalized through a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, dataset container). See [`docs/text-normalization.md`](./docs/text-normalization.md) and [`docs/snapshot-format.md`](./docs/snapshot-format.md).
 
 👉 **[Live Interactive Benchmark & Playground](https://webgpu-fuzzy-search.vercel.app)**
 
@@ -14,7 +14,7 @@ An ultra-fast hybrid fuzzy and substring search engine powered by parallel **Web
 
 ## ⚡ Monorepo Structure
 
-- **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, `U2F2` binary serialization, and SSR/Worker-safe memory primitives.
+- **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, dataset binary serialization, and SSR/Worker-safe memory primitives.
 - **[`apps/benchmark`](./apps/benchmark)**: Interactive evaluation dashboard and live test suite comparing WebGPU compute against CPU algorithms across 10,000 to 2,000,000+ records across multiple script corpora (ASCII, CJK, and Emoji).
 
 ---
@@ -84,19 +84,19 @@ index.destroy();
 import {
   WebGPUEngine,
   CPUEngine,
-  packUnicodeToGPUBuffer,
-  serializeUnicodeDataset,
-  deserializeUnicodeDataset
+  packDataset,
+  serializeDataset,
+  deserializeDataset
 } from 'webgpu-search';
 
 // 1. Pack strings into normalized u32 Unicode scalar tokens
-const packed = packUnicodeToGPUBuffer(rawStrings, { folded: true });
+const packed = packDataset(rawStrings, { normalized: true });
 
-// 2. Serialize into U2F2 binary container (magic 0x55324632 + CRC32 checksum)
-const buffer: ArrayBuffer = serializeUnicodeDataset(packed);
+// 2. Serialize into the dataset binary container (magic 0x55324632 + CRC32 checksum)
+const buffer: ArrayBuffer = serializeDataset(packed);
 
 // 3. Restore and validate with fail-closed integrity checks
-const restored = deserializeUnicodeDataset(buffer);
+const restored = deserializeDataset(buffer);
 
 // 4. Load directly into WebGPU compute engine
 const gpu = new WebGPUEngine();
@@ -115,11 +115,11 @@ gpu.destroy();
 Below are benchmark results generated via the automated browser benchmark runner (`bun run test:benchmark`).
 
 > **⚠️ Hardware Qualification Notice**:
-> The automated suite runs in headless Chromium using software Vulkan (`Google SwiftShader / LLVMpipe`) in containerized environments. Cells below are explicitly qualified as **`pending-hardware`** per [`docs/unicode-contract.md`](./docs/unicode-contract.md) §5. On physical dedicated GPUs (NVIDIA RTX, Apple Silicon Metal, Intel Iris Xe), GPU compute times are dramatically faster due to hardware memory bandwidth and parallel execution units.
+> The automated suite runs in headless Chromium using software Vulkan (`Google SwiftShader / LLVMpipe`) in containerized environments. Cells below are explicitly qualified as **`pending-hardware`** per [`docs/text-normalization.md`](./docs/text-normalization.md) §5. On physical dedicated GPUs (NVIDIA RTX, Apple Silicon Metal, Intel Iris Xe), GPU compute times are dramatically faster due to hardware memory bandwidth and parallel execution units.
 
 ### 1. Exact Substring Benchmark Matrix
 
-| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Parity (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
+| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Exact (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
 |---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **10,000** | ASCII | 1.71 MB | 8.50 / 10.18 ms | 1.50 / 1.60 ms | 1.70 ms | 1.10 ms | pending-hardware |
 | **100,000** | ASCII | 16.88 MB | 32.60 / 36.70 ms | 15.00 / 16.18 ms | 15.80 ms | 11.40 ms | pending-hardware |
@@ -132,7 +132,7 @@ Below are benchmark results generated via the automated browser benchmark runner
 
 ### 2. Fuzzy Subsequence Benchmark Matrix
 
-| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Parity (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
+| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Exact (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
 |---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 | **10,000** | ASCII | 1.71 MB | 9.00 / 9.40 ms | 1.60 / 3.38 ms | 1.60 ms | 1.10 ms | pending-hardware |
 | **100,000** | ASCII | 16.88 MB | 58.00 / 63.46 ms | 16.10 / 34.22 ms | 15.40 ms | 10.70 ms | pending-hardware |
@@ -150,9 +150,9 @@ Below are benchmark results generated via the automated browser benchmark runner
 - **Retained VRAM**: When dataset storage buffers are pre-loaded once into GPU VRAM, subsequent keystrokes only upload a **32-byte uniform header** and a **512-byte persistent storage query buffer** (up to 128 `u32` code points).
 
 ### 2. Candidate Compaction & Deterministic Sorting
-- WebGPU buffer readbacks have an inherent synchronization floor (~1ms to 3ms). Below 30,000 records, CPU parity completes in <2ms, making CPU faster at small scales.
+- WebGPU buffer readbacks have an inherent synchronization floor (~1ms to 3ms). Below 30,000 records, the CPU exact scorer completes in <2ms, making CPU faster at small scales.
 - **Candidate Pool Compaction**: The WGSL compute shaders write up to **8,192 scored candidate matches** (`{ index: u32, score: i32 }`) into a compact 65,544-byte output buffer using atomic counters (`atomicAdd(&out.count, 1u)`).
-- **Strict Deterministic Tie-Breaking**: Both WebGPU readback and CPU reference fallback sort matches by `(score DESC, index ASC)` using signed 32-bit integer arithmetic. When `hasOverflow === false`, result rankings and scores are bit-exact identical between WebGPU and CPU.
+- **Strict Deterministic Tie-Breaking**: Both WebGPU readback and CPU exact fallback sort matches by `(score DESC, index ASC)` using signed 32-bit integer arithmetic. When `hasOverflow === false`, result rankings and scores are bit-exact identical between WebGPU and CPU.
 
 ### 3. Web Worker Offloading and String-Isolated Enrichment
 Searching millions of records directly on the browser main thread can cause frame drops and UI freezes.
@@ -173,7 +173,7 @@ bun run check:shaders
 bun run typecheck
 
 # 3. Execute in-memory headless unit tests (25/25 suites via vgpu/mock)
-bun run test:mock
+bun run test:headless
 
 # 4. Execute differential parity suite (117 assertions comparing CPU and GPU contracts)
 bun run test:parity
@@ -184,16 +184,17 @@ bun run test:browser
 # 6. Execute full multi-corpus benchmark suite in headless Chrome
 bun run test:benchmark -- --fast
 
-# 7. Verify bundle size budget (dist/index.js <= 22.5 KB gzip)
-bun run check:bundle
+# 7. Verify bundle size budget
+bun run check:bundle-size
 ```
 
 ---
 
 ## 📄 Documentation
 
-- [**v0.2 Migration Guide**](./docs/migration-v0.2.md): Breaking changes, `U2F2` format, migration snippets, and semantic disclaimers.
-- [**Unicode Contract (`docs/unicode-contract.md`)**](./docs/unicode-contract.md): Normative specification for preprocessing pipeline, version caps, delimiter sets, and scoring formulas.
+- [**Snapshot format (`docs/snapshot-format.md`)**](./docs/snapshot-format.md): Versioned binary persistence, compatibility, and IndexedDB notes.
+- [**Text normalization (`docs/text-normalization.md`)**](./docs/text-normalization.md): Normative specification for preprocessing pipeline, version caps, delimiter sets, and scoring formulas.
+- [**Naming conventions (`docs/naming-conventions.md`)**](./docs/naming-conventions.md): Domain-first naming rules enforced by `lint:naming`.
 
 ---
 

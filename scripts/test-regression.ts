@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer-core';
 import path from 'path';
 import fs from 'fs';
-import { normalizeText, searchCpuReference } from '../packages/webgpu-search/src/index';
+import { normalizeText, scoreExactMatches } from '../packages/webgpu-search/src/index';
 import {
     getChromeExecutablePath,
     getChromeLaunchArgs,
@@ -82,8 +82,8 @@ async function main() {
             // 2. Test: Candidate collection across >1000 items with late high-scoring matches
             // Generate synthetic dataset of 3,000 variable-length items where
             // items 1200..1249 start with the query (highest substring score).
-            // M3: variable-length u32 packing -- plain strings in, the engine
-            // normalizes to post-fold tokens (no 59-char truncation, no slots).
+            // : variable-length u32 packing -- plain strings in, the engine
+            // normalizes to post-normalization tokens (no 59-char truncation, no slots).
             const count = 3000;
             const strings = new Array<string>(count);
 
@@ -164,9 +164,9 @@ async function main() {
             return { success: true, results };
         });
 
-        // 5. Test: M4 CPU/GPU differential parity on real hardware (per-PR browser
+        // 5. Test: CPU/GPU differential parity on real hardware (per-PR browser
         // gate in CI + release gate). Node computes the parity reference over
-        // the same post-fold tokens; the page executes WGSL. Exact ordered
+        // the same post-normalization tokens; the page executes WGSL. Exact ordered
         // (index,score) + text parity asserted (small corpora, never
         // overflow). Same-host only: the oracle runs in Bun/Node while the
         // subject runs in Chrome, so this assumes Bun ICU and Chrome ICU
@@ -202,7 +202,7 @@ async function main() {
         // instead of a clear gate failure.
         if (!(testResults as any).success) {
             (testResults as any).results.push({
-                name: 'M4 parity (skipped: WebGPU engine not ready)',
+                name: ' parity (skipped: WebGPU engine not ready)',
                 passed: false,
                 details: testResults
             });
@@ -225,12 +225,12 @@ async function main() {
             }, { strings: parityStrings, cells: parityCells });
             const gpuParityOut = await Promise.race([
                 parityEvaluate,
-                new Promise<never>((_, rej) => setTimeout(() => rej(new Error('M4 parity browser evaluate timed out after 120s')), PARITY_TIMEOUT_MS)),
+                new Promise<never>((_, rej) => setTimeout(() => rej(new Error(' parity browser evaluate timed out after 120s')), PARITY_TIMEOUT_MS)),
             ]);
             if ((testResults as any).success && Array.isArray((testResults as any).results)) {
                 parityCells.forEach((cell, ci) => {
                     const qT = normalizeText(cell.query, true).tokens;
-                    const expected = searchCpuReference(recordTokens, qT, cell.mode, cell.limit, parityStrings);
+                    const expected = scoreExactMatches(recordTokens, qT, cell.mode, cell.limit, parityStrings);
                     const got = (gpuParityOut as any[])[ci];
                     // Small corpora: never overflow, so candidateCount must
                     // equal totalMatches (matches the mock-harness contract
@@ -251,7 +251,7 @@ async function main() {
                         }
                     }
                     (testResults as any).results.push({
-                        name: `M4 parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
+                        name: ` parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
                         passed: pass,
                         details: { totalMatches: got.totalMatches, candidateCount: got.candidateCount, expected: expected.totalMatches }
                     });

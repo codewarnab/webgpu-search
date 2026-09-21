@@ -56,7 +56,7 @@ export class PaletteEngine {
     { name: 'description', weight: 0.5 }
   ];
 
-  /** v0.4 M8: columnar filter attributes enabling structured type/language filters + type facets. */
+  /** columnar filter attributes enabling structured type/language filters + type facets. */
   private readonly filterFieldDefs = [
     { name: 'type', type: 'string' as const },
     { name: 'language', type: 'string' as const }
@@ -158,7 +158,7 @@ export class PaletteEngine {
   }
 
   /**
-   * v0.4 M8: structured type/language pre-filtering via columnar bitsets,
+   * structured type/language pre-filtering via columnar bitsets,
    * native 'prefix' symbol search, and autocomplete suggestions.
    */
   buildFilter(typeFilter?: string, languageFilter?: string): FilterExpression | undefined {

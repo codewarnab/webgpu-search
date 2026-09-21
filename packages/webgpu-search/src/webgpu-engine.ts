@@ -1,17 +1,17 @@
 import SUBSTRING_WGSL from './shaders/substring.wgsl';
 import FUZZY_WGSL from './shaders/fuzzy.wgsl';
-import { WebGPUContextManager } from './context-manager';
+import { GpuDevicePool } from './gpu-device-pool';
 import {
   checkMemoryBudget,
   computeClampedHeadroomBytes,
-  deserializeUnicodeDataset,
-  packUnicodeToGPUBuffer,
+  deserializeDataset,
+  packDataset,
   validatePackedOffsets,
-  type PackedUnicodeBufferV2,
-} from './buffer';
-import { normalizeText } from './unicode-preprocess';
-import { compareParityResults } from './cpu-reference';
-import { clampLimit, nowMs, throwIfAborted, abortError } from './runtime-guards';
+  type PackedDataset,
+} from './dataset-packing';
+import { normalizeText } from './text-normalization';
+import { compareExactResults } from './exact-scorer';
+import { clampLimit, nowMs, throwIfAborted, abortError } from './guard';
 import {
   PROFILE_TO_ENUM,
   QUERY_TOKENS_MAX,
@@ -24,7 +24,7 @@ import {
   ProfileMismatchError,
   QueryTooLongError,
 } from './text-profile';
-import { normalizeTypoTolerance } from './modes/typo-distance';
+import { normalizeTypoTolerance } from './search/typo-tolerance';
 import type { AdapterInfo, SearchOptions, SearchResultItem, SearchTimings, SearchMode } from './types';
 
 const BufferUsage = (typeof globalThis !== 'undefined' && 'GPUBufferUsage' in globalThis ? (globalThis as any).GPUBufferUsage : {
@@ -46,28 +46,28 @@ const MapMode = (typeof globalThis !== 'undefined' && 'GPUMapMode' in globalThis
 });
 
 export interface DatasetLike {
-  // `strings?` optional: hybrid enriches `text` from its own `items`, so
+  // `strings?` optional: search-index enriches `text` from its own `items`, so
   // forcing strings through the engine duplicates the corpus. Token-only
   // datasets resolve `text` to `''` (documented). Rejected: strings-required
   // (2x residency), placeholder synthesis (dishonest). `string[]` overload
   // routes via `normalizeText` — single code path, no legacy sanitizer.
   size: number;
   strings?: string[];
-  /** @deprecated v0.2: ignored when `strings` is present, rejected otherwise. Use PackedUnicodeBufferV2. Removal in v0.3. */
+  /** @deprecated Ignored when `strings` is present, rejected otherwise. Use PackedDataset. */
   recordsBufferData?: ArrayBuffer;
-  /** @deprecated v0.2: see recordsBufferData. */
+  /** @deprecated See recordsBufferData. */
   recordsByteLength?: number;
-  /** @deprecated v0.2: see recordsBufferData. */
+  /** @deprecated See recordsBufferData. */
   offsetsBufferData?: ArrayBuffer;
-  /** @deprecated v0.2: see recordsBufferData. */
+  /** @deprecated See recordsBufferData. */
   offsetsByteLength?: number;
-  /** @deprecated v0.2: legacy v0.1 shape, always rejected. */
+  /** @deprecated Legacy shape, always rejected. */
   gpuBufferData?: ArrayBuffer;
-  /** @deprecated v0.2: legacy v0.1 shape, always rejected. */
+  /** @deprecated Legacy shape, always rejected. */
   byteLength?: number;
 }
 
-export type EngineDataset = PackedUnicodeBufferV2 | ArrayBuffer | DatasetLike | string[];
+export type EngineDataset = PackedDataset | ArrayBuffer | DatasetLike | string[];
 
 export interface WebGPUSearchResult {
   query: string;
@@ -108,7 +108,7 @@ export class WebGPUEngine {
   private currentStrings: string[] | null = null;
   private currentTokens: Uint32Array | null = null;
   private currentOffsets: Uint32Array | null = null;
-  private folded: boolean = true;
+  private normalized: boolean = true;
   private profileId: string = 'unicode-default';
   private unicodeVersion: string = UNICODE_VERSION;
   private scoringVersion: string = SCORING_VERSION;
@@ -183,7 +183,7 @@ export class WebGPUEngine {
       return await this.setupPipelinesAndBuffers();
     }
 
-    const acquired = await WebGPUContextManager.acquireDevice();
+    const acquired = await GpuDevicePool.acquireDevice();
     if (!acquired) {
       return false;
     }
@@ -213,7 +213,7 @@ export class WebGPUEngine {
       if (this.device !== null && !this.deviceReleased) {
         this.deviceReleased = true;
         try {
-          WebGPUContextManager.releaseDevice(this.device, this.isSharedDevice);
+          GpuDevicePool.releaseDevice(this.device, this.isSharedDevice);
         } catch {}
       }
       this.device = null;
@@ -391,17 +391,17 @@ export class WebGPUEngine {
     return this.queued(() => this.loadDatasetInternal(dataset, options));
   }
 
-  private resolvePacked(dataset: EngineDataset): { packed: PackedUnicodeBufferV2; strings: string[] | null } {
+  private resolvePacked(dataset: EngineDataset): { packed: PackedDataset; strings: string[] | null } {
     if (Array.isArray(dataset)) {
       const arr = dataset as unknown[];
       if (arr.length === 0 || typeof arr[0] === 'string') {
-        const packed = packUnicodeToGPUBuffer(arr as string[], { folded: this.folded });
+        const packed = packDataset(arr as string[], { normalized: this.normalized });
         return { packed, strings: (arr as string[]).slice() };
       }
-      // Symmetric with packUnicodeToGPUBuffer: pre-tokenized Uint32Array[]
+      // Symmetric with packDataset: pre-tokenized Uint32Array[]
       // takes the zero-renorm path (previously rejected here).
       if (arr[0] instanceof Uint32Array || (typeof (arr[0] as any)?.length === 'number' && typeof (arr[0] as any)?.set === 'function')) {
-        const packed = packUnicodeToGPUBuffer(arr as unknown as Uint32Array[], { folded: this.folded });
+        const packed = packDataset(arr as unknown as Uint32Array[], { normalized: this.normalized });
         return { packed, strings: null };
       }
       throw new TypeError('[webgpu-search] loadDataset expects string[] or Uint32Array[].');
@@ -410,7 +410,7 @@ export class WebGPUEngine {
     // Node Buffer-backed views: accept byteLength+slice instead of instanceof.
     const asBuf = dataset as unknown as { byteLength?: unknown; slice?: unknown };
     if (typeof asBuf?.byteLength === 'number' && typeof asBuf?.slice === 'function' && !(dataset as any).tokens) {
-      const packed = deserializeUnicodeDataset(dataset as unknown as ArrayBuffer);
+      const packed = deserializeDataset(dataset as unknown as ArrayBuffer);
       return { packed, strings: null };
     }
     const d = dataset as unknown as Record<string, unknown>;
@@ -420,10 +420,10 @@ export class WebGPUEngine {
       v instanceof Uint32Array || (typeof (v as any)?.length === 'number' && (v as any)?.constructor?.name === 'Uint32Array');
     if (isU32View(tokensLike) && isU32View(offsetsLike) && typeof d['rowCount'] === 'number') {
       // Fail-closed: run the same monotonicity + terminal + bounds loop as
-      // deserializeUnicodeDataset. Interior entries are NOT trusted — a
+      // deserializeDataset. Interior entries are NOT trusted — a
       // crafted offsets array would otherwise underflow (t1-t0 wraps u32)
       // and hang the dispatch / OOB-read in WGSL.
-      const packed = d as unknown as PackedUnicodeBufferV2;
+      const packed = d as unknown as PackedDataset;
       const rc = packed.rowCount;
       const tc = packed.tokenCount;
       if (!Number.isInteger(rc) || !Number.isInteger(tc) || rc < 0 || tc < 0) {
@@ -449,11 +449,11 @@ export class WebGPUEngine {
       if (typeof size === 'number' && size !== strings.length) {
         throw new IncompatibleIndexError(strings.length, size);
       }
-      const packed = packUnicodeToGPUBuffer(strings, { folded: this.folded });
+      const packed = packDataset(strings, { normalized: this.normalized });
       return { packed, strings };
     }
-    // Legacy v0.1 byte buffers carry no U2F2 magic — fail closed, rebuild.
-    const actual = typeof d['byteLength'] === 'number' ? d['byteLength'] : (d['size'] ?? 'legacy-v0.1');
+    // Legacy byte buffers carry no dataset magic — fail closed, rebuild.
+    const actual = typeof d['byteLength'] === 'number' ? d['byteLength'] : (d['size'] ?? 'legacy');
     throw new IncompatibleIndexError(0x55324632, actual);
   }
 
@@ -472,7 +472,7 @@ export class WebGPUEngine {
       strings: this.currentStrings,
       tokens: this.currentTokens,
       offsets: this.currentOffsets,
-      folded: this.folded,
+      normalized: this.normalized,
       profileId: this.profileId,
       unicodeVersion: this.unicodeVersion,
       scoringVersion: this.scoringVersion,
@@ -481,7 +481,7 @@ export class WebGPUEngine {
     this.currentStrings = strings;
     this.currentTokens = packed.tokens;
     this.currentOffsets = packed.offsets;
-    this.folded = packed.folded;
+    this.normalized = packed.normalized ?? packed.folded;
     this.profileId = packed.profileId;
     this.unicodeVersion = packed.unicodeVersion;
     this.scoringVersion = packed.scoringVersion;
@@ -490,9 +490,9 @@ export class WebGPUEngine {
       return { uploadTimeMs: 0 };
     }
 
-    // Phase 2 (authoritative post-init): exact per-buffer check vs real
-    // device.limits before allocating. Phase 1 (hybrid create()) fail-fasts
-    // pre-init with the exact post-fold tokenCount; acquiring a device just
+    // Staged validation (authoritative post-init): exact per-buffer check vs real
+    // device.limits before allocating. Staged validation (search-index create()) fail-fasts
+    // pre-init with the exact post-normalization tokenCount; acquiring a device just
     // to check would churn GPU contexts (rejected: acquire-always), while
     // allocation-time-only would OOM mid-load leaving half-state (rejected).
     const avgBytes = count === 0 ? 0 : packed.recordsByteLength / count;
@@ -503,7 +503,7 @@ export class WebGPUEngine {
         currentStrings: prev.strings,
         currentTokens: prev.tokens,
         currentOffsets: prev.offsets,
-        folded: prev.folded,
+        normalized: prev.normalized,
         profileId: prev.profileId,
         unicodeVersion: prev.unicodeVersion,
         scoringVersion: prev.scoringVersion,
@@ -566,7 +566,7 @@ export class WebGPUEngine {
         currentStrings: prev.strings,
         currentTokens: prev.tokens,
         currentOffsets: prev.offsets,
-        folded: prev.folded,
+        normalized: prev.normalized,
         profileId: prev.profileId,
         unicodeVersion: prev.unicodeVersion,
         scoringVersion: prev.scoringVersion,
@@ -625,24 +625,24 @@ export class WebGPUEngine {
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
     const rawMode = options.mode ?? 'fuzzy';
     if (rawMode !== 'fuzzy' && rawMode !== 'substring' && rawMode !== 'token' && rawMode !== 'prefix') {
-      // Unified with hybrid/document/cpu-reference: unknown modes throw
+      // Unified with hybrid/document/exact-scorer: unknown modes throw
       // IncompatibleOptionError('mode'). Note: direct-engine callers that
       // previously caught TypeError for mode:'token' now see
-      // IncompatibleOptionError (v0.4 breaking detail, documented).
+      // IncompatibleOptionError (breaking detail, documented).
       throw new IncompatibleOptionError(
         'mode',
         `Unknown search mode '${String(rawMode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
       );
     }
-    // v0.4 M4: WGSL shaders are exact-only ('fuzzy'/'substring'). Token and
+    // WGSL shaders are exact-only ('fuzzy'/'substring'). Token and
     // prefix modes route to the CPU reference engine — the hybrid/document
     // indexes catch this and fall back with fallbackReason 'unsupported-mode'
-    // (Issue #10 scoring-parity boundary). Direct engine callers must route
+    // (scoring-parity boundary). Direct engine callers must route
     // themselves; the engine never silently serves approximate results.
     if (rawMode === 'token' || rawMode === 'prefix') {
       throw new IncompatibleOptionError(
         'mode',
-        `Search mode '${rawMode}' is CPU-only in v0.4 (no WGSL kernel). Route token/prefix queries to the CPU reference scorer.`
+        `Search mode '${rawMode}' is CPU-only (no WGSL kernel). Route token/prefix queries to the CPU exact scorer.`
       );
     }
     // Typo-tolerant queries cannot run on the exact-only shaders either.
@@ -652,12 +652,12 @@ export class WebGPUEngine {
     if (engineTypo.enabled) {
       throw new IncompatibleOptionError(
         'typoTolerance',
-        '[webgpu-search] Typo-tolerant queries are CPU-only in v0.4 (WGSL kernels are exact-only). Route to the CPU reference scorer.'
+        '[webgpu-search] Typo-tolerant queries are CPU-only (WGSL kernels are exact-only). Route to the CPU exact scorer.'
       );
     }
     const mode = rawMode;
     const limit = clampLimit(options.limit ?? options.maxResults ?? 50);
-    // Strict boolean gate (matches hybrid-index default caseSensitive=false):
+    // Strict boolean gate (matches search-index default caseSensitive=false):
     // forged truthy (1, 'true') fails closed instead of bypassing then
     // dispatching as the opposite polarity.
     if (options.caseSensitive !== undefined && typeof options.caseSensitive !== 'boolean') {
@@ -671,23 +671,23 @@ export class WebGPUEngine {
 
     throwIfAborted(options.signal);
 
-    // Defensive post-fold gates run BEFORE the no-device early return so
+    // Defensive post-normalization gates run BEFORE the no-device early return so
     // direct-engine callers get identical throw/echo semantics with or
     // without a device (hybrid already gates, but engine must not diverge).
     // Engine never silently falls back — it throws.
-    const nq = normalizeText(query, this.folded);
+    const nq = normalizeText(query, this.normalized);
     if (nq.isEmpty) {
       return noHits('');
     }
     if (nq.tokenCount > QUERY_TOKENS_MAX) {
       throw new QueryTooLongError(QUERY_TOKENS_MAX, nq.tokenCount, this.profileId);
     }
-    // Default omitted flag to false (same as hybrid-index) so direct-engine
-    // callers get identical ProfileMismatch semantics (folded=false index +
+    // Default omitted flag to false (same as search-index) so direct-engine
+    // callers get identical ProfileMismatch semantics (normalized=false index +
     // omitted flag throws, instead of silently running case-sensitive).
     const qcs = options.caseSensitive ?? false;
-    if (qcs === this.folded) {
-      throw new ProfileMismatchError(!this.folded, options.caseSensitive);
+    if (qcs === this.normalized) {
+      throw new ProfileMismatchError(!this.normalized, options.caseSensitive);
     }
 
     if (!this.device || !this.recordsBuffer || !this.offsetsBuffer || !this.uniformBuffer || !this.queryBuffer || !this.outputBuffer || !this.stagingBuffer || !this.substringPipeline || !this.fuzzyPipeline) {
@@ -713,13 +713,13 @@ export class WebGPUEngine {
     U32[0] = this.currentDatasetSize;
     U32[1] = queryLen;
     U32[2] = this.candidateCapacity;
-    // flagsAndProfile: caseSensitive:1b + folded:1b + profile:6b + unicode:8b
-    // + scoring:8b. Reserved for M4 harness/debug — shaders are pure-`==` by
+    // flagsAndProfile: caseSensitive:1b + normalized:1b + profile:6b + unicode:8b
+    // + scoring:8b. Reserved for harness/debug — shaders are pure-`==` by
     // construction and do not read it (host enforces ProfileMismatchError).
     const pEnum = (PROFILE_TO_ENUM as Record<string, number>)[this.profileId] ?? 0;
     const uEnum = (UNICODE_VERSION_TO_ENUM as Record<string, number>)[this.unicodeVersion] ?? 0;
     const sEnum = (SCORING_TO_ENUM as Record<string, number>)[this.scoringVersion] ?? 0;
-    U32[3] = (((caseSensitive ? 1 : 0) | (this.folded ? 2 : 0) | ((pEnum & 0x3f) << 2) | ((uEnum & 0xff) << 8) | ((sEnum & 0xff) << 16)) >>> 0);
+    U32[3] = (((caseSensitive ? 1 : 0) | (this.normalized ? 2 : 0) | ((pEnum & 0x3f) << 2) | ((uEnum & 0xff) << 8) | ((sEnum & 0xff) << 16)) >>> 0);
     U32[4] = 0;
     U32[5] = 0;
     U32[6] = 0;
@@ -910,7 +910,7 @@ export class WebGPUEngine {
     const readbackMs = nowMs() - tReadbackStart;
     const totalMs = nowMs() - totalStart;
 
-    candidates.sort(compareParityResults);
+    candidates.sort(compareExactResults);
     const results = candidates.slice(0, limit);
 
     return {
@@ -972,7 +972,7 @@ export class WebGPUEngine {
     if (this.device && !this.deviceReleased) {
       this.deviceReleased = true;
       try {
-        WebGPUContextManager.releaseDevice(this.device, this.isSharedDevice);
+        GpuDevicePool.releaseDevice(this.device, this.isSharedDevice);
       } catch {}
     }
     this.device = null;
