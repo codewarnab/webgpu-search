@@ -1,11 +1,12 @@
 import type {
   CpuAlgorithm,
-  DOC_FORMAT_VERSION,
-  FORMAT_VERSION,
+  CpuScorer,
+  DATASET_FORMAT_VERSION,
+  LEGACY_SNAPSHOT_VERSION,
   OnQueryTooLong,
   SCORING_VERSION,
+  SNAPSHOT_FORMAT_VERSION,
   TextProfileId,
-  U2D4_FORMAT_VERSION,
   UNICODE_VERSION,
 } from './text-profile';
 
@@ -15,46 +16,49 @@ export type EngineType = 'webgpu' | 'cpu';
 export interface SearchOptions {
   mode?: SearchMode;              // Default: 'fuzzy'
   limit?: number;                 // Max results; default 50, clamped to 1..RESULT_LIMIT_MAX
-  caseSensitive?: boolean;        // Default: false; must match index packed mode (v0.2 breaking: mismatch throws ProfileMismatchError — build one index per mode instead of varying per query)
+  caseSensitive?: boolean;        // Default: false; must match index packed mode (Breaking: mismatch throws ProfileMismatchError — build one index per mode instead of varying per query)
   signal?: AbortSignal;           // Cancel stale queries during rapid typing
   maxResults?: number;            // Backwards-compatible alias; limit takes precedence
   /**
-   * Default: 'parity' (v0.2 contract default). M2 serves the shared-pipeline
-   * parity scorer (`cpu-reference.ts`); 'ufuzzy' = explicit opt-in CPU-only.
+   * Default: 'exact' (contract default). The exact scorer serves the shared-pipeline
+   * exact path (`exact-scorer.ts`); 'ufuzzy' = explicit opt-in CPU-only.
+   * Legacy value 'parity' is accepted and mapped to 'exact' with a deprecation warning.
    */
+  cpuScorer?: CpuScorer;
+  /** @deprecated Use cpuScorer. Accepts legacy 'parity' (mapped to 'exact'). */
   cpuAlgorithm?: CpuAlgorithm;
   /**
-   * Default: 'throw'. Enforced in M2 on the exact post-fold token count
-   * (`normalizeText(query, folded)` vs QUERY_TOKENS_MAX).
+   * Default: 'throw'. Enforced on the exact post-normalization token count
+   * (`normalizeText(query, normalized)` vs QUERY_TOKENS_MAX).
    * 'cpu-fallback' forces the CPU path.
    */
   onQueryTooLong?: OnQueryTooLong;
   /**
-   * v0.4 M4: token-mode quorum options (operator/minMatchCount).
+   * Token-mode quorum options (operator/minMatchCount).
    * Only read when mode is 'token'; validated fail-closed otherwise.
    */
   tokenMatch?: TokenMatchOptions;
   /**
-   * v0.4 M4: prefix-mode options (prefixLength/exactCase).
+   * Prefix-mode options (prefixLength/exactCase).
    * Only read when mode is 'prefix'; validated fail-closed otherwise.
    */
   prefixMatch?: PrefixSearchOptions;
   /**
-   * v0.4 M4: bounded typo tolerance (boolean shorthand or full options).
+   * Bounded typo tolerance (boolean shorthand or full options).
    * Applies to 'substring', 'token', and 'prefix' modes; 'fuzzy' validates
    * but ignores (inherently typo-tolerant via subsequence matching).
-   * Typo queries always route to the CPU reference engine — WGSL shaders
+   * Typo queries always route to the CPU exact engine — WGSL shaders
    * are exact-only (see webgpu-engine.ts).
    */
   typoTolerance?: TypoToleranceOptions | boolean;
   /**
-   * v0.4 M7: cost budget controls and deadlines. Validated fail-closed via
+   * Cost budget controls and deadlines. Validated fail-closed via
    * `normalizeCostBudgetOptions`; over-budget execution throws
    * `CostBudgetExceededError`. `abortSignal` aborts with `AbortError`.
    */
   budget?: CostBudgetOptions;
   /**
-   * v0.4 M7: whether to populate detailed `diagnostics` on the response.
+   * Whether to populate detailed `diagnostics` on the response.
    * Must be a boolean when provided; defaults to false (no telemetry).
    */
   diagnostics?: boolean;
@@ -73,10 +77,10 @@ export interface SearchTimings {
   readbackMs: number;             // mapAsync() & CPU candidate slice latency
   /**
    * Scorer wall-clock: scan + highlight + post-match hooks + facets.
-   * Excludes inline `suggest` work (see `QueryDiagnostics.timings.totalMs`
-   * for end-to-end including suggest, and `suggestMs` for the suggest slice).
+   * Excludes inline `autocomplete` work (see `QueryDiagnostics.timings.totalMs`
+   * for end-to-end including autocomplete, and `autocompleteMs` for the slice).
    */
-  totalMs: number;                // Scorer wall-clock query duration (excludes inline suggest)
+  totalMs: number;                // Scorer wall-clock query duration (excludes inline autocomplete)
   gpuDispatchMs?: number;         // Backwards compatibility alias for encodeSubmitMs
 }
 
@@ -89,22 +93,24 @@ export interface SearchResponse {
   hasOverflow: boolean;           // True iff totalMatches > pool capacity (RESULT_LIMIT_MAX); limit truncation alone leaves false
   results: SearchResultItem[];    // Top-K ranked results (length <= clamped limit)
   timings: SearchTimings;
-  profileId: TextProfileId;       // v0.2: text profile that served this query
-  scoringVersion: typeof SCORING_VERSION; // v0.2: scoring contract version
-  cpuAlgorithm: CpuAlgorithm;     // v0.2: requested CPU scorer (M2 serves parity)
+  profileId: TextProfileId;       // text profile that served this query
+  scoringVersion: typeof SCORING_VERSION; // scoring contract version
+  cpuScorer: CpuScorer;             // requested CPU scorer (exact serves the contract)
+  /** @deprecated Use cpuScorer. Mirrors the requested scorer ('parity' preserved on echo). */
+  cpuAlgorithm: CpuAlgorithm;
   fallbackReason?: FallbackReason; // Reason for CPU execution path if fallback occurred
-  /** v0.4 M7: detailed telemetry and diagnostic metrics (when requested via options.diagnostics) */
+  /** detailed telemetry and diagnostic metrics (when requested via options.diagnostics) */
   diagnostics?: QueryDiagnostics;
 }
 
 export interface IndexOptions {
   threshold?: number;             // Item count cutoff for CPU vs GPU (Default: 30,000)
-  preferGpu?: boolean;            // Force WebGPU if available regardless of size (conflicts with cpuAlgorithm:'ufuzzy' → IncompatibleOptionError at search())
+  preferGpu?: boolean;            // Force WebGPU if available regardless of size (conflicts with cpuScorer:'ufuzzy' → IncompatibleOptionError at search())
   device?: GPUDevice;             // Custom injected GPUDevice (for testing/context sharing)
-  powerPreference?: GPUPowerPreference; // 'high-performance' | 'low-power' (reserved in M1: accepted, not yet forwarded — tracked for M3)
-  slotBytes?: number;             // v0.2: throw-on-use (IncompatibleOptionError; dynamic indexing replaced fixed slots; removal in v0.3)
-  textProfile?: TextProfileId;    // v0.2: index-level immutable profile (default 'unicode-default'; unknown values throw ProfileMismatchError at create())
-  caseSensitive?: boolean;        // v0.2: pack-time fold control (default false = folded)
+  powerPreference?: GPUPowerPreference; // 'high-performance' | 'low-power' (Reserved: accepted but not forwarded)
+  slotBytes?: number;             // throw-on-use (IncompatibleOptionError; dynamic indexing replaced fixed slots)
+  textProfile?: TextProfileId;    // index-level immutable profile (default 'unicode-default'; unknown values throw ProfileMismatchError at create())
+  caseSensitive?: boolean;        // pack-time normalization control (default false = normalized)
 }
 
 export interface IndexStats {
@@ -116,9 +122,11 @@ export interface IndexStats {
   profileId: TextProfileId;
   unicodeVersion: typeof UNICODE_VERSION;
   scoringVersion: typeof SCORING_VERSION;
-  tokenCount: number;             // M2: exact post-fold code-point total
+  tokenCount: number;             // exact post-normalization code-point total
+  normalized: boolean;
+  /** @deprecated Use normalized. */
   folded: boolean;
-  formatVersion: typeof FORMAT_VERSION | typeof DOC_FORMAT_VERSION | typeof U2D4_FORMAT_VERSION;
+  formatVersion: typeof DATASET_FORMAT_VERSION | typeof LEGACY_SNAPSHOT_VERSION | typeof SNAPSHOT_FORMAT_VERSION;
   fallbackReason?: FallbackReason;
   memory?: {
     vramBytes: number;
@@ -141,7 +149,7 @@ export interface AdapterInfo {
 }
 
 // ---------------------------------------------------------------------------
-// v0.3 Document, Mutation, Highlighting, Worker, and Telemetry Types
+// Document, Mutation, Highlighting, Worker, and Telemetry Types
 // ---------------------------------------------------------------------------
 
 export type DocumentId = string | number;
@@ -171,8 +179,10 @@ export interface DocumentIndexOptions<TDoc = Record<string, unknown>> extends In
   candidateCapacity?: number;
   /** Attributes configured for columnar pre-filtering and facet aggregation */
   filterFields?: Array<DocumentFilterField<TDoc>>;
-  /** Extension hooks for custom tokenization, scoring boosts, or predicates */
-  extensions?: SearchExtensionHooks<TDoc>;
+  /** Search hooks for custom tokenization, scoring boosts, or predicates */
+  hooks?: SearchHooks<TDoc>;
+  /** @deprecated Use hooks. */
+  extensions?: SearchHooks<TDoc>;
 }
 
 export interface HighlightRange {
@@ -223,19 +233,23 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   // Note: budget/diagnostics are likewise inherited from SearchOptions.
   /** Deterministic ranking and tie-breaking options */
   ranking?: DeterministicRankingOptions;
-  /** Per-query search extension overrides */
-  extensions?: SearchExtensionHooks<TDoc>;
+  /** Per-query search hook overrides */
+  hooks?: SearchHooks<TDoc>;
+  /** @deprecated Use hooks. */
+  extensions?: SearchHooks<TDoc>;
   /** Autocomplete / did-you-mean suggestion configuration if requested alongside search.
    * `true` uses defaults; an object customizes; `false`/omitted disables.
    * Inline suggestions cost a second O(docs x fields) scan (~2x query cost)
    * and are index-wide by design: `filter` never narrows suggestions, while
-   * `fields` scopes them unless `suggest.field` is set (explicit suggest
+   * `fields` scopes them unless `autocomplete.field` is set (explicit autocomplete
    * field wins). Suggestions use default `prefixMatch` opts, not the search
-   * `prefixMatch`/`typoTolerance` — only `suggest.mode`/`fuzzyDistance` apply.
+   * `prefixMatch`/`typoTolerance` — only `autocomplete.mode`/`fuzzyDistance` apply.
    * `prefix` yields `type:'completion'` (including typo-tolerant prefix);
    * `fuzzy` yields `type:'did-you-mean'`.
    */
-  suggest?: SuggestOptions | boolean;
+  autocomplete?: AutocompleteOptions | boolean;
+  /** @deprecated Use autocomplete. */
+  suggest?: AutocompleteOptions | boolean;
 }
 
 export interface DocumentSearchResultItem<TDoc = any> {
@@ -253,10 +267,9 @@ export interface DocumentSearchResultItem<TDoc = any> {
 
 /**
  * Why a query was served by the CPU engine instead of WebGPU.
- * v0.4 M4 adds 'unsupported-mode': 'token'/'prefix' modes and typo-tolerant
- * queries route to the CPU reference engine (WGSL shaders are exact-only
- * for 'fuzzy'/'substring'); recorded per the Issue #10 scoring-parity
- * boundary (unsupported features route to CPU with a recorded reason).
+ * 'unsupported-mode': 'token'/'prefix' modes and typo-tolerant
+ * queries route to the CPU exact engine (WGSL shaders are exact-only
+ * for 'fuzzy'/'substring'); unsupported features route to CPU with a recorded reason.
  */
 export type FallbackReason =
   | 'webgpu-unsupported'
@@ -281,6 +294,8 @@ export interface DocumentSearchResponse<TDoc = any> {
   timings: SearchTimings;
   profileId: TextProfileId;
   scoringVersion: typeof SCORING_VERSION;
+  cpuScorer: CpuScorer;
+  /** @deprecated Use cpuScorer. Mirrors the requested scorer ('parity' preserved on echo). */
   cpuAlgorithm: CpuAlgorithm;
   fallbackReason?: FallbackReason;
   /** Facet aggregation results keyed by facet name or field name */
@@ -311,7 +326,7 @@ export interface MutationResult {
 }
 
 export interface DocumentIndexStats extends IndexStats {
-  formatVersion: typeof DOC_FORMAT_VERSION | typeof FORMAT_VERSION | typeof U2D4_FORMAT_VERSION;
+  formatVersion: typeof LEGACY_SNAPSHOT_VERSION | typeof DATASET_FORMAT_VERSION | typeof SNAPSHOT_FORMAT_VERSION;
   docCount: number;
   rowCount: number;
   tombstoneCount: number;
@@ -366,7 +381,7 @@ export interface WorkerResponse {
 }
 
 // ---------------------------------------------------------------------------
-// v0.3 Snapshot Persistence (U2D3) & IndexedDB Types (M6)
+// Snapshot persistence & IndexedDB types
 // ---------------------------------------------------------------------------
 
 export interface DocumentIndexSchema {
@@ -387,7 +402,7 @@ export interface DocumentIndexSchema {
     name: string;
     type?: FilterFieldType;
     /**
-     * v0.4 M8: true when the snapshotted index used a custom `getter` for
+     * True when the snapshotted index used a custom `getter` for
      * this filter field. Restore requires a matching getter override
      * (fail-closed `IncompatibleIndexError`), otherwise columnar rebuild
      * via default `doc[name]` would silently drop filter semantics.
@@ -395,10 +410,10 @@ export interface DocumentIndexSchema {
     hasGetter?: boolean;
   }>;
   /**
-   * v0.4 M6: declarative extension hook identifiers recorded at snapshot
+   * Declarative extension hook identifiers recorded at snapshot
    * time. Closures are never serialized — only these stable IDs are stored.
    * Restore validates that matching hook handlers are supplied (see
-   * `assertHooksSatisfied` in extensions.ts); missing handlers throw
+   * `assertHooksSatisfied` in hooks.ts); missing handlers throw
    * `IncompatibleHookError` fail-closed.
    */
   hookIds?: ExtensionHookIds;
@@ -418,7 +433,7 @@ export interface RestoreDocumentIndexOptions<TDoc = Record<string, unknown>> {
    * Optional custom DocumentIndex options to override or extend schema options
    * (e.g. custom getters, device, preferGpu, threshold).
    *
-   * v0.4 M6: `options.extensions` (when supplied to `restore` /
+   * `options.extensions` (when supplied to `restore` /
    * `fromSnapshotData` / instance `restore()`) replaces live index hooks
    * wholesale (not per-key merged); the merged set must then satisfy the
    * snapshot `hookIds` via `assertHooksSatisfied` or `IncompatibleHookError`
@@ -448,6 +463,8 @@ export interface DocumentSnapshotHeader {
   docCount: number;
   rowCount: number;
   tokenCount: number;
+  normalized: boolean;
+  /** @deprecated Use normalized. */
   folded: boolean;
   schemaByteLength: number;
   docsByteLength: number;
@@ -486,7 +503,7 @@ export interface LoadIDBOptions extends IDBStorageOptions {
 }
 
 // ---------------------------------------------------------------------------
-// v0.4 Structured Filters, Facets, Search Modes, Typo-Tolerance,
+// Structured Filters, Facets, Search Modes, Typo-Tolerance,
 // Deterministic Ranking, Autocomplete, Extensibility, & Cost Budgets
 // ---------------------------------------------------------------------------
 
@@ -527,7 +544,7 @@ export interface FilterFieldDefinition<TDoc = Record<string, unknown>> {
   type?: FilterFieldType;
   getter?: (doc: TDoc) => FilterValue | FilterValue[] | undefined | null;
   /**
-   * v0.4 M8: internal marker — true when `getter` is a custom closure rather
+   * Internal marker — true when `getter` is a custom closure rather
    * than the default `doc[name]` accessor. Persisted as `hasGetter` in
    * `DocumentIndexSchema.filterFields` so snapshot restore can fail closed
    * when the getter cannot be revived across the serialization boundary.
@@ -573,8 +590,8 @@ export interface TermsFacetResult {
   field: string;
   /**
    * Exactness is engine-relative: false means exact w.r.t. the serving
-   * engine's match set (parity CPU, ufuzzy CPU, or GPU pool), not identical
-   * across `cpuAlgorithm: parity | ufuzzy` or GPU vs CPU (scorers may diverge
+   * engine's match set (exact CPU, ufuzzy CPU, or GPU pool), not identical
+   * across `cpuScorer: exact | ufuzzy` or GPU vs CPU (scorers may diverge
    * row-for-row). True only on GPU overflow without `force-exact`.
    */
   isApproximate: boolean;
@@ -642,8 +659,8 @@ export interface DeterministicRankingOptions {
    * Tie-breaker order hierarchy evaluated when scores are tied.
    * Default: ['score', 'weight', 'exact', 'length', 'id']
    *
-   * M5 behavior change: `DocumentIndex.search()` now applies the full
-   * 5-tier order by default on all paths (GPU readback, parity CPU,
+   * `DocumentIndex.search()` applies the full
+   * 5-tier order by default on all paths (GPU readback, exact CPU,
    * legacy ufuzzy). Previously results were ordered by
    * `(score DESC, docIndex ASC)` only. To approximate the legacy order,
    * pass `ranking: { tieBreakers: ['score'] }` (remaining ties fall
@@ -653,16 +670,16 @@ export interface DeterministicRankingOptions {
   tieBreakers?: TieBreakerCriterion[];
 }
 
-// 3.5 Suggestions & Autocomplete Primitives
-export interface SuggestOptions {
+// 3.5 Autocomplete Primitives
+export interface AutocompleteOptions {
   limit?: number;                   // Default: 5
   mode?: 'prefix' | 'fuzzy';        // Default: 'prefix'
-  fuzzyDistance?: number;           // Default: 0 (integer 0..2; explicit 1 enables typo-tolerant suggest)
+  fuzzyDistance?: number;           // Default: 0 (integer 0..2; explicit 1 enables typo-tolerant autocomplete)
   field?: string;                   // Restrict to specific field (beats search.fields when both set)
   /**
-   * Suggestion tie-breaker hierarchy. Default: the M5 5-tier order.
-   * Inline `search({ ranking, suggest })` inherits the search `ranking`
-   * hierarchy when the suggest object omits this key.
+   * Suggestion tie-breaker hierarchy. Default: the 5-tier order.
+   * Inline `search({ ranking, autocomplete })` inherits the search `ranking`
+   * hierarchy when the autocomplete object omits this key.
    */
   tieBreakers?: TieBreakerCriterion[];
 }
@@ -707,30 +724,30 @@ export interface ExtensionHookIds {
 }
 
 /**
- * Type-safe extension hooks for host applications (v0.4 M6).
+ * Type-safe extension hooks for host applications.
  *
  * - `tokenizer`: custom query term splitting for `'token'` mode (e.g. code
- *   symbols `_`, `-`, `camelCase`). Only affects `'token'` mode query term
- *   parsing on the CPU path (`'token'` is CPU-by-design with fallbackReason
- *   `'unsupported-mode'`); other modes ignore it. Must be a pure,
- *   deterministic function (runs once per query, never per record).
+ * symbols `_`, `-`, `camelCase`). Only affects `'token'` mode query term
+ * parsing on the CPU path (`'token'` is CPU-by-design with fallbackReason
+ * `'unsupported-mode'`); other modes ignore it. Must be a pure,
+ * deterministic function (runs once per query, never per record).
  * - `scoringHook`: post-match boost over surviving Top-K candidates only
- *   (never per-candidate scanning). Receives `(doc, baseScore, matchInfo)`
- *   and must return a finite integer (unified descending normalized integer
- *   score contract; floats throw `TypeError`). Applied identically on GPU
- *   and CPU paths after deterministic ranking + limit truncation, followed
- *   by a deterministic re-sort. Must be pure and deterministic.
+ * (never per-candidate scanning). Receives `(doc, baseScore, matchInfo)`
+ * and must return a finite integer (unified descending normalized integer
+ * score contract; floats throw `TypeError`). Applied identically on GPU
+ * and CPU paths after deterministic ranking + limit truncation, followed
+ * by a deterministic re-sort. Must be pure and deterministic.
  * - `filterPredicate`: conjunctive post-match predicate composed (AND) with
- *   `options.filter` (function or structured). Applied on every path.
- *   Return values are truthiness-coerced (`!predicate(doc)` excludes).
- *   Must be pure: invocation order is engine-dependent (GPU result order vs
- *   parity row order), so non-deterministic predicates diverge.
+ * `options.filter` (function or structured). Applied on every path.
+ * Return values are truthiness-coerced (`!predicate(doc)` excludes).
+ * Must be pure: invocation order is engine-dependent (GPU result order vs
+ * exact row order), so non-deterministic predicates diverge.
  * - `postProcess`: final result transformation after scoring boosts,
- *   deterministic re-sort, and highlight enrichment. Must return an array
- *   (hook throws propagate). Affects only `results`: `totalMatches` /
- *   `candidateCount` / `hasOverflow` are snapshotted pre-pipeline and
- *   `facets` / `suggestions` ignore it. Skipped on empty no-hit paths
- *   (empty query / corpus / empty filter) where there is nothing to transform.
+ * deterministic re-sort, and highlight enrichment. Must return an array
+ * (hook throws propagate). Affects only `results`: `totalMatches` /
+ * `candidateCount` / `hasOverflow` are snapshotted pre-pipeline and
+ * `facets` / `suggestions` ignore it. Skipped on empty no-hit paths
+ * (empty query / corpus / empty filter) where there is nothing to transform.
  *
  * Persistence: closures are never serialized. `serialize()` records only
  * `ExtensionHookIds`; `restore` requires matching handlers via
@@ -740,7 +757,7 @@ export interface ExtensionHookIds {
  * `init` / `search` / `restore` reject `extensions` fail-closed with
  * `IncompatibleHookError` (empty `{}` is a no-op and allowed).
  */
-export interface SearchExtensionHooks<TDoc = any> {
+export interface SearchHooks<TDoc = any> {
   tokenizer?: (text: string) => string[];
   scoringHook?: (doc: TDoc, baseScore: number, matchInfo: MatchInfo) => number;
   filterPredicate?: (doc: TDoc) => boolean;
@@ -775,9 +792,11 @@ export interface QueryDiagnosticsTimings {
   scoringMs: number;              // Time spent in compute kernel or CPU reference
   highlightMs: number;            // Time spent extracting Unicode highlight ranges
   facetingMs?: number;            // Time spent aggregating facet buckets (absent when facets unrequested; string index never emits)
-  /** Time spent in inline suggest scan (absent when suggest unrequested). */
+  /** Time spent in inline autocomplete scan (absent when autocomplete unrequested). */
+  autocompleteMs?: number;
+  /** @deprecated Use autocompleteMs. */
   suggestMs?: number;
-  /** End-to-end query latency (filtering + scoring + highlight + faceting + suggest). */
+  /** End-to-end query latency (filtering + scoring + highlight + faceting + autocomplete). */
   totalMs: number;                // End-to-end query latency
 }
 
@@ -794,3 +813,13 @@ export interface QueryDiagnostics {
   timings: QueryDiagnosticsTimings;
   warnings?: string[];              // Non-fatal advisory notices (e.g. broad-query fallback)
 }
+
+/** @deprecated Use AutocompleteOptions. */
+export type SuggestOptions = AutocompleteOptions;
+/** @deprecated Use SearchHooks. */
+export type SearchExtensionHooks<TDoc = any> = SearchHooks<TDoc>;
+
+/** Canonical alias for SuggestionItem. */
+export type AutocompleteItem<TDoc = any> = SuggestionItem<TDoc>;
+/** Canonical alias for SuggestResponse. */
+export type AutocompleteResponse<TDoc = any> = SuggestResponse<TDoc>;

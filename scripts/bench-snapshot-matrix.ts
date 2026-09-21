@@ -1,19 +1,19 @@
 /**
- * v0.4 (Issue #10 M8) headless benchmark matrix.
+ * headless benchmark matrix.
  *
- * Covers the M8 benchmark invariant without requiring a browser/GPU:
- *  - IDE symbols (monaco-palette records): prefix search, type-filtered
- *    search, and suggest() autocomplete latency.
- *  - Data-grid rows (structured logs at 10k / 50k / 100k): fuzzy search,
- *    structured level/service/latency filtering, and facet aggregation.
- *  - U2D4 persistence: serialize/restore wall-clock, snapshot bytes, and
- *    columnar segment overhead.
+ * Covers the benchmark invariant without requiring a browser/GPU:
+ * - IDE symbols (monaco-palette records): prefix search, type-filtered
+ * search, and suggest() autocomplete latency.
+ * - Data-grid rows (structured logs at 10k / 50k / 100k): fuzzy search,
+ * structured level/service/latency filtering, and facet aggregation.
+ * - snapshot persistence: serialize/restore wall-clock, snapshot bytes, and
+ * columnar segment overhead.
  *
  * Environment: headless CPU only (`preferGpu: false`) for determinism.
  * Numbers are NOT comparable to browser/WebGPU runs. The JSON report records
  * `environment` (runtime, cpu, headless) alongside `generatedAt` + rows.
  *
- * Run: `bun scripts/bench-v04-matrix.ts [--out <path>]`
+ * Run: `bun scripts/bench-snapshot-matrix.ts [--out <path>]`
  * `--out` is constrained to the repo working directory (basename sanitized)
  * to avoid arbitrary file writes; absolute paths under cwd or /tmp are allowed.
  * All engines run CPU (`preferGpu: false`) for headless determinism.
@@ -73,7 +73,7 @@ interface MatrixRow {
 }
 
 function resolveOutPath(raw: string | undefined): string {
-  const fallback = 'benchmark_v04_matrix.json';
+  const fallback = 'benchmark_snapshot_matrix.json';
   if (!raw) return fallback;
   // Allow explicit absolute paths under cwd or /tmp (CI uses /tmp), otherwise
   // sanitize to basename inside cwd to avoid arbitrary writes (e.g. /etc/passwd).
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     );
     const suggestRes = await index.suggest('comp', { mode: 'prefix', limit: 5 });
     rows.push({
-      scenario: 'ide-symbols-5k', docs: 5000, operation: 'suggest-autocomplete',
+      scenario: 'ide-symbols-5k', docs: 5000, operation: 'autocomplete',
       medianMs: suggest.medianMs, p95Ms: suggest.p95Ms, samples: suggest.samples,
       extra: { suggestionCount: suggestRes.suggestions.length }
     });
@@ -192,7 +192,7 @@ async function main(): Promise<void> {
     );
     rows.push({ scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search+facets', medianMs: faceted.medianMs, p95Ms: faceted.p95Ms, samples: faceted.samples });
 
-    // U2D4 persistence profile only on the 10k grid to bound runtime.
+    // snapshot persistence profile only on the 10k grid to bound runtime.
     // Sampled 10× with warmup like every other row (previously n=1).
     if (count === 10_000) {
       const serSamples = await timeSamples(async () => {
@@ -200,7 +200,7 @@ async function main(): Promise<void> {
       }, 1, 10);
       const snapshot = index.serialize();
       if (snapshot.byteLength < 56) {
-        throw new Error('[bench-v04-matrix] snapshot shorter than U2D4 header');
+        throw new Error('[bench-snapshot-matrix] snapshot shorter than snapshot header');
       }
       const header = new DataView(snapshot, 0, 56);
       const columnarLen = header.getUint32(44, true);
@@ -216,12 +216,12 @@ async function main(): Promise<void> {
       void resSingleMs;
       const probe = await restored.search('timeout', { mode: 'fuzzy', limit: 5 });
       rows.push({
-        scenario: 'log-grid-10k', docs: count, operation: 'u2d4-serialize',
+        scenario: 'log-grid-10k', docs: count, operation: 'snapshot-serialize',
         medianMs: serSamples.medianMs, p95Ms: serSamples.p95Ms, samples: serSamples.samples,
         extra: { snapshotBytes: snapshot.byteLength, schemaBytes: schemaLen, columnarBytes: columnarLen, docsBytes: docsLen }
       });
       rows.push({
-        scenario: 'log-grid-10k', docs: count, operation: 'u2d4-restore',
+        scenario: 'log-grid-10k', docs: count, operation: 'snapshot-restore',
         medianMs: resSamples.medianMs, p95Ms: resSamples.p95Ms, samples: resSamples.samples,
         extra: { restoredMatches: probe.totalMatches }
       });
@@ -234,7 +234,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // Report
   // ------------------------------------------------------------------
-  console.log('\n## v0.4 Benchmark Matrix (headless CPU, median of 10)\n');
+  console.log('\n## Benchmark Matrix (headless CPU, median of 10)\n');
   console.log('| Scenario | Docs | Operation | Median (ms) | p95 (ms) | Extra |');
   console.log('|---|---|---|---:|---:|---|');
   for (const r of rows) {
@@ -260,6 +260,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  console.error('[bench-v04-matrix] fatal:', err);
+  console.error('[bench-snapshot-matrix] fatal:', err);
   process.exit(1);
 });

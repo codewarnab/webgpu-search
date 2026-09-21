@@ -19,7 +19,7 @@ const ERROR_TEMPLATES = [
   'Heap out of memory: VRAM buffer allocation exceeded 134217728 bytes',
   'Connection pool exhausted: maximum active connections reached (500/500)',
   'Worker thread pool crashed unexpectedly with uncaught DOMException',
-  'CRC32 checksum mismatch on restored U2D3 binary header: expected 0x5a2f1b, got 0x3e8a91'
+  'CRC32 checksum mismatch on restored snapshot binary header: expected 0x5a2f1b, got 0x3e8a91'
 ];
 
 const WARN_TEMPLATES = [
@@ -47,6 +47,7 @@ const DEBUG_TEMPLATES = [
   'Binding layout group 0: offset 0, size 65544, access read_write',
   'Cache hit for key session:98471b in Redis cluster shard 4',
   'Dispatched workgroups vec3(625, 1, 1) across 80000 total rows',
+  // Deliberately historical fixture: logs in the wild contain legacy magic + manager names.
   'Parsed 32-bit Little-Endian magic constant 0x55324433 (U2D3)',
   'Acquired shared device lock in WebGPUContextManager',
   'Tombstones filter evaluated: 0 dropped candidates in candidate readback'

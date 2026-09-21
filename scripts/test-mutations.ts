@@ -17,7 +17,7 @@ interface ItemDoc {
 }
 
 async function runM4Tests() {
-  console.log('--- Running Milestone 4: Batched Dynamic Mutations & Memory Management Tests ---');
+  console.log('--- Running  Batched Dynamic Mutations & Memory Management Tests ---');
 
   // =========================================================================
   // 1. Dynamic Document Additions (add)
@@ -819,10 +819,10 @@ async function runM4Tests() {
     console.log('   ✅ Multi-agent review hardening and edge cases verified 100%');
   }
 
-  console.log('\n--- All Milestone 4 Batched Dynamic Mutations Tests Passed! ✅ ---');
+  console.log('\n--- All Batched Dynamic Mutations Tests Passed! ✅ ---');
 }
 
 runM4Tests().catch((err) => {
-  console.error('Milestone 4 test failed:', err);
+  console.error('test failed:', err);
   process.exit(1);
 });

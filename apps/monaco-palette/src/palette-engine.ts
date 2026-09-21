@@ -1,6 +1,7 @@
 import {
   DocumentIndex,
   SearchWorkerClient,
+  type AutocompleteOptions,
   type DocumentIndexStats,
   type DocumentSearchResponse,
   type FilterExpression,
@@ -25,6 +26,8 @@ export interface PaletteSearchOptions {
   /** Restrict to a language (e.g. 'typescript' | 'wgsl'). 'ALL' disables. */
   languageFilter?: string;
   /** Request autocomplete suggestions alongside results. */
+  autocomplete?: boolean | AutocompleteOptions;
+  /** @deprecated Use autocomplete. */
   suggest?: boolean | SuggestOptions;
 }
 
@@ -56,7 +59,7 @@ export class PaletteEngine {
     { name: 'description', weight: 0.5 }
   ];
 
-  /** v0.4 M8: columnar filter attributes enabling structured type/language filters + type facets. */
+  /** columnar filter attributes enabling structured type/language filters + type facets. */
   private readonly filterFieldDefs = [
     { name: 'type', type: 'string' as const },
     { name: 'language', type: 'string' as const }
@@ -158,7 +161,7 @@ export class PaletteEngine {
   }
 
   /**
-   * v0.4 M8: structured type/language pre-filtering via columnar bitsets,
+   * structured type/language pre-filtering via columnar bitsets,
    * native 'prefix' symbol search, and autocomplete suggestions.
    */
   buildFilter(typeFilter?: string, languageFilter?: string): FilterExpression | undefined {
@@ -183,7 +186,7 @@ export class PaletteEngine {
     const highlight = options?.highlight ?? true;
     const limit = options?.limit ?? 50;
     const filter = this.buildFilter(options?.typeFilter, options?.languageFilter);
-    const suggest = options?.suggest;
+    const autocomplete = options?.autocomplete ?? options?.suggest;
 
     let response: DocumentSearchResponse<MonacoFileRecord>;
 
@@ -197,7 +200,7 @@ export class PaletteEngine {
       ...(filter ? { filter } : {}),
       // Type-facet distribution powers the kind breakdown in the palette UI.
       facets: { byType: { type: 'terms' as const, field: 'type', limit: 10 } },
-      ...(suggest !== undefined ? { suggest } : {})
+      ...(autocomplete !== undefined ? { autocomplete } : {})
     };
 
     if (this.useWorker && this.workerClient) {
@@ -239,7 +242,7 @@ export class PaletteEngine {
   /** First-party autocomplete primitive for symbol navigation. */
   async suggest(
     query: string,
-    options?: SuggestOptions
+    options?: AutocompleteOptions
   ): Promise<{ suggestions: SuggestionItem<MonacoFileRecord>[]; queryDurationMs: number }> {
     if (this.useWorker && this.workerClient) {
       const t0 = performance.now();
@@ -248,13 +251,21 @@ export class PaletteEngine {
       const res = await this.workerClient.search(query, {
         limit: 1,
         highlight: false,
-        suggest: options ?? { mode: 'prefix', limit: 5 }
+        autocomplete: options ?? { mode: 'prefix', limit: 5 }
       } as any);
       return { suggestions: res.suggestions ?? [], queryDurationMs: performance.now() - t0 };
     } else if (this.mainIndex) {
-      return this.mainIndex.suggest(query, options);
+      return this.mainIndex.autocomplete(query, options);
     }
     return { suggestions: [], queryDurationMs: 0 };
+  }
+
+  /** Canonical autocomplete primitive for symbol navigation. */
+  async autocomplete(
+    query: string,
+    options?: AutocompleteOptions
+  ): Promise<{ suggestions: SuggestionItem<MonacoFileRecord>[]; queryDurationMs: number }> {
+    return this.suggest(query, options);
   }
 
   async addRecord(record: MonacoFileRecord): Promise<void> {

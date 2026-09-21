@@ -1,25 +1,25 @@
 /**
- * Fold-table generator for Issue #7 M2.
+ * Fold-table generator for .
  *
  * Fetches the pinned Unicode CaseFolding file, keeps C+F only (S+T excluded),
  * and emits a sparse range/delta encoded eager table at
- * packages/webgpu-search/src/fold-table.ts.
+ * packages/webgpu-search/src/case-fold-table.ts.
  *
  * Pinned source:
- *   URL: https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt
- *   File: CaseFolding-16.0.0.txt (Unicode 16.0.0, Sept 2024)
- *   Date header: 2024-04-30, 21:48:11 GMT
- *   License: © 2024 Unicode®, Inc. — https://www.unicode.org/terms_of_use.html
- *   (UCD terms; data-file excerpts permitted with copyright notice.)
+ * URL: https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt
+ * File: CaseFolding-16.0.0.txt (Unicode 16.0.0, Sept 2024)
+ * Date header: 2024-04-30, 21:48:11 GMT
+ * License: © 2024 Unicode®, Inc. — https://www.unicode.org/terms_of_use.html
+ * (UCD terms; data-file excerpts permitted with copyright notice.)
  *
  * Expected counts (contract §3, frozen):
- *   C+F total = 1,557 (C=1,453 single→single, F=104 multi-char)
- *   F breakdown = 88 × 1→2 + 16 × 1→3
+ * C+F total = 1,557 (C=1,453 single→single, F=104 multi-char)
+ * F breakdown = 88 × 1→2 + 16 × 1→3
  *
  * Usage:
- *   bun scripts/generate-fold-table.ts
- *   bun scripts/generate-fold-table.ts --check   # verify committed table matches source
- *   bun scripts/generate-fold-table.ts --input /path/to/CaseFolding.txt
+ * bun scripts/generate-case-fold-table.ts
+ * bun scripts/generate-case-fold-table.ts --check # verify committed table matches source
+ * bun scripts/generate-case-fold-table.ts --input /path/to/CaseFolding.txt
  *
  * Portable: Node/Bun only, no DOM refs.
  */
@@ -31,7 +31,7 @@ const PINNED_COPYRIGHT = '© 2024 Unicode®, Inc.';
 const PINNED_TERMS = 'https://www.unicode.org/terms_of_use.html';
 const UNICODE_VERSION = '16.0.0';
 
-const OUT_PATH = new URL('../packages/webgpu-search/src/fold-table.ts', import.meta.url);
+const OUT_PATH = new URL('../packages/webgpu-search/src/case-fold-table.ts', import.meta.url);
 
 interface FoldEntry {
   cp: number;
@@ -98,9 +98,9 @@ function emitTable(ranges: Array<[number, number, number]>, fEntries: FoldEntry[
  * File: ${PINNED_FILE} (Unicode ${UNICODE_VERSION}, Sept 2024)
  * Date: ${PINNED_DATE}
  * License: ${PINNED_COPYRIGHT} — For terms of use see ${PINNED_TERMS}
- *   (Unicode Character Database terms; excerpts permitted with copyright notice.)
+ * (Unicode Character Database terms; excerpts permitted with copyright notice.)
  *
- * Generator: scripts/generate-fold-table.ts
+ * Generator: scripts/generate-case-fold-table.ts
  * Status filter: C (common) + F (full) only; S (simple) + T (turkic) EXCLUDED.
  * Counts: C=${ranges.reduce((n, [s, e]) => n + (e - s + 1), 0)} singles in ${
     ranges.length
@@ -108,46 +108,46 @@ function emitTable(ranges: Array<[number, number, number]>, fEntries: FoldEntry[
     sortedF.filter((e) => e.mapping.length === 2).length
   }×1→2 + ${sortedF.filter((e) => e.mapping.length === 3).length}×1→3).
  *
- * Encoding: sparse range/delta — FOLD_RANGES is flat [start,end,delta,…] where
- *   folded(cp) = cp + delta for start ≤ cp ≤ end. FOLD_EXPANSIONS is flat
- *   [cp,len,m1,m2(,m3),…] for 1→2/3 full mappings. Decoded eagerly into Maps
- *   at module load (no lazy import; delta budgeted ≤8 KB gzip over baseline).
+ * Encoding: sparse range/delta — CASE_FOLD_RANGES is flat [start,end,delta,…] where
+ * normalized(cp) = cp + delta for start ≤ cp ≤ end. CASE_FOLD_EXPANSIONS is flat
+ * [cp,len,out1,out2(,out3),…] for 1→2/3 full mappings. Decoded eagerly into Maps
+ * at module load (no lazy import; delta budgeted ≤8 KB gzip over baseline).
  * Portable: no DOM refs. No charCodeAt/toLowerCase/toUpperCase/indexOf here.
  */
 `;
 
   return `${header}
-export const FOLD_UNICODE_VERSION = '${UNICODE_VERSION}' as const;
+export const CASE_FOLD_UNICODE_VERSION = '${UNICODE_VERSION}' as const;
 
 /** Flat [start,end,delta,…] for C (single→single) mappings. */
-export const FOLD_RANGES: readonly number[] = [${flatRanges}];
+export const CASE_FOLD_RANGES: readonly number[] = [${flatRanges}];
 
-/** Flat [cp,len,m1,m2(,m3),…] for F (1→2/3) mappings. */
-export const FOLD_EXPANSIONS: readonly number[] = [${flatFStr}];
+/** Flat [cp,len,out1,out2(,out3),…] for F (1→2/3) mappings. */
+export const CASE_FOLD_EXPANSIONS: readonly number[] = [${flatFStr}];
 
 const singleMap: Map<number, readonly number[]> = new Map();
-for (let i = 0; i < FOLD_RANGES.length; i += 3) {
-  const start: number = FOLD_RANGES[i] as number;
-  const end: number = FOLD_RANGES[i + 1] as number;
-  const delta: number = FOLD_RANGES[i + 2] as number;
+for (let i = 0; i < CASE_FOLD_RANGES.length; i += 3) {
+  const start: number = CASE_FOLD_RANGES[i] as number;
+  const end: number = CASE_FOLD_RANGES[i + 1] as number;
+  const delta: number = CASE_FOLD_RANGES[i + 2] as number;
   for (let cp = start; cp <= end; cp++) {
     singleMap.set(cp, Object.freeze([cp + delta]) as readonly number[]);
   }
 }
 
 const expansionMap: Map<number, readonly number[]> = new Map();
-for (let i = 0; i < FOLD_EXPANSIONS.length; ) {
-  const cp: number = FOLD_EXPANSIONS[i] as number;
-  const len: number = FOLD_EXPANSIONS[i + 1] as number;
+for (let i = 0; i < CASE_FOLD_EXPANSIONS.length; ) {
+  const cp: number = CASE_FOLD_EXPANSIONS[i] as number;
+  const len: number = CASE_FOLD_EXPANSIONS[i + 1] as number;
   expansionMap.set(
     cp,
-    Object.freeze(FOLD_EXPANSIONS.slice(i + 2, i + 2 + len)) as readonly number[],
+    Object.freeze(CASE_FOLD_EXPANSIONS.slice(i + 2, i + 2 + len)) as readonly number[],
   );
   i += 2 + len;
 }
 
-Object.freeze(FOLD_RANGES);
-Object.freeze(FOLD_EXPANSIONS);
+Object.freeze(CASE_FOLD_RANGES);
+Object.freeze(CASE_FOLD_EXPANSIONS);
 
 /**
  * Full default case fold for one scalar (C+F only, S+T excluded).
@@ -155,7 +155,7 @@ Object.freeze(FOLD_EXPANSIONS);
  * Eager Maps built at module load; pure function of cp. Returned arrays are
  * frozen — callers must not mutate them (zero per-fold allocation).
  */
-export function foldCodePoint(cp: number): readonly number[] | null {
+export function foldCaseScalar(cp: number): readonly number[] | null {
   const multi = expansionMap.get(cp);
   if (multi !== undefined) return multi;
   const single = singleMap.get(cp);
@@ -164,9 +164,25 @@ export function foldCodePoint(cp: number): readonly number[] | null {
 }
 
 /** Number of C singles encoded (for tests). */
-export const FOLD_C_COUNT: number = singleMap.size;
+export const CASE_FOLD_C_COUNT: number = singleMap.size;
 /** Number of F expansions encoded (for tests). */
-export const FOLD_F_COUNT: number = expansionMap.size;
+export const CASE_FOLD_F_COUNT: number = expansionMap.size;
+
+// Canonical domain names above; FOLD_* kept as deprecated aliases (wire values unchanged).
+/** @deprecated Use CASE_FOLD_RANGES. */
+export const FOLD_RANGES: readonly number[] = CASE_FOLD_RANGES;
+/** @deprecated Use CASE_FOLD_EXPANSIONS. */
+export const FOLD_EXPANSIONS: readonly number[] = CASE_FOLD_EXPANSIONS;
+/** @deprecated Use CASE_FOLD_UNICODE_VERSION. */
+export const FOLD_UNICODE_VERSION: string = CASE_FOLD_UNICODE_VERSION;
+/** @deprecated Use CASE_FOLD_C_COUNT. */
+export const FOLD_C_COUNT: number = CASE_FOLD_C_COUNT;
+/** @deprecated Use CASE_FOLD_F_COUNT. */
+export const FOLD_F_COUNT: number = CASE_FOLD_F_COUNT;
+/** @deprecated Use foldCaseScalar. */
+export function foldCodePoint(cp: number): readonly number[] | null {
+  return foldCaseScalar(cp);
+}
 `;
 }
 
@@ -291,14 +307,14 @@ async function main(): Promise<void> {
     }
     const norm = (s: string): string => s.replace(/\r\n/g, '\n').trimEnd() + '\n';
     if (norm(current) !== norm(out)) {
-      console.error('fold-table.ts out of date (whitespace-normalized compare). Run: bun scripts/generate-fold-table.ts --input <CaseFolding.txt>');
+      console.error('case-fold-table.ts out of date (whitespace-normalized compare). Run: bun scripts/generate-case-fold-table.ts --input <CaseFolding.txt>');
       process.exit(1);
     }
-    console.log('fold-table.ts up to date.');
+    console.log('case-fold-table.ts up to date.');
     return;
   }
   // Atomic write: tmp + rename (no half-written table on crash).
-  const tmpUrl = new URL('../packages/webgpu-search/src/fold-table.ts.tmp', import.meta.url);
+  const tmpUrl = new URL('../packages/webgpu-search/src/case-fold-table.ts.tmp', import.meta.url);
   await writeFile(tmpUrl, out, 'utf8');
   await rename(tmpUrl, OUT_PATH);
   console.log(`Wrote ${OUT_PATH.pathname} (${out.length} chars)`);

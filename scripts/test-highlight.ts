@@ -1,5 +1,5 @@
 /**
- * Milestone 3: Unicode-Safe Highlighting Engine Test Suite.
+ * : Unicode-Safe Highlighting Engine Test Suite.
  *
  * Validates:
  * 1. Indentation trim compensation (leadingTrimOffset)
@@ -37,7 +37,7 @@ interface DocItem {
 }
 
 async function runM3Tests() {
-  console.log('--- Running Milestone 3: Unicode-Safe Highlighting Engine Tests ---');
+  console.log('--- Running  Unicode-Safe Highlighting Engine Tests ---');
 
   // =========================================================================
   // 1. Indentation Trim Compensation (leadingTrimOffset)
@@ -46,8 +46,8 @@ async function runM3Tests() {
   {
     // Leading spaces
     const raw1 = '    function calculate() {';
-    const sm1 = normalizeWithSourceMap(raw1, true);
-    assert.strictEqual(sm1.leadingTrimOffset, 4, 'Expected leadingTrimOffset === 4');
+    const map1 = normalizeWithSourceMap(raw1, true);
+    assert.strictEqual(map1.leadingTrimOffset, 4, 'Expected leadingTrimOffset === 4');
 
     const ranges1 = alignHighlights(raw1, 'function', { mode: 'substring' });
     assert.strictEqual(ranges1.length, 1);
@@ -57,16 +57,16 @@ async function runM3Tests() {
 
     // Leading tabs
     const raw2 = '\t\tconst value = 42;';
-    const sm2 = normalizeWithSourceMap(raw2, true);
-    assert.strictEqual(sm2.leadingTrimOffset, 2);
+    const map2 = normalizeWithSourceMap(raw2, true);
+    assert.strictEqual(map2.leadingTrimOffset, 2);
     const ranges2 = alignHighlights(raw2, 'value', { mode: 'substring' });
     assert.strictEqual(ranges2.length, 1);
     assert.strictEqual(raw2.slice(ranges2[0].start, ranges2[0].end), 'value');
 
     // Both leading and trailing whitespace
     const raw3 = '   hello world   ';
-    const sm3 = normalizeWithSourceMap(raw3, true);
-    assert.strictEqual(sm3.leadingTrimOffset, 3);
+    const map3 = normalizeWithSourceMap(raw3, true);
+    assert.strictEqual(map3.leadingTrimOffset, 3);
     const ranges3 = alignHighlights(raw3, 'world', { mode: 'substring' });
     assert.strictEqual(ranges3.length, 1);
     assert.strictEqual(raw3.slice(ranges3[0].start, ranges3[0].end), 'world');
@@ -694,10 +694,10 @@ async function runM3Tests() {
     console.log('   ✅ Security, edge cases, and multi-agent review hardening verified 100%');
   }
 
-  console.log('\n--- All Milestone 3: Unicode-Safe Highlighting Engine Tests Passed! ✅ ---');
+  console.log('\n--- All Unicode-Safe Highlighting Engine Tests Passed! ✅ ---');
 }
 
 runM3Tests().catch((err) => {
-  console.error('Milestone 3 test failed:', err);
+  console.error('test failed:', err);
   process.exit(1);
 });

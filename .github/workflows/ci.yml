@@ -26,11 +26,14 @@ jobs:
       - name: Validate WGSL Shaders (vgpu check)
         run: bun run check:shaders
 
-      - name: Lint Parity Invariants (M2)
+      - name: Lint Parity Invariants
         run: bun run lint:parity
 
-      - name: Verify Fold Table Freshness (M2)
-        run: bun scripts/generate-fold-table.ts --check
+      - name: Lint Naming Hygiene
+        run: bun run lint:naming
+
+      - name: Verify Case-Fold Table Freshness
+        run: bun scripts/generate-case-fold-table.ts --check
 
       - name: Typecheck Workspaces
         run: bun run typecheck
@@ -41,60 +44,63 @@ jobs:
       - name: Production Build (Turborepo)
         run: bun run build
 
-      - name: Check Bundle Size Budget (M2)
-        run: bun run check:bundle
+      - name: Check Bundle Size Budget
+        run: bun run check:bundle-size
 
-      - name: Run M2 Preprocessing and Parity Tests
-        run: bun run test:preprocess
+      - name: Validate Snapshot Benchmark Matrix (headless)
+        run: bun scripts/bench-snapshot-matrix.ts --out /tmp/benchmark_snapshot_matrix.json
 
-      - name: Run M2 Tests Under tr-TR Locale
-        run: LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 bun run test:preprocess
+      - name: Run Text-Normalization Tests
+        run: bun run test:normalization
+
+      - name: Run Text-Normalization Tests Under tr-TR Locale
+        run: bun run test:normalization:tr
 
       - name: Run Headless WebGPU Mock Tests (vgpu/mock)
-        run: bun run test:mock
+        run: bun run test:headless
 
-      - name: Run Milestone 1 Public Contract Tests
-        run: bun run test:m1
+      - name: Run Public Contract Tests
+        run: bun run test:contracts
 
-      - name: Run Milestone 2 Document Record Engine Tests
-        run: bun run test:m2
+      - name: Run Document Record Engine Tests
+        run: bun run test:records
 
-      - name: Run Milestone 3 Unicode-Safe Highlighting Tests
-        run: bun run test:m3
+      - name: Run Unicode-Safe Highlighting Tests
+        run: bun run test:highlight
 
-      - name: Run Milestone 4 Dynamic Mutations & Memory Management Tests
-        run: bun run test:m4
+      - name: Run Dynamic Mutations & Memory Management Tests
+        run: bun run test:mutations
 
-      - name: Run Milestone 5 Worker Client & Protocol Tests
-        run: bun run test:m5
+      - name: Run Worker Client & Protocol Tests
+        run: bun run test:worker
 
-      - name: Run Milestone 6 Snapshot Persistence & IndexedDB Tests
-        run: bun run test:m6
+      - name: Run Snapshot Persistence & IndexedDB Tests
+        run: bun run test:snapshot
 
-      - name: Run Milestone 7 Observability & Framework Recipe Tests
-        run: bun run test:m7
+      - name: Run Observability & Framework Recipe Tests
+        run: bun run test:observability
 
-      - name: Run Milestone 8 Proof Applications & Acceptance Tests
-        run: bun run test:m8
+      - name: Run Proof Applications & Acceptance Tests
+        run: bun run test:proof-apps
 
 
-      - name: Run M4 Parity Harness (differential + fallback + worker)
+      - name: Run Parity Harness (differential + fallback + worker)
         timeout-minutes: 10
-        # Single-shard in CI; M4_SHARD_* sharding is local-only (validated
+        # Single-shard in CI; PARITY_SHARD_* sharding is local-only (validated
         # fail-closed in-harness: bad env or empty shard exits non-zero).
         run: bun run test:parity
 
-      - name: Run M2 Structured Filter Tests
-        run: bun run test:filter
+      - name: Run Structured Filter Tests
+        run: bun run test:filtering
 
-      - name: Run M3 Facet Aggregation Tests
-        run: bun run test:facets
+      - name: Run Facet Aggregation Tests
+        run: bun run test:faceting
 
-      - name: Run M4 Token/Prefix/Typo Search-Mode Tests
+      - name: Run Query Diagnostics Tests
+        run: bun run test:diagnostics
+
+      - name: Run Token/Prefix/Typo Search-Mode Tests
         run: bun run test:search-modes
-
-      - name: Validate v0.4 Benchmark Matrix JSON (schema, not timing)
-        run: bun -e "const j=await Bun.file('benchmark_v04_matrix.json').json(); const rows=j.rows; if(!Array.isArray(rows)||rows.length!==15) throw new Error('expected 15 rows, got '+(rows?.length)); for(const r of rows){ if(typeof r.medianMs!=='number'||typeof r.p95Ms!=='number') throw new Error('bad timing in '+r.operation); if(!Array.isArray(r.samples)||r.samples.length===0) throw new Error('missing samples in '+r.operation);} if(!j.environment||j.environment.headless!==true) throw new Error('missing environment.headless'); console.log('bench matrix schema ok: '+rows.length+' rows');"
 
       - name: Setup Chrome (browser regression gate)
         id: setup-chrome

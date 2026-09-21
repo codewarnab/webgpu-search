@@ -4,9 +4,9 @@ import {
   DocumentIndex,
   SearchIndex,
   SearchWorkerClient,
-  serializeDocumentIndex,
-  restoreDocumentIndex,
-  WebGPUContextManager,
+  encodeSnapshot,
+  restoreSnapshot,
+  GpuDevicePool,
   QUERY_TOKENS_MAX,
   type DocumentId,
   type FallbackReason,
@@ -27,12 +27,12 @@ interface TestDoc {
 const SAMPLE_DOCS: TestDoc[] = [
   { id: '1', title: 'WebGPU Shading Pipelines', category: 'GPU', content: 'WGSL compute shaders parallel search' },
   { id: '2', title: 'Unicode Canonical Decomposition', category: 'Text', content: 'NFD and NFC normalization code points' },
-  { id: '3', title: 'IndexedDB Snapshot Storage', category: 'Persistence', content: 'U2D4 Little-Endian binary format with CRC32' },
+  { id: '3', title: 'IndexedDB Snapshot Storage', category: 'Persistence', content: 'snapshot Little-Endian binary format with CRC32' },
   { id: '4', title: 'Worker Client Concurrency', category: 'Threading', content: 'Off-thread async search with abort controllers' },
 ];
 
 async function runM7Tests() {
-  console.log('--- Running Milestone 7: Observability & Framework Integration Tests ---');
+  console.log('--- Running  Observability & Framework Integration Tests ---');
 
   // =========================================================================
   // 1. DocumentIndexStats Telemetry Schema & Memory Breakdown
@@ -145,10 +145,10 @@ async function runM7Tests() {
     const originalStats = index.getStats();
     assert.strictEqual(originalStats.mutationEpoch, 1);
 
-    const snapshot = serializeDocumentIndex(index);
+    const snapshot = encodeSnapshot(index);
     index.destroy();
 
-    const restoredIndex = await restoreDocumentIndex<TestDoc>(snapshot, { preferGpu: false });
+    const restoredIndex = await restoreSnapshot<TestDoc>(snapshot, { preferGpu: false });
     const restoredStats = restoredIndex.getStats();
 
     assert.strictEqual(restoredStats.docCount, 5);
@@ -259,8 +259,8 @@ async function runM7Tests() {
     // 4.7 'device-lost'
     {
       let deviceLostHandler: (() => void) | null = null;
-      const originalOnDeviceLost = WebGPUContextManager.onDeviceLost;
-      WebGPUContextManager.onDeviceLost = (fn: () => void) => {
+      const originalOnDeviceLost = GpuDevicePool.onDeviceLost;
+      GpuDevicePool.onDeviceLost = (fn: () => void) => {
         deviceLostHandler = fn;
         return () => { deviceLostHandler = null; };
       };
@@ -290,7 +290,7 @@ async function runM7Tests() {
         idx.destroy();
         console.log('   ✅ FallbackReason 7/9: device-lost verified');
       } finally {
-        WebGPUContextManager.onDeviceLost = originalOnDeviceLost;
+        GpuDevicePool.onDeviceLost = originalOnDeviceLost;
       }
     }
 
@@ -601,10 +601,10 @@ async function runM7Tests() {
     console.log('   ✅ React hook state machine & abort logic verified');
   }
 
-  console.log('--- All Milestone 7 Observability & Recipe Tests Passed! ✅ ---');
+  console.log('--- All Observability & Recipe Tests Passed! ✅ ---');
 }
 
 runM7Tests().catch((err) => {
-  console.error('❌ M7 Observability tests failed:', err);
+  console.error('❌  Observability tests failed:', err);
   process.exit(1);
 });

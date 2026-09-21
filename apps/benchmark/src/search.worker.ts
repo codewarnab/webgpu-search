@@ -1,13 +1,13 @@
 import {
   WebGPUEngine,
   CPUEngine,
-  searchCpuReference,
+  scoreExactMatches,
   normalizeText,
-  packUnicodeToGPUBuffer,
-  deserializeUnicodeDataset,
+  packDataset,
+  deserializeDataset,
   type SearchResult,
   type CPUSearchResult,
-  type PackedUnicodeBufferV2,
+  type PackedDataset,
   type SearchMode
 } from 'webgpu-search';
 
@@ -24,7 +24,7 @@ let latestQueryId = 0;
 let activeAbortController: AbortController | null = null;
 
 /**
- * M4 string-isolated enrichment (Issue #7).
+ * String-isolated enrichment.
  *
  * When true the worker loads token-only datasets into the GPU engine (no
  * `strings` duplication in VRAM residency) and returns compact
@@ -115,11 +115,11 @@ self.onmessage = async (e: MessageEvent) => {
       return;
     }
 
-    // Fail fast on legacy v0.1 byte buffers (M4 blocker fix). The M3 engine
+    // Fail fast on legacy byte buffers. The engine
     // silently ignores `recordsBufferData`/`offsetsBufferData` whenever
     // `strings` is present and repacks from `strings` -- so sending them is
     // pure structured-clone waste plus a dead packer. Reject explicitly so
-    // callers migrate to `{strings}` / `{serialized}` (U2F2) instead of
+    // callers migrate to `{strings}` / `{serialized}` (dataset) instead of
     // silently paying the clone. Rejected even when combined with new
     // fields: the combo still pays the exact clone waste this guard exists
     // to kill.
@@ -136,21 +136,21 @@ self.onmessage = async (e: MessageEvent) => {
           packMs: 0,
           datasetGeneration,
           error:
-            '[search.worker] legacy v0.1 byte buffers rejected (no U2F2 magic). ' +
-            'Send {strings} or {serialized} (packUnicodeToGPUBuffer/serialize). Rebuild required.'
+            '[search.worker] legacy byte buffers rejected (no dataset magic). ' +
+            'Send {strings} or {serialized} (packDataset/serialize). Rebuild required.'
         }
       });
       return;
     }
 
-    // Preferred path: U2F2 serialized buffer (transferable; the `.slice(0)`
+    // Preferred path: dataset buffer (transferable; the `.slice(0)`
     // copy in main.ts is moved with a transfer list -- copy-then-move, not
     // zero-copy, since the original is retained for reuse. `strings` may
     // ride along for in-worker CPU comparison.
     if (serialized !== undefined) {
       // Neutered-buffer guard: a transferred-then-reused or detached buffer
       // reports byteLength 0 -- explicit re-create path, never a silent empty
-      // index (matches library `deserializeUnicodeDataset` fail-closed rule).
+      // index (matches library `deserializeDataset` fail-closed rule).
       // Duck-typed (byteLength number + slice function) to match the
       // library cross-realm rule; foreign-realm ArrayBuffers are accepted,
       // non-buffers and neutered views are rejected.
@@ -175,7 +175,7 @@ self.onmessage = async (e: MessageEvent) => {
       }
       const t0 = performance.now();
       try {
-        const packed = deserializeUnicodeDataset(serialized);
+        const packed = deserializeDataset(serialized);
         const packMs = performance.now() - t0;
         const nextStrings = Array.isArray(strings) ? strings : [];
         const nextSize = packed.rowCount;
@@ -229,13 +229,14 @@ self.onmessage = async (e: MessageEvent) => {
             serializedBytes: byteLen,
             stringsChars: countChars(datasetStrings),
             tokenCount: packed.tokenCount,
+            normalized: packed.normalized,
             folded: packed.folded,
             transferLatencyMs: transferLatencyMs !== undefined ? Number(transferLatencyMs.toFixed(2)) : undefined,
             datasetGeneration
           }
         });
       } catch (err) {
-        // deserializeUnicodeDataset throws IncompatibleIndexError on
+        // deserializeDataset throws IncompatibleIndexError on
         // magic/version/checksum/shape failures -- surface, don't swallow.
         self.postMessage({
           type: 'DATASET_LOADED',
@@ -253,7 +254,7 @@ self.onmessage = async (e: MessageEvent) => {
 
     // Fallback path: raw strings (structured-clone cost is real -- the array
     // is fully copied into the worker; see DATASET_LOADED `stringsChars`).
-    // Packs via the unicode pipeline (M4; the legacy `packStringsToGPUBuffer`
+    // Packs via the unicode pipeline (the legacy `packStringsToGPUBuffer`
     // ASCII-mangling packer is deleted from this flow).
     // Fail-closed: missing/non-array `strings` (with no `serialized`) never
     // wipes a good index with an empty success. An explicit `[]` is allowed
@@ -275,9 +276,9 @@ self.onmessage = async (e: MessageEvent) => {
     // Always pack for metrics, even when the GPU is not ready (CPU-only
     // worker still reports tokenCount instead of a misleading 0).
     const t0 = performance.now();
-    let packedForMetrics: PackedUnicodeBufferV2 | null = null;
+    let packedForMetrics: PackedDataset | null = null;
     try {
-      packedForMetrics = packUnicodeToGPUBuffer(list, { folded: true });
+      packedForMetrics = packDataset(list, { normalized: true });
     } catch (packErr) {
       self.postMessage({
         type: 'DATASET_LOADED',
@@ -443,7 +444,7 @@ self.onmessage = async (e: MessageEvent) => {
       if (runCpuComparison && query) {
         if (datasetRecordTokens.length > 0) {
           const norm = normalizeText(query, true);
-          parityResult = searchCpuReference(
+          parityResult = scoreExactMatches(
             datasetRecordTokens,
             norm.tokens,
             mode,

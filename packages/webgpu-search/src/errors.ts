@@ -1,5 +1,5 @@
 /**
- * v0.4 Error Hierarchy for webgpu-search.
+ * Error Hierarchy for webgpu-search.
  * Portable across browser main thread, Web Workers, Node.js, and SSR (zero DOM references).
  */
 

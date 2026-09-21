@@ -21,7 +21,7 @@ import {
   CostBudgetExceededError,
   InvalidFilterError
 } from '../errors';
-import { abortError } from '../runtime-guards';
+import { abortError } from '../guard';
 
 export type {
   WorkerClientOptions,

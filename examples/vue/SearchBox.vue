@@ -93,7 +93,7 @@ interface ArticleDoc {
 const SAMPLE_ARTICLES: ArticleDoc[] = [
   { id: '1', title: 'WebGPU Compute Pipelines', category: 'Graphics', description: 'WGSL compute shaders for high-throughput string matching.' },
   { id: '2', title: 'Unicode Canonical Decomposition', category: 'Text', description: 'Handling combining diacritics, astral surrogate pairs, and case folds.' },
-  { id: '3', title: 'IndexedDB Snapshot Persistence', category: 'Storage', description: 'U2D3 Little-Endian binary format with CRC32 integrity verification.' },
+  { id: '3', title: 'IndexedDB Snapshot Persistence', category: 'Storage', description: 'Snapshot Little-Endian binary format with CRC32 integrity verification.' },
   { id: '4', title: 'Vue 3 Reactivity and Composables', category: 'Framework', description: 'Deep dive into shallowRef, custom stores, and component lifecycles.' },
 ];
 

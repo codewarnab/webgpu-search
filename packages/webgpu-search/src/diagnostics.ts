@@ -1,5 +1,5 @@
 /**
- * v0.4 query diagnostics, cost budgets & broad-query safeguards (Issue #10 M7).
+ * Query diagnostics, cost budgets & broad-search safeguards.
  *
  * Host applications (IDE palettes, log viewers, data grids) need execution
  * deadlines, memory ceilings, candidate overflow telemetry, and protection
@@ -7,10 +7,10 @@
  * the portable, zero-dependency policy layer:
  * - `normalizeCostBudgetOptions`: fail-closed validation of caller budgets.
  * - `assertTimeBudget` / `assertCandidateBudget`: fail-closed enforcement
- *   throwing `CostBudgetExceededError` (`'time'` / `'candidates'`).
+ * throwing `CostBudgetExceededError` (`'time'` / `'candidates'`).
  * - Broad-query heuristics: short queries over massive corpora route to the
- *   CPU streaming scan pre-dispatch; post-hoc selectivity > 80% over massive
- *   corpora emits a non-fatal warning.
+ * CPU streaming scan pre-dispatch; post-hoc selectivity > 80% over massive
+ * corpora emits a non-fatal warning.
  * - `computeFilterSelectivity`: filter narrowing ratio in `[0, 1]`.
  *
  * Timing granularity: budget enforcement is best-effort at phase boundaries
@@ -19,7 +19,7 @@
  * as stale partials. There is no intra-scan preemption. Callers needing hard
  * deadlines must also use `abortSignal` for cooperative cancellation.
  *
- * Token semantics: `queryTokenCount` throughout M7 is post-fold Unicode code
+ * Token semantics: `queryTokenCount` throughout is post-normalization Unicode code
  * points (including spaces), not whitespace words — e.g. `"auth"` is 4
  * tokens. The <=2-token pre-dispatch gate therefore fires only on 1–2
  * character queries, which are near-universally broad under fuzzy/substring.
@@ -27,15 +27,15 @@
  * Telemetry overhead is sub-microsecond when disabled: clocks and warning
  * strings are gated on `diagnostics:true` (or an active time budget for the
  * entry clock). Phase timing itself lives in `document-index.ts` and
- * `hybrid-index.ts` so this module never touches engine internals.
+ * `search-index.ts` so this module never touches engine internals.
  *
  * Portable: no DOM refs (`window`, `document`, `navigator`). Wall-clock reads
- * go through `nowMs()` (`runtime-guards.ts`), which avoids bare `performance`
+ * go through `nowMs()` (`guard.ts`), which avoids bare `performance`
  * globals for Web Worker / Node.js / SSR safety.
  */
 
 import { CostBudgetExceededError } from './errors';
-import { nowMs, throwIfAborted } from './runtime-guards';
+import { nowMs, throwIfAborted } from './guard';
 import type { CostBudgetOptions } from './types';
 
 /**
@@ -44,23 +44,23 @@ import type { CostBudgetOptions } from './types';
  * candidate overflow, so the engine prefers the CPU streaming scan and
  * records a warning.
  */
-export const BROAD_QUERY_SELECTIVITY_THRESHOLD = 0.8 as const;
+export const BROAD_SEARCH_SELECTIVITY_THRESHOLD = 0.8 as const;
 
 /**
  * Minimum active document count for broad-query safeguards to engage.
  * Below this the GPU dispatch path handles even full-corpus matches without
  * saturation risk, so no routing or warnings apply.
  */
-export const BROAD_QUERY_MIN_DOCS = 5000 as const;
+export const BROAD_SEARCH_MIN_DOCS = 5000 as const;
 
 /**
- * Pre-dispatch heuristic: queries with at most this many post-fold tokens
- * over a massive corpus (>= `BROAD_QUERY_MIN_DOCS` docs) are assumed broad
+ * Pre-dispatch heuristic: queries with at most this many post-normalization tokens
+ * over a massive corpus (>= `BROAD_SEARCH_MIN_DOCS` docs) are assumed broad
  * (e.g. single-character palette/log queries) and route to CPU before any
  * GPU dispatch. Selectivity is unknowable pre-scoring, so token count is the
  * only cheap, deterministic proxy available at routing time.
  */
-export const BROAD_QUERY_SHORT_QUERY_TOKENS = 2 as const;
+export const BROAD_SEARCH_SHORT_QUERY_TOKENS = 2 as const;
 
 /** Cost budget with defaults resolved (all fields optional; undefined = no budget). */
 export interface NormalizedCostBudget {
@@ -74,24 +74,24 @@ export interface NormalizedCostBudget {
  * - `undefined` resolves to `undefined` (no budget enforcement).
  * - Must be a non-null object; `null`/arrays/primitives throw `TypeError`.
  * - `maxExecutionTimeMs` must be a finite number > 0 when provided
- *   (fractional milliseconds allowed); `0`, negatives, `NaN`, and `Infinity`
- *   throw `RangeError`. Note: a deadline alone never enables anything — it
- *   only constrains; tiny deadlines fail the query fail-closed. Deadlines are
- *   enforced at phase boundaries only (best-effort, post-scan discard — see
- *   `assertTimeBudget`); they do not preempt in-flight scans.
+ * (fractional milliseconds allowed); `0`, negatives, `NaN`, and `Infinity`
+ * throw `RangeError`. Note: a deadline alone never enables anything — it
+ * only constrains; tiny deadlines fail the query fail-closed. Deadlines are
+ * enforced at phase boundaries only (best-effort, post-scan discard — see
+ * `assertTimeBudget`); they do not preempt in-flight scans.
  * - `maxCandidates` must be an integer >= 1 when provided; fractions,
- *   `0`/negatives, and non-finite values throw `RangeError`. Structured
- *   filters are enforced pre-scan on the exact post-filter population;
- *   function-predicate filters report selectivity `1.0` and enforce the
- *   ceiling on the pre-predicate population (conservative fail-closed —
- *   the true post-predicate count is unknowable without scanning).
+ * `0`/negatives, and non-finite values throw `RangeError`. Structured
+ * filters are enforced pre-scan on the exact post-filter population;
+ * function-predicate filters report selectivity `1.0` and enforce the
+ * ceiling on the pre-predicate population (conservative fail-closed —
+ * the true post-predicate count is unknowable without scanning).
  * - `abortSignal` passes through untouched when provided (worker transport
- *   strips it pre-clone; see `worker-client.ts`); non-object values throw
- *   `TypeError`. Forged `{ aborted: true }` objects are honored via
- *   `throwIfAborted` at enforcement points.
+ * strips it pre-clone; see `worker-client.ts`); non-object values throw
+ * `TypeError`. Forged `{ aborted: true }` objects are honored via
+ * `throwIfAborted` at enforcement points.
  * - Unknown `max*` keys throw `TypeError` fail-closed (typo'd limits such as
- *   `{ maxCandidate: 5 }` must not silently disable the ceiling). Other
- *   unknown keys are ignored forward-compatibly.
+ * `{ maxCandidate: 5 }` must not silently disable the ceiling). Other
+ * unknown keys are ignored forward-compatibly.
  */
 export function normalizeCostBudgetOptions(
   raw: CostBudgetOptions | undefined
@@ -211,11 +211,11 @@ export function assertCandidateBudget(
 /**
  * Filter narrowing ratio in `[0, 1]`: `matched / total`.
  * - No filter (`matched === total` by convention, including empty corpora)
- *   yields `1.0` (no narrowing). Function-predicate filters also report
- *   `1.0` with `filteringMs ≈ 0`; their evaluation cost lands in `scoringMs`.
+ * yields `1.0` (no narrowing). Function-predicate filters also report
+ * `1.0` with `filteringMs ≈ 0`; their evaluation cost lands in `scoringMs`.
  * - Empty corpus with a structured filter yields `0` (nothing can match).
  * - Result is clamped to `[0, 1]` defensively (popcount can never exceed the
- *   active count, but forged inputs must not leak `NaN`/`Infinity`).
+ * active count, but forged inputs must not leak `NaN`/`Infinity`).
  */
 export function computeFilterSelectivity(matched: number, total: number): number {
   if (total <= 0) return matched <= 0 ? 1.0 : 0;
@@ -230,9 +230,9 @@ export function computeFilterSelectivity(matched: number, total: number): number
 
 /**
  * Pre-dispatch broad-query heuristic: true when the corpus is massive
- * (`docCount >= BROAD_QUERY_MIN_DOCS`) and the query is short
- * (`queryTokenCount <= BROAD_QUERY_SHORT_QUERY_TOKENS`). `queryTokenCount`
- * is post-fold Unicode code points (including spaces), not whitespace words.
+ * (`docCount >= BROAD_SEARCH_MIN_DOCS`) and the query is short
+ * (`queryTokenCount <= BROAD_SEARCH_SHORT_QUERY_TOKENS`). `queryTokenCount`
+ * is post-normalization Unicode code points (including spaces), not whitespace words.
  * Short queries (single characters, symbol prefixes) match a large fraction
  * of any sizable corpus, so routing them to the CPU streaming scan
  * pre-dispatch avoids GPU buffer saturation and driver timeouts (TDR).
@@ -242,22 +242,22 @@ export function computeFilterSelectivity(matched: number, total: number): number
  */
 export function isBroadQueryHeuristic(queryTokenCount: number, docCount: number): boolean {
   if (!Number.isFinite(queryTokenCount) || !Number.isFinite(docCount)) return false;
-  if (docCount < BROAD_QUERY_MIN_DOCS) return false;
+  if (docCount < BROAD_SEARCH_MIN_DOCS) return false;
   if (queryTokenCount <= 0) return false;
-  return queryTokenCount <= BROAD_QUERY_SHORT_QUERY_TOKENS;
+  return queryTokenCount <= BROAD_SEARCH_SHORT_QUERY_TOKENS;
 }
 
 /**
  * Post-hoc broad-query check: true when the observed match selectivity
- * (`totalMatches / docCount`) exceeds `BROAD_QUERY_SELECTIVITY_THRESHOLD` on
+ * (`totalMatches / docCount`) exceeds `BROAD_SEARCH_SELECTIVITY_THRESHOLD` on
  * a massive corpus. Callers record a non-fatal warning (never throw):
  * the result set is complete and correctly ranked, but hosts should narrow
  * the query or add filters on repeat.
  */
 export function isBroadSelectivity(selectivity: number, docCount: number): boolean {
   if (!Number.isFinite(selectivity) || !Number.isFinite(docCount)) return false;
-  if (docCount < BROAD_QUERY_MIN_DOCS) return false;
-  return selectivity > BROAD_QUERY_SELECTIVITY_THRESHOLD;
+  if (docCount < BROAD_SEARCH_MIN_DOCS) return false;
+  return selectivity > BROAD_SEARCH_SELECTIVITY_THRESHOLD;
 }
 
 /** Non-fatal warning recorded when the pre-dispatch heuristic routes to CPU. */
@@ -317,3 +317,10 @@ export function candidateOverflowWarning(
   }
   return msg;
 }
+
+/** @deprecated Use BROAD_SEARCH_SELECTIVITY_THRESHOLD. */
+export const BROAD_QUERY_SELECTIVITY_THRESHOLD = BROAD_SEARCH_SELECTIVITY_THRESHOLD;
+/** @deprecated Use BROAD_SEARCH_MIN_DOCS. */
+export const BROAD_QUERY_MIN_DOCS = BROAD_SEARCH_MIN_DOCS;
+/** @deprecated Use BROAD_SEARCH_SHORT_QUERY_TOKENS. */
+export const BROAD_QUERY_SHORT_QUERY_TOKENS = BROAD_SEARCH_SHORT_QUERY_TOKENS;

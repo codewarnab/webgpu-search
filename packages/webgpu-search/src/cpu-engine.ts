@@ -1,6 +1,6 @@
 import uFuzzy from '@leeoniya/ufuzzy';
 import type { SearchResultItem } from './types';
-import { nowMs } from './runtime-guards';
+import { nowMs } from './guard';
 
 export interface CPUSearchResult {
   query: string;
@@ -20,9 +20,9 @@ export class CPUEngine {
   }
 
   /**
-   * uFuzzy filter + search with normalized descending score parity
+   * uFuzzy filter + search with normalized descending scores
    */
-  searchUFuzzy(
+  searchWithUFuzzy(
     strings: string[],
     query: string,
     maxResults: number = 1000,
@@ -51,9 +51,9 @@ export class CPUEngine {
       ? order.map((o: number) => info.idx[o])
       : (idxs ?? []);
 
-    // NOTE (M2 quarantine): legacy uFuzzy path is explicitly non-conforming
+    // NOTE: legacy uFuzzy path is explicitly non-conforming
     // (locale-sensitive lowercasing lives here on purpose, rank scores are
-    // fabricated). Excluded from the parity matrix; use cpuAlgorithm:'parity'.
+    // fabricated). Excluded from the differential matrix; use cpuScorer:'exact'.
     let skippedCaseSensitive = 0;
     for (let i = 0; i < indices.length; i++) {
       const itemIdx = indices[i];
@@ -81,9 +81,9 @@ export class CPUEngine {
   }
 
   /**
-   * Native JS substring search with ranking parity and case-sensitivity support
+   * Native JS substring search with ranking symmetry and case-sensitivity support
    */
-  searchNative(
+  searchNaiveScan(
     strings: string[],
     query: string,
     maxResults: number = 1000,
@@ -125,5 +125,25 @@ export class CPUEngine {
       results,
       durationMs
     };
+  }
+
+  /** @deprecated Use searchWithUFuzzy (explicit vendor name). */
+  searchUFuzzy(
+    strings: string[],
+    query: string,
+    maxResults: number = 1000,
+    caseSensitive: boolean = false
+  ): CPUSearchResult {
+    return this.searchWithUFuzzy(strings, query, maxResults, caseSensitive);
+  }
+
+  /** @deprecated Use searchNaiveScan. */
+  searchNative(
+    strings: string[],
+    query: string,
+    maxResults: number = 1000,
+    caseSensitive: boolean = false
+  ): CPUSearchResult {
+    return this.searchNaiveScan(strings, query, maxResults, caseSensitive);
   }
 }

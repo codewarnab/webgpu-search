@@ -1,9 +1,9 @@
 /**
- * Dataset generation, multi-corpus matrix, and U2F2 unicode packing for search benchmarks.
+ * Dataset generation, multi-corpus matrix, and unicode packing for search benchmarks.
  *
- * M5 (Issue #7): Expands dataset generation beyond ASCII paths to cover three contracted
+ * Expands dataset generation beyond ASCII paths to cover three contracted
  * corpora classes:
- * 1. ASCII code paths (src/components/..., 10k to 2M rows): backwards comparison with v0.1.
+ * 1. ASCII code paths (src/components/..., 10k to 2M rows): backwards comparison with the legacy path.
  * 2. CJK corpus (multi-byte Hanzi/Kana/Hangul terms, 10k to 500k rows): evaluates 32-bit
  *    scalar packing density and multi-workgroup memory access across non-Latin scripts.
  * 3. Emoji & mixed-script corpus (grapheme-heavy, astral scalars, ZWJ sequences, flags,
@@ -13,8 +13,8 @@
  * Exposes query matrix: short, long, CJK, Emoji, degenerate surviving, and over-limit queries.
  */
 import {
-  packUnicodeToGPUBuffer,
-  serializeUnicodeDataset,
+  packDataset,
+  serializeDataset,
   normalizeText,
 } from 'webgpu-search';
 
@@ -24,10 +24,10 @@ export interface Dataset {
   size: number;
   corpusType: CorpusType;
   strings: string[];
-  /** U2F2 serialized unicode dataset (header + u32 records + u32 offsets). */
-  serializedU2F2: ArrayBuffer;
+  /** Serialized dataset buffer (header + u32 records + u32 offsets). */
+  serializedDataset: ArrayBuffer;
   serializedByteLength: number;
-  /** Post-fold code-point total (exact, from the unicode packer). */
+  /** Post-normalization code-point total (exact, from the dataset packer). */
   tokenCount: number;
   /** records + offsets bytes actually allocated (no 64 B fiction). */
   packedBytes: number;
@@ -72,7 +72,7 @@ export const QUERY_MATRIX: QueryMatrixEntry[] = [
     name: 'Medium ASCII ("Controller")',
     query: 'Controller',
     category: 'short',
-    description: 'Standard symbol suffix, baseline comparison for v0.1 parity'
+    description: 'Standard symbol suffix, baseline comparison for legacy exact scoring'
   },
   {
     id: 'ascii-long',
@@ -288,7 +288,7 @@ function generateSyntheticStrings(
 
 /**
  * Generate N synthetic strings for the requested corpus class, measure normalization
- * and packing pipeline breakdown, and produce the U2F2 transfer buffer.
+ * and packing pipeline breakdown, and produce the dataset transfer buffer.
  *
  * Overloaded for backwards compatibility:
  * - `generateDataset(count, onProgress)`
@@ -341,8 +341,8 @@ export function generateDataset(
 
   // Phase 2: Packing and Serialization timing (zero-renorm path using pre-tokenized rows)
   const tPack0 = performance.now();
-  const packed = packUnicodeToGPUBuffer(tokenRows, { folded, totalTokens });
-  const serializedU2F2 = serializeUnicodeDataset(packed);
+  const packed = packDataset(tokenRows, { normalized: folded, totalTokens });
+  const serializedDataset = serializeDataset(packed);
   const packMs = performance.now() - tPack0;
 
   if (onProgress) {
@@ -353,8 +353,8 @@ export function generateDataset(
     size: count,
     corpusType,
     strings,
-    serializedU2F2,
-    serializedByteLength: serializedU2F2.byteLength,
+    serializedDataset,
+    serializedByteLength: serializedDataset.byteLength,
     tokenCount: packed.tokenCount,
     packedBytes: packed.combinedByteLength,
     folded,

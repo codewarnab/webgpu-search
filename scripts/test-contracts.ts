@@ -1,6 +1,6 @@
 /**
- * Milestone 1 Public Contracts & Specifications Test Suite.
- * Validates v0.3 DocumentIndex, SearchWorkerClient, Little-Endian U2D3 constants,
+ * Public Contracts & Specifications Test Suite.
+ * Validates DocumentIndex, SearchWorkerClient, Little-Endian legacy snapshot constants,
  * error hierarchy, package exports, and worker SSR safety.
  */
 
@@ -8,16 +8,16 @@ import { readFile } from 'node:fs/promises';
 import {
   DocumentIndex,
   SearchWorkerClient,
-  DOC_FORMAT_VERSION,
-  SERIALIZED_DOC_MAGIC,
-  SERIALIZED_DOC_HEADER_BYTES,
+  LEGACY_SNAPSHOT_VERSION,
+  LEGACY_SNAPSHOT_MAGIC,
+  LEGACY_SNAPSHOT_HEADER_BYTES,
   DuplicateIdError,
   DocumentNotFoundError,
-  U2D4_MAGIC,
-  U2D4_FORMAT_VERSION,
-  FORMAT_VERSION_4,
-  DOC_FORMAT_VERSION_4,
-  U2D4_HEADER_BYTES,
+  SNAPSHOT_MAGIC,
+  SNAPSHOT_FORMAT_VERSION,
+  FORMAT_VERSION_4, // deprecated alias pin
+  DOC_FORMAT_VERSION_4, // deprecated alias pin
+  SNAPSHOT_HEADER_BYTES,
   WebGPUSearchError,
   IncompatibleHookError,
   CostBudgetExceededError,
@@ -66,34 +66,34 @@ import {
   type PrefixSearchOptions,
   type DeterministicRankingOptions,
   type TieBreakerCriterion,
-  type SuggestOptions,
+  type AutocompleteOptions,
   type SuggestionItem,
   type SuggestResponse,
   type MatchInfo,
-  type SearchExtensionHooks,
+  type SearchHooks,
   type CostBudgetOptions,
   type QueryDiagnosticsTimings,
   type QueryDiagnostics
 } from '../packages/webgpu-search/src/index';
 
-import { searchCpuReference } from '../packages/webgpu-search/src/cpu-reference';
+import { scoreExactMatches } from '../packages/webgpu-search/src/exact-scorer';
 import { isDedicatedWorker, startSearchWorker } from '../packages/webgpu-search/src/worker/search-worker';
 
 async function runM1Tests() {
-  console.log('--- Running Milestone 1 Public Contracts & Specifications Tests ---');
+  console.log('--- Running Public Contracts & Specifications Tests ---');
 
   // 1. Constants and Magic verification
-  console.log('1. Verifying U2D3 persistence constants...');
-  if (DOC_FORMAT_VERSION !== 3) {
-    throw new Error(`DOC_FORMAT_VERSION must be 3, got ${DOC_FORMAT_VERSION}`);
+  console.log('1. Verifying legacy snapshot persistence constants...');
+  if (LEGACY_SNAPSHOT_VERSION !== 3) {
+    throw new Error(`LEGACY_SNAPSHOT_VERSION must be 3, got ${LEGACY_SNAPSHOT_VERSION}`);
   }
-  if (SERIALIZED_DOC_MAGIC !== 0x55324433) {
-    throw new Error(`SERIALIZED_DOC_MAGIC must be 0x55324433 ('U2D3'), got ${SERIALIZED_DOC_MAGIC}`);
+  if (LEGACY_SNAPSHOT_MAGIC !== 0x55324433) {
+    throw new Error(`LEGACY_SNAPSHOT_MAGIC must be 0x55324433 ('legacy snapshot'), got ${LEGACY_SNAPSHOT_MAGIC}`);
   }
-  if (SERIALIZED_DOC_HEADER_BYTES !== 48) {
-    throw new Error(`SERIALIZED_DOC_HEADER_BYTES must be 48, got ${SERIALIZED_DOC_HEADER_BYTES}`);
+  if (LEGACY_SNAPSHOT_HEADER_BYTES !== 48) {
+    throw new Error(`LEGACY_SNAPSHOT_HEADER_BYTES must be 48, got ${LEGACY_SNAPSHOT_HEADER_BYTES}`);
   }
-  console.log('   ✅ DOC_FORMAT_VERSION (3), SERIALIZED_DOC_MAGIC (0x55324433), and header size (48 B) verified');
+  console.log('   ✅ LEGACY_SNAPSHOT_VERSION (3), LEGACY_SNAPSHOT_MAGIC (0x55324433), and header size (48 B) verified');
 
   // 2. Error hierarchy
   console.log('2. Verifying error hierarchy (DuplicateIdError, DocumentNotFoundError)...');
@@ -146,13 +146,13 @@ async function runM1Tests() {
   const factoryIndex = await DocumentIndex.create<TestDoc>([], indexOptions);
   if (!(factoryIndex instanceof DocumentIndex)) throw new Error('DocumentIndex.create must return DocumentIndex');
 
-  // Verify search returns valid response (implemented in M2)
+  // Verify search returns valid response
   const searchRes = await docIndex.search('test');
   if (searchRes.totalMatches !== 0 || !Array.isArray(searchRes.results)) {
     throw new Error('DocumentIndex.search should return valid empty response on empty index');
   }
 
-  // Verify add returns valid MutationResult (implemented in M4)
+  // Verify add returns valid MutationResult
   const addRes = await docIndex.add({ id: '1', title: 't', content: 'c' });
   if (addRes.added !== 1 || addRes.mutationEpoch !== 1) {
     throw new Error('DocumentIndex.add should return valid MutationResult');
@@ -302,24 +302,24 @@ async function runM1Tests() {
   }
   console.log('   ✅ Type shapes (DocumentSearchResultItem, DocumentSearchResponse, MutationBatch, MutationResult, DocumentIndexStats, WorkerRequest, WorkerResponse) verified');
 
-  // 8. Verifying v0.4 U2D4 persistence constants
-  console.log('8. Verifying v0.4 U2D4 persistence constants...');
-  if (U2D4_MAGIC !== 0x55324434) {
-    throw new Error(`U2D4_MAGIC must be 0x55324434 ('U2D4'), got ${U2D4_MAGIC}`);
+  // 8. Verifying snapshot persistence constants
+  console.log('8. Verifying  snapshot persistence constants...');
+  if (SNAPSHOT_MAGIC !== 0x55324434) {
+    throw new Error(`SNAPSHOT_MAGIC must be 0x55324434 ('snapshot'), got ${SNAPSHOT_MAGIC}`);
   }
-  if (U2D4_FORMAT_VERSION !== 4) {
-    throw new Error(`U2D4_FORMAT_VERSION must be 4, got ${U2D4_FORMAT_VERSION}`);
+  if (SNAPSHOT_FORMAT_VERSION !== 4) {
+    throw new Error(`SNAPSHOT_FORMAT_VERSION must be 4, got ${SNAPSHOT_FORMAT_VERSION}`);
   }
-  if (FORMAT_VERSION_4 !== 4 || DOC_FORMAT_VERSION_4 !== 4) {
+  if (FORMAT_VERSION_4 !== 4 || DOC_FORMAT_VERSION_4 !== 4) { // deprecated alias pins
     throw new Error('FORMAT_VERSION_4 and DOC_FORMAT_VERSION_4 aliases must be 4');
   }
-  if (U2D4_HEADER_BYTES !== 56) {
-    throw new Error(`U2D4_HEADER_BYTES must be 56, got ${U2D4_HEADER_BYTES}`);
+  if (SNAPSHOT_HEADER_BYTES !== 56) {
+    throw new Error(`SNAPSHOT_HEADER_BYTES must be 56, got ${SNAPSHOT_HEADER_BYTES}`);
   }
-  console.log('   ✅ U2D4_MAGIC (0x55324434), U2D4_FORMAT_VERSION (4), and header size (56 B) verified');
+  console.log('   ✅ SNAPSHOT_MAGIC (0x55324434), SNAPSHOT_FORMAT_VERSION (4), and header size (56 B) verified');
 
-  // 9. Verifying v0.4 Error hierarchy & Worker serialization roundtrip
-  console.log('9. Verifying v0.4 Error hierarchy & Worker serialization roundtrip...');
+  // 9. Verifying Error hierarchy & Worker serialization roundtrip
+  console.log('9. Verifying  Error hierarchy & Worker serialization roundtrip...');
   const baseErr = new WebGPUSearchError('Base engine error');
   if (!(baseErr instanceof Error) || !(baseErr instanceof WebGPUSearchError)) {
     throw new Error('WebGPUSearchError inheritance failed');
@@ -393,14 +393,14 @@ async function runM1Tests() {
   if (!(nullDetailsErr instanceof InvalidFilterError) || nullDetailsErr.message !== 'Null details test') {
     throw new Error('deserializeError failed with null details');
   }
-  console.log('   ✅ v0.4 Error classes, custom message roundtrips, and null-safe deserialization verified');
+  console.log('   ✅  Error classes, custom message roundtrips, and null-safe deserialization verified');
 
   // 10. Verifying SearchMode extension ('token', 'prefix')
   console.log('10. Verifying SearchMode extension (fuzzy, substring, token, prefix)...');
   const modes: SearchMode[] = ['fuzzy', 'substring', 'token', 'prefix'];
   if (modes.length !== 4) throw new Error('SearchMode should support all 4 modes');
 
-  // v0.4 M4: token/prefix are implemented (CPU reference + DocumentIndex).
+  // token/prefix are implemented (CPU reference + DocumentIndex).
   // Unknown modes still fail closed with IncompatibleOptionError.
   {
     const testIdx = new DocumentIndex({ fields: ['title'] });
@@ -408,19 +408,19 @@ async function runM1Tests() {
     if (docRes.totalMatches !== 0 || docRes.mode !== 'token') {
       throw new Error('DocumentIndex.search must serve mode: "token" (empty index -> 0 matches).');
     }
-    const cpuRes = searchCpuReference([new Uint32Array([1, 2])], new Uint32Array([1]), 'token' as any, 10, ['test']);
+    const cpuRes = scoreExactMatches([new Uint32Array([1, 2])], new Uint32Array([1]), 'token' as any, 10, ['test']);
     if (cpuRes.totalMatches !== 1) {
-      throw new Error('searchCpuReference must serve mode: "token" (single-term reduces to substring).');
+      throw new Error('scoreExactMatches must serve mode: "token" (single-term reduces to substring).');
     }
     let threwUnknown = false;
     try {
-      searchCpuReference([new Uint32Array([1, 2])], new Uint32Array([1]), 'regex' as any, 10, ['test']);
+      scoreExactMatches([new Uint32Array([1, 2])], new Uint32Array([1]), 'regex' as any, 10, ['test']);
     } catch (err: any) {
       threwUnknown = err instanceof IncompatibleOptionError && err.option === 'mode';
     }
-    if (!threwUnknown) throw new Error('searchCpuReference must throw IncompatibleOptionError on unknown mode');
+    if (!threwUnknown) throw new Error('scoreExactMatches must throw IncompatibleOptionError on unknown mode');
   }
-  console.log('   ✅ SearchMode extended to fuzzy | substring | token | prefix (M4 functional)');
+  console.log('   ✅ SearchMode extended to fuzzy | substring | token | prefix (functional)');
 
   // 11. Verifying Filter AST schemas and Columnar types
   console.log('11. Verifying Filter AST schemas and Columnar types...');
@@ -504,7 +504,7 @@ async function runM1Tests() {
     tieBreakers: ['score', 'weight', 'exact', 'length', 'id']
   };
 
-  const suggestOpts: SuggestOptions = { limit: 5, mode: 'prefix', fuzzyDistance: 0 };
+  const suggestOpts: AutocompleteOptions = { limit: 5, mode: 'prefix', fuzzyDistance: 0 };
   const suggestItem: SuggestionItem<TestDoc> = {
     text: 'AuthController',
     score: 980,
@@ -523,7 +523,7 @@ async function runM1Tests() {
     rawScore: 900,
     normalizedScore: 950
   };
-  const extensions: SearchExtensionHooks<TestDoc> = {
+  const extensions: SearchHooks<TestDoc> = {
     tokenizer: (text) => text.split(/[\s_]+/),
     scoringHook: (_doc, baseScore, _info) => baseScore + 50
   };
@@ -556,14 +556,26 @@ async function runM1Tests() {
   let threwWorkerExtensions = false;
   const workerForExt = new SearchWorkerClient<TestDoc>();
   try {
-    await workerForExt.search('query', { extensions: { scoringHook: () => 100 } });
+    await workerForExt.search('query', { hooks: { scoringHook: () => 100 } });
   } catch (err: any) {
-    threwWorkerExtensions = err instanceof IncompatibleHookError && err.hookId === 'extensions';
+    threwWorkerExtensions = err instanceof IncompatibleHookError && err.hookId === 'hooks';
   } finally {
     await workerForExt.destroy();
   }
   if (!threwWorkerExtensions) {
-    throw new Error('SearchWorkerClient.search must throw IncompatibleHookError on non-cloneable extensions');
+    throw new Error('SearchWorkerClient.search must throw IncompatibleHookError on non-cloneable hooks');
+  }
+  let threwWorkerExtensionsAlias = false;
+  const workerForExtAlias = new SearchWorkerClient<TestDoc>();
+  try {
+    await workerForExtAlias.search('query', { extensions: { scoringHook: () => 100 } });
+  } catch (err: any) {
+    threwWorkerExtensionsAlias = err instanceof IncompatibleHookError;
+  } finally {
+    await workerForExtAlias.destroy();
+  }
+  if (!threwWorkerExtensionsAlias) {
+    throw new Error('SearchWorkerClient.search must throw IncompatibleHookError on non-cloneable extensions alias');
   }
 
   if (
@@ -584,14 +596,14 @@ async function runM1Tests() {
     nullValue !== null ||
     !searchOptsWithSuggest.suggest
   ) {
-    throw new Error('v0.4 feature type shapes failed validation');
+    throw new Error(' feature type shapes failed validation');
   }
   console.log('   ✅ Facets, Typo Tolerance, Ranking, Suggestions, Extensions, and Diagnostics verified');
 
-  console.log('\n--- All Milestone 1 Public Contracts & Specifications Tests Passed! ✅ ---');
+  console.log('\n--- All Public Contracts & Specifications Tests Passed! ✅ ---');
 }
 
 runM1Tests().catch((err) => {
-  console.error('Milestone 1 test failed:', err);
+  console.error('test failed:', err);
   process.exit(1);
 });
