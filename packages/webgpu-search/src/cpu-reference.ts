@@ -212,6 +212,16 @@ export interface MultiFieldCpuReferenceOutput {
   hasOverflow: boolean;
   results: MultiFieldHit[];
   durationMs: number;
+  /**
+   * Full ranked query-matched doc indices (post-filter when `filterDoc` is
+   * set, unfiltered otherwise), unaffected by `limit` truncation. Used by
+   * facet aggregation for exact bucket counts over the entire match set.
+   * Optional for backward compat: hand-constructed mocks may omit it;
+   * consumers must fall back to `results.map(r => r.docIndex)`. Omitted
+   * (or empty) when `collectAllMatched` is false to avoid taxing non-facet
+   * searches with an extra O(n) pass.
+   */
+  allMatchedDocIndices?: number[];
 }
 
 export interface FieldScoreDefinition {
@@ -236,7 +246,8 @@ export function searchMultiFieldCpuReference(
   candidateCapacity: number = 8192,
   allowedFieldIndices?: ReadonlySet<number>,
   tombstonedRows?: ReadonlySet<number>,
-  filterDoc?: (docIndex: number) => boolean
+  filterDoc?: (docIndex: number) => boolean,
+  collectAllMatched: boolean = true
 ): MultiFieldCpuReferenceOutput {
   const t0: number = nowMs();
   if (mode !== 'substring' && mode !== 'fuzzy') {
@@ -251,7 +262,8 @@ export function searchMultiFieldCpuReference(
       candidateCount: 0,
       hasOverflow: false,
       results: [],
-      durationMs: nowMs() - t0
+      durationMs: nowMs() - t0,
+      allMatchedDocIndices: []
     };
   }
 
@@ -343,7 +355,9 @@ export function searchMultiFieldCpuReference(
     candidateCount,
     hasOverflow,
     results,
-    durationMs
+    durationMs,
+    // Gated: non-facet searches pass collectAllMatched=false to skip O(n) map.
+    ...(collectAllMatched ? { allMatchedDocIndices: hits.map((h) => h.docIndex) } : {}),
   };
 }
 

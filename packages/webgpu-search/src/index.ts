@@ -75,6 +75,18 @@ export { DocumentBitset } from './filter/bitset';
 export { ColumnarStore, type ColumnarStoreOptions } from './filter/columnar-store';
 export { compileFilter } from './filter/filter-evaluator';
 
+// v0.4 Facet aggregation engine (M3)
+export {
+  FacetEngine,
+  normalizeFacetRequests,
+  excludeFieldFromFilter,
+  filterReferencesField,
+  DEFAULT_TERMS_LIMIT,
+  MAX_FACET_REQUESTS,
+  MAX_RANGE_BUCKETS,
+  type NormalizedFacet,
+} from './facets/facet-engine';
+
 // v0.2 shared preprocessing + CPU reference (M2)
 export {
   normalizeText,

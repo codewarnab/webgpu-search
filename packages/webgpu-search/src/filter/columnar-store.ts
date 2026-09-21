@@ -9,7 +9,8 @@ import type {
   FilterFieldDefinition,
   FilterFieldType,
   FilterValue,
-  FieldComparison
+  FieldComparison,
+  TermsFacetBucket
 } from '../types';
 import { InvalidFilterError } from '../errors';
 
@@ -354,11 +355,16 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
           col.presence.clear(docIndex);
           return;
         }
+        // Per-doc dedupe: facet counts are per-doc (not per-occurrence) to
+        // match string/number/boolean branches and tagInverted bitsets.
+        const seen = new Set<string>();
         const tags: string[] = [];
         for (let i = 0; i < rawVal.length; i++) {
           const item = rawVal[i];
           if (item !== null && item !== undefined) {
             const t = String(item);
+            if (seen.has(t)) continue;
+            seen.add(t);
             tags.push(t);
             let bs = col.tagInverted.get(t);
             if (!bs) {
@@ -920,5 +926,127 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
 
   getColumn(name: string): Column | undefined {
     return this.columns.get(name);
+  }
+
+  /**
+   * Exact value distribution over candidate doc rows, specialized per column
+   * type for hot-loop speed (string columns count by dictionary code with
+   * zero per-doc allocation in the inner loop; numeric/boolean use primitive
+   * counters; string[] counts per-doc, deduped within each doc).
+   * Returns `undefined` for unknown fields. Missing values and inactive
+   * (tombstoned) docs are skipped. Counts are per matching doc.
+   */
+  termsDistribution(
+    name: string,
+    candidates: Iterable<number>
+  ): TermsFacetBucket[] | undefined {
+    const col = this.columns.get(name);
+    if (!col) return undefined;
+
+    switch (col.type) {
+      case 'string': {
+        const tableLen = col.stringTable.length;
+        const counts = new Uint32Array(Math.max(tableLen, 1));
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          if (!this.activeDocs.has(d)) continue;
+          if (!col.presence.has(d)) continue;
+          const code = col.codes[d];
+          if (code < counts.length) counts[code]++;
+        }
+        const out: TermsFacetBucket[] = [];
+        for (let c = 0; c < tableLen; c++) {
+          if (counts[c] > 0) out.push({ value: col.stringTable[c], count: counts[c] });
+        }
+        return out;
+      }
+      case 'number': {
+        const map = new Map<number, number>();
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          if (!this.activeDocs.has(d)) continue;
+          if (!col.presence.has(d)) continue;
+          const v = col.values[d];
+          if (!Number.isFinite(v)) continue;
+          map.set(v, (map.get(v) ?? 0) + 1);
+        }
+        const out: TermsFacetBucket[] = [];
+        for (const [value, count] of map) out.push({ value, count });
+        return out;
+      }
+      case 'boolean': {
+        let trueCount = 0;
+        let falseCount = 0;
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          if (!this.activeDocs.has(d)) continue;
+          if (!col.presence.has(d)) continue;
+          if (col.trueBitset.has(d)) trueCount++;
+          else falseCount++;
+        }
+        const out: TermsFacetBucket[] = [];
+        if (trueCount > 0) out.push({ value: true, count: trueCount });
+        if (falseCount > 0) out.push({ value: false, count: falseCount });
+        return out;
+      }
+      case 'string[]': {
+        const map = new Map<string, number>();
+        for (const d of candidates) {
+          if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+          if (!this.activeDocs.has(d)) continue;
+          const tags = col.docTags.get(d);
+          if (!tags) continue;
+          if (tags.length <= 1) {
+            const t = tags[0];
+            if (t !== undefined) map.set(t, (map.get(t) ?? 0) + 1);
+          } else {
+            const seen = new Set<string>();
+            for (let i = 0; i < tags.length; i++) {
+              const t = tags[i];
+              if (seen.has(t)) continue;
+              seen.add(t);
+              map.set(t, (map.get(t) ?? 0) + 1);
+            }
+          }
+        }
+        const out: TermsFacetBucket[] = [];
+        for (const [value, count] of map) out.push({ value, count });
+        return out;
+      }
+    }
+  }
+
+  /**
+   * Numeric bucket counts over candidate doc rows for half-open intervals
+   * `[from, to)`. O(candidates x ranges); overlapping ranges double-count by
+   * design (independent buckets; sum may exceed total matches).
+   * Returns `undefined` for unknown or non-number fields. Inactive
+   * (tombstoned) docs are skipped.
+   */
+  rangeDistribution(
+    name: string,
+    candidates: Iterable<number>,
+    ranges: Array<{ from?: number; to?: number }>
+  ): number[] | undefined {
+    const col = this.columns.get(name);
+    if (!col || col.type !== 'number') return undefined;
+    const counts = new Array<number>(ranges.length).fill(0);
+    const froms = ranges.map((r) => r.from);
+    const tos = ranges.map((r) => r.to);
+    for (const d of candidates) {
+      if (!Number.isInteger(d) || d < 0 || d >= this.capacity) continue;
+      if (!this.activeDocs.has(d)) continue;
+      if (!col.presence.has(d)) continue;
+      const v = col.values[d];
+      if (!Number.isFinite(v)) continue;
+      for (let b = 0; b < ranges.length; b++) {
+        const from = froms[b];
+        const to = tos[b];
+        if ((from === undefined || v >= from) && (to === undefined || v < to)) {
+          counts[b]++;
+        }
+      }
+    }
+    return counts;
   }
 }

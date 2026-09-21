@@ -28,6 +28,12 @@ import {
 import { DocumentBitset } from './filter/bitset';
 import { ColumnarStore } from './filter/columnar-store';
 import { compileFilter } from './filter/filter-evaluator';
+import {
+  FacetEngine,
+  excludeFieldFromFilter,
+  normalizeFacetRequests,
+  type NormalizedFacet
+} from './facets/facet-engine';
 import { alignHighlights, renderHighlightedText } from './highlight';
 import {
   deserializeDocumentSnapshot,
@@ -53,6 +59,8 @@ import type {
   SearchTimings,
   SerializeDocumentIndexOptions,
   DocumentIndexSchema,
+  FacetResult,
+  FilterExpression,
   FilterFieldDefinition,
   FilterFieldType
 } from './types';
@@ -463,7 +471,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       cpuAlgorithm = 'parity',
       onQueryTooLong = 'throw',
       fields: searchFields,
-      filter
+      filter,
+      facets,
+      faceting
     } = options;
 
     if (caseSensitive === this.folded) {
@@ -505,6 +515,26 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const clampedLimit = clampLimit(options.limit ?? options.maxResults ?? 50);
     throwIfAborted(signal);
 
+    // M3 (Issue #10): validate facet contracts fail-fast, before early exits.
+    // An empty facet list is equivalent to not requesting facets (absent key).
+    // `faceting` is ignored unless facets are requested (no throw on absent).
+    const facetSpec = normalizeFacetRequests(facets);
+    const wantsFacets = facetSpec !== undefined && facetSpec.length > 0;
+    let facetingMode: 'auto' | 'force-exact' = 'auto';
+    if (wantsFacets && faceting !== undefined) {
+      if (faceting !== 'auto' && faceting !== 'force-exact') {
+        throw new TypeError(`[webgpu-search] Invalid faceting option: "${String(faceting)}". Must be 'auto' or 'force-exact'.`);
+      }
+      facetingMode = faceting;
+    }
+    const facetEngine = wantsFacets ? new FacetEngine<TDoc>(this.columnarStore) : null;
+    if (wantsFacets && facetEngine && facetSpec) {
+      // Fail-closed field validation up front: unknown facet fields and
+      // range-on-non-number must throw even when an empty match set would
+      // otherwise take an early noHits exit below.
+      facetEngine.validateRequests(facetSpec);
+    }
+
     const noHits = (q: string): DocumentSearchResponse<TDoc> => ({
       query: q,
       mode,
@@ -524,7 +554,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       profileId: this.profileId,
       scoringVersion: SCORING_VERSION,
       cpuAlgorithm,
-      fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason
+      fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
+      ...(wantsFacets && facetEngine && facetSpec
+        ? { facets: facetEngine.emptyResults(facetSpec) }
+        : {})
     });
 
     if (mode !== 'fuzzy' && mode !== 'substring') {
@@ -536,12 +569,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     let filterBitset: DocumentBitset | undefined = undefined;
     let filterPredicate: ((doc: TDoc) => boolean) | undefined = undefined;
+    let structuredFilter: FilterExpression | undefined = undefined;
 
     if (filter !== undefined) {
       if (typeof filter === 'function') {
         filterPredicate = filter;
       } else if (typeof filter === 'object' && filter !== null) {
-        filterBitset = compileFilter(filter, this.columnarStore);
+        structuredFilter = filter as FilterExpression;
+        filterBitset = compileFilter(structuredFilter, this.columnarStore);
         if (filterBitset.isEmpty()) {
           return noHits(query);
         }
@@ -614,6 +649,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           bestFieldIdx: number;
           fieldScores: Map<number, number>;
         }>();
+        // M3: unfiltered query match set for facet aggregation (filter applied below).
+        const queryMatchedAll = wantsFacets ? new Set<number>() : null;
 
         for (let i = 0; i < gpuResult.results.length; i++) {
           const item = gpuResult.results[i];
@@ -622,6 +659,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           const fIdx = this.rowToFieldIndex[r];
           if (allowedFieldIndices && !allowedFieldIndices.has(fIdx)) continue;
           const dIdx = this.rowToDocIndex[r];
+          if (queryMatchedAll !== null && this.records[dIdx]) {
+            queryMatchedAll.add(dIdx);
+          }
           if (filterBitset && !filterBitset.has(dIdx)) continue;
           const doc = this.records[dIdx];
           if (!doc) continue;
@@ -697,6 +737,39 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         const results = hits.slice(0, clampedLimit).map((h) => h.item);
         this.enrichHighlights(results, query, mode, options);
 
+        // M3: facet aggregation. Exact when the GPU pool covered all matches;
+        // approximate over the top pool on overflow unless force-exact rescan.
+        let gpuFacets: Record<string, FacetResult> | undefined = undefined;
+        if (wantsFacets && facetEngine && facetSpec && queryMatchedAll !== null) {
+          const facetT0 = nowMs();
+          let facetCandidates: Iterable<number> = queryMatchedAll;
+          let facetIsApproximate = gpuResult.hasOverflow;
+          if (gpuResult.hasOverflow && facetingMode === 'force-exact') {
+            const exact = searchMultiFieldCpuReference(
+              this.records.length,
+              this.sortedFields,
+              this.rowTokens,
+              this.rowToDocIndex,
+              this.rowToFieldIndex,
+              normalizedQuery.tokens,
+              mode,
+              clampedLimit,
+              this.candidateCapacity,
+              allowedFieldIndices,
+              this.tombstones,
+              undefined,
+              true
+            );
+            facetCandidates = exact.allMatchedDocIndices ?? exact.results.map((r) => r.docIndex);
+            facetIsApproximate = false;
+          }
+          gpuFacets = this.buildFacetResults(
+            facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, facetIsApproximate
+          );
+          const facetMs = nowMs() - facetT0;
+          gpuResult.timings.totalMs += facetMs;
+        }
+
         return {
           query: gpuResult.query,
           mode: gpuResult.mode,
@@ -708,7 +781,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           timings: gpuResult.timings,
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
-          cpuAlgorithm
+          cpuAlgorithm,
+          ...(gpuFacets ? { facets: gpuFacets } : {})
         };
       } catch (err: any) {
         if (err.name === 'AbortError') {
@@ -738,6 +812,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         bestFieldIdx: number;
         fieldScores: Map<number, number>;
       }>();
+      // M3: unfiltered query match set for exact facet aggregation.
+      const legacyMatchedAll = wantsFacets ? new Set<number>() : null;
 
       for (let fIdx = 0; fIdx < this.sortedFields.length; fIdx++) {
         if (allowedFieldIndices && !allowedFieldIndices.has(fIdx)) continue;
@@ -749,6 +825,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
         for (const hit of legacyResult.results) {
           const dIdx = hit.index;
+          // Explicit tombstone guard for symmetry with GPU/parity paths:
+          // removed docs have null records (columnar presence also cleared).
+          if (!this.records[dIdx] || this.docIds[dIdx] === null || this.docIds[dIdx] === undefined) continue;
+          if (legacyMatchedAll !== null) {
+            legacyMatchedAll.add(dIdx);
+          }
           if (filterBitset && !filterBitset.has(dIdx)) continue;
           const doc = this.records[dIdx];
           if (!doc) continue;
@@ -818,7 +900,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
       const results = hits.slice(0, clampedLimit).map((h) => h.item);
       this.enrichHighlights(results, query, mode, options);
-      const durationMs = nowMs() - t0;
+      const preFacetMs = nowMs() - t0;
+
+      // M3: CPU evaluates the full match set, so legacy facets are exact
+      // w.r.t. the serving (ufuzzy/native) match set; see types for caveat.
+      let legacyFacets: Record<string, FacetResult> | undefined = undefined;
+      let legacyFacetMs = 0;
+      if (wantsFacets && facetEngine && facetSpec && legacyMatchedAll !== null) {
+        const fT0 = nowMs();
+        legacyFacets = this.buildFacetResults(
+          facetEngine, facetSpec, legacyMatchedAll, structuredFilter, filterPredicate, false
+        );
+        legacyFacetMs = nowMs() - fT0;
+      }
 
       return {
         query,
@@ -833,17 +927,18 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           encodeSubmitMs: 0,
           gpuExecutionMs: null,
           readbackMs: 0,
-          totalMs: durationMs,
+          totalMs: preFacetMs + legacyFacetMs,
           gpuDispatchMs: 0
         },
         profileId: this.profileId,
         scoringVersion: SCORING_VERSION,
         cpuAlgorithm,
-        fallbackReason: 'cpu-algorithm-requested'
+        fallbackReason: 'cpu-algorithm-requested',
+        ...(legacyFacets ? { facets: legacyFacets } : {})
       };
     }
 
-    // Default parity CPU algorithm
+    // Default parity CPU algorithm (collect full match set only when faceting).
     const parityResult = searchMultiFieldCpuReference(
       this.records.length,
       this.sortedFields,
@@ -863,7 +958,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           return doc !== null && doc !== undefined && filterPredicate(doc);
         }
         return true;
-      } : undefined
+      } : undefined,
+      wantsFacets
     );
 
     if (this.isDestroyed || this.generation !== gen) {
@@ -888,12 +984,49 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
     this.enrichHighlights(enrichedResults, query, mode, options);
 
+    // M3: exact facet aggregation. Disjunctive facets need the unfiltered
+    // query match set, so a structured filter triggers one extra unfiltered
+    // parity scan (results above stay filtered and correctly ranked; O(F*n)
+    // per-facet re-evaluation + F bitset allocs by design for disjunctive
+    // semantics). Wall-clock facet work is included in totalMs; M7 will
+    // attribute facet work to diagnostics.timings.facetingMs.
+    let parityFacets: Record<string, FacetResult> | undefined = undefined;
+    const facetT0 = nowMs();
+    let facetScanMs = 0;
+    if (wantsFacets && facetEngine && facetSpec) {
+      let facetCandidates: Iterable<number> =
+        parityResult.allMatchedDocIndices ?? parityResult.results.map((r) => r.docIndex);
+      if (structuredFilter !== undefined) {
+        const unfiltered = searchMultiFieldCpuReference(
+          this.records.length,
+          this.sortedFields,
+          this.rowTokens,
+          this.rowToDocIndex,
+          this.rowToFieldIndex,
+          normalizedQuery.tokens,
+          mode,
+          clampedLimit,
+          this.candidateCapacity,
+          allowedFieldIndices,
+          this.tombstones,
+          undefined,
+          true
+        );
+        facetCandidates = unfiltered.allMatchedDocIndices ?? unfiltered.results.map((r) => r.docIndex);
+        facetScanMs = unfiltered.durationMs;
+      }
+      parityFacets = this.buildFacetResults(
+        facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, false
+      );
+    }
+    const facetMs = wantsFacets ? (nowMs() - facetT0 - facetScanMs) : 0;
+
     const timings: SearchTimings = {
       queryUploadMs: 0,
       encodeSubmitMs: 0,
       gpuExecutionMs: null,
       readbackMs: 0,
-      totalMs: parityResult.durationMs,
+      totalMs: parityResult.durationMs + facetScanMs + facetMs,
       gpuDispatchMs: 0
     };
 
@@ -918,8 +1051,53 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       profileId: this.profileId,
       scoringVersion: SCORING_VERSION,
       cpuAlgorithm,
-      fallbackReason: effectiveFallbackReason
+      fallbackReason: effectiveFallbackReason,
+      ...(parityFacets ? { facets: parityFacets } : {})
     };
+  }
+
+  /**
+   * M3 (Issue #10): aggregates facet buckets over an explicit query-matched
+   * doc set with disjunctive filter exclusion. Each facet ignores structured
+   * filter clauses on its own field (`excludeFieldFromFilter`) while keeping
+   * all other clauses; function predicates stay conjunctive. `or`/`not`
+   * branches referencing the facet field are kept verbatim (conservative,
+   * aliased). Cost is O(F*n) with F bitset allocs plus an optional extra
+   * unfiltered parity scan when a structured filter is present.
+   */
+  private buildFacetResults(
+    facetEngine: FacetEngine<TDoc>,
+    facetSpec: NormalizedFacet[],
+    queryMatched: Iterable<number>,
+    structuredFilter: FilterExpression | undefined,
+    filterPredicate: ((doc: TDoc) => boolean) | undefined,
+    isApproximate: boolean
+  ): Record<string, FacetResult> {
+    const base: number[] = [];
+    for (const dIdx of queryMatched) {
+      const doc = this.records[dIdx];
+      if (doc === null || doc === undefined) continue;
+      if (filterPredicate && !filterPredicate(doc)) continue;
+      base.push(dIdx);
+    }
+    const out: Record<string, FacetResult> = {};
+    for (const facet of facetSpec) {
+      let candidates: number[] = base;
+      if (structuredFilter !== undefined) {
+        const excluded = excludeFieldFromFilter(structuredFilter, facet.request.field);
+        if (excluded !== undefined) {
+          const mask = compileFilter(excluded, this.columnarStore);
+          candidates = base.filter((d) => mask.has(d));
+        }
+      }
+      const result = facetEngine.aggregateOne(facet, candidates, isApproximate);
+      if (facet.name === '__proto__') {
+        Object.defineProperty(out, facet.name, { value: result, enumerable: true, configurable: true, writable: true });
+      } else {
+        out[facet.name] = result;
+      }
+    }
+    return out;
   }
 
   private enrichHighlights(

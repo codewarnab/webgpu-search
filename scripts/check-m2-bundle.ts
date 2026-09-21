@@ -1,5 +1,5 @@
 /**
- * M2/M3 bundle-size gate: delta <=30 KB gzip over baseline + 60 KB total.
+ * M2/M3 bundle-size gate: delta <=30 KB gzip over baseline + 64 KB total.
  *
  * Baseline (M3 re-baselined to post-M2 working tree, tsup minify:false):
  *   dist/index.js 70,455 B raw / 18,343 B gzip (deterministic gzip, level 6,
@@ -56,6 +56,15 @@
  * Total bumped 48 KB -> 60 KB with this documented rationale.
  * Budget: 60 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
+ * Issue #10 M3 (facet aggregation) review hardening expansion:
+ * Multi-agent PR #30 review required fail-closed hardening (+~1.6 KB gzip):
+ * __proto__/constructor/prototype guards + safeSet, string[] per-doc dedupe,
+ * range inverted-bounds + caps (32 facets / 100 buckets), direct-engine
+ * validation, optional allMatchedDocIndices + gated O(n) map, engine-relative
+ * isApproximate docs, worker predicate facet drop, wall-clock totalMs.
+ * Total bumped 60 KB -> 64 KB with this documented rationale.
+ * Budget: 64 KB gzip total per file (dist/index.js + dist/index.cjs).
+ *
  * Fail-closed: missing dist or dist older than src/fold-table.ts fails
  * (a size gate that passes when there is nothing to measure is decoration).
  *
@@ -68,7 +77,7 @@ import { stat, readFile } from 'node:fs/promises';
 const BASELINE_RAW = 234907;
 const BASELINE_GZIP = 49246;
 const DELTA_CAP_GZIP = 30 * 1024;
-const TOTAL_BUDGET_GZIP = 60 * 1024;
+const TOTAL_BUDGET_GZIP = 64 * 1024;
 
 
 function gzipDeterministic(buf: Uint8Array): number {
