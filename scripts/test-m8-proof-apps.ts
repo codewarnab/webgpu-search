@@ -368,19 +368,32 @@ async function runM8Tests() {
 
     for (const file of tsFiles) {
       const content = fs.readFileSync(file, 'utf8');
+      // Strip comments + string literals before matching so prose like
+      // "sliding window" does not trip the bare-global scan (same approach
+      // as scripts/check-parity-lint.ts and the M4 search-modes DOM test).
+      const noBlock = content.replace(/\/\*[\s\S]*?\*\//g, (m) => '\n'.repeat((m.match(/\n/g) || []).length));
+      const code = noBlock
+        .split('\n')
+        .map((line) => {
+          const idx = line.indexOf('//');
+          return idx >= 0 ? line.slice(0, idx) : line;
+        })
+        .join('\n')
+        .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, "''");
 
-      // Check for unguarded window references
-      if (/\bwindow\b/.test(content)) {
+      // Check for unguarded window references (bare global, not windowLength
+      // / TypoWindow identifiers which carry no boundary after `window`).
+      if (/\bwindow\b/.test(code)) {
         assert(
-          content.includes("typeof window !== 'undefined'") || content.includes("typeof window"),
+          code.includes("typeof window") || content.includes("typeof window"),
           `Unguarded window reference in ${path.relative(rootDir, file)}`
         );
       }
 
       // Check for unguarded document references
-      if (/\bdocument\./.test(content)) {
+      if (/\bdocument\./.test(code)) {
         assert(
-          content.includes("typeof document !== 'undefined'"),
+          code.includes("typeof document"),
           `Unguarded document reference in ${path.relative(rootDir, file)}`
         );
       }

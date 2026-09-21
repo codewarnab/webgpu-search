@@ -5,6 +5,19 @@ import { packUnicodeToGPUBuffer, checkMemoryBudget } from './buffer';
 import { normalizeText } from './unicode-preprocess';
 import { searchCpuReference } from './cpu-reference';
 import {
+  normalizeTypoTolerance,
+  type NormalizedTypoOptions
+} from './modes/typo-distance';
+import {
+  normalizeTokenMatchOptions,
+  type NormalizedTokenMatchOptions
+} from './modes/token-search';
+import {
+  normalizePrefixOptions,
+  assertPrefixLengthForQuery,
+  type NormalizedPrefixOptions
+} from './modes/prefix-search';
+import {
   clampLimit,
   throwIfAborted,
 } from './runtime-guards';
@@ -206,6 +219,33 @@ export class SearchIndex {
         `[webgpu-search] search expects query: string, got ${typeof query}.`,
       );
     }
+    if (mode !== 'fuzzy' && mode !== 'substring' && mode !== 'token' && mode !== 'prefix') {
+      throw new IncompatibleOptionError(
+        'mode',
+        `Unknown search mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
+      );
+    }
+    // v0.4 M4: fail-closed option validation up front so malformed
+    // token/prefix/typo shapes throw identically on GPU and CPU paths.
+    // 'fuzzy' validates typo shape but ignores it (subsequence matching is
+    // inherently typo-tolerant); 'substring'/'token'/'prefix' honor it.
+    const tokenOpts: NormalizedTokenMatchOptions = normalizeTokenMatchOptions(options.tokenMatch);
+    const prefixOpts: NormalizedPrefixOptions = normalizePrefixOptions(options.prefixMatch);
+    const typo: NormalizedTypoOptions = normalizeTypoTolerance(options.typoTolerance);
+    // Prefix polarity: only enforce when the caller explicitly set exactCase.
+    // The default (prefixMatch undefined) follows the query caseSensitive flag
+    // so `create({caseSensitive:true}).search(q,{mode:'prefix',caseSensitive:true})`
+    // works without redundant `prefixMatch:{exactCase:true}`.
+    if (mode === 'prefix' && options.prefixMatch?.exactCase !== undefined && prefixOpts.exactCase !== caseSensitive) {
+      throw new ProfileMismatchError(caseSensitive, prefixOpts.exactCase, 'prefixMatch.exactCase');
+    }
+    // Legacy ufuzzy/native scorers only implement fuzzy/substring-exact.
+    if (cpuAlgorithm === 'ufuzzy' && (mode === 'token' || mode === 'prefix' || typo.enabled)) {
+      throw new IncompatibleOptionError(
+        'cpuAlgorithm',
+        `cpuAlgorithm:'ufuzzy' supports only exact 'fuzzy'/'substring' modes without typo tolerance (got mode '${mode}'${typo.enabled ? ' with typoTolerance' : ''}). Use cpuAlgorithm:'parity'.`
+      );
+    }
     // Pack-time vs query-time mode guard. folded = !indexCaseSensitive, so
     // throw iff queryCaseSensitive !== indexCaseSensitive.
     // Truth table (indexCS → folded → queryCS → behavior):
@@ -266,6 +306,13 @@ export class SearchIndex {
 
     throwIfAborted(signal);
 
+    // Hoisted prefixLength check: fail-closed even on empty queries/corpora
+    // (scorePrefixTokens throws per-record, which empty scans would skip).
+    // Skipped for empty queries to match the scorer's early noMatch.
+    if (mode === 'prefix' && normalizedQuery.tokens.length > 0) {
+      assertPrefixLengthForQuery(prefixOpts, normalizedQuery.tokens.length);
+    }
+
     // Degenerate post-processing queries that normalize to zero post-fold
     // tokens (whitespace-only, U+3000-only, empty) return unified empty
     // results with query:'' on both paths. Lone-mark / VS / ZWJ /
@@ -287,13 +334,19 @@ export class SearchIndex {
       return noHits(query);
     }
 
-    // 1. WebGPU execution path (M3 parity): all valid queries
+    // 1. WebGPU execution path (M3 parity): exact fuzzy/substring queries
     // (queryTokenCount <= 128, enforced above) route to WebGPU when
-    // available and ready. Explicit ufuzzy and over-limit cpu-fallback
-    // force CPU. Failures fall through to the parity CPU scorer below.
+    // available and ready. Token/prefix modes and typo-tolerant queries are
+    // CPU-only in v0.4 (exact-only WGSL kernels) and skip dispatch with
+    // fallbackReason 'unsupported-mode'. Explicit ufuzzy and over-limit
+    // cpu-fallback force CPU. Failures fall through to the parity CPU
+    // scorer below.
     const gpuHandle = this.gpuEngine;
+    const isGpuSupportedMode: boolean =
+      (mode === 'fuzzy' || mode === 'substring') && !typo.enabled;
     const useGpu: boolean =
       !forceCpu &&
+      isGpuSupportedMode &&
       cpuAlgorithm !== 'ufuzzy' &&
       this.engineType === 'webgpu' &&
       gpuHandle !== null &&
@@ -333,12 +386,19 @@ export class SearchIndex {
         if (err.name === 'AbortError') {
           throw err;
         }
-        console.warn('[webgpu-search] GPU search failed, CPU fallback:', err);
-        this.engineType = 'cpu';
-        this.fallbackReason = 'gpu-execution-error';
-        if (this.gpuEngine) {
-          try { this.gpuEngine.destroy(); } catch {}
-          this.gpuEngine = null;
+        // Mode-routed rejections (token/prefix/typo reaching the engine via
+        // direct or raced calls) are not engine failures: the healthy GPU
+        // stays up and the query falls through to parity CPU below.
+        const modeRouted: boolean =
+          err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
+        if (!modeRouted) {
+          console.warn('[webgpu-search] GPU search failed, CPU fallback:', err);
+          this.engineType = 'cpu';
+          this.fallbackReason = 'gpu-execution-error';
+          if (this.gpuEngine) {
+            try { this.gpuEngine.destroy(); } catch {}
+            this.gpuEngine = null;
+          }
         }
       }
     }
@@ -393,6 +453,19 @@ export class SearchIndex {
       mode,
       clampedLimit,
       this.items,
+      {
+        tokenMatch: { operator: tokenOpts.operator, minMatchCount: tokenOpts.minMatchCount },
+        prefixMatch: prefixOpts.prefixLength !== undefined
+          ? { prefixLength: prefixOpts.prefixLength, exactCase: prefixOpts.exactCase }
+          : { exactCase: prefixOpts.exactCase },
+        typoTolerance: {
+          enabled: typo.enabled,
+          maxDistance: typo.maxDistance,
+          minWordLengthForOneTypo: typo.minWordLengthForOneTypo,
+          minWordLengthForTwoTypos: typo.minWordLengthForTwoTypos,
+          prefixExactLength: typo.prefixExactLength
+        }
+      },
     );
 
     throwIfAborted(signal);
@@ -409,6 +482,10 @@ export class SearchIndex {
     let effectiveFallbackReason = this.fallbackReason;
     if (forceCpu) {
       effectiveFallbackReason = 'query-too-long';
+    } else if (!isGpuSupportedMode) {
+      // v0.4 M4: token/prefix/typo queries are CPU-by-design (exact-only
+      // WGSL kernels) — recorded per the Issue #10 parity boundary.
+      effectiveFallbackReason = 'unsupported-mode';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
     }

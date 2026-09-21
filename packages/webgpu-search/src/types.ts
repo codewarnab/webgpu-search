@@ -29,6 +29,24 @@ export interface SearchOptions {
    * 'cpu-fallback' forces the CPU path.
    */
   onQueryTooLong?: OnQueryTooLong;
+  /**
+   * v0.4 M4: token-mode quorum options (operator/minMatchCount).
+   * Only read when mode is 'token'; validated fail-closed otherwise.
+   */
+  tokenMatch?: TokenMatchOptions;
+  /**
+   * v0.4 M4: prefix-mode options (prefixLength/exactCase).
+   * Only read when mode is 'prefix'; validated fail-closed otherwise.
+   */
+  prefixMatch?: PrefixSearchOptions;
+  /**
+   * v0.4 M4: bounded typo tolerance (boolean shorthand or full options).
+   * Applies to 'substring', 'token', and 'prefix' modes; 'fuzzy' validates
+   * but ignores (inherently typo-tolerant via subsequence matching).
+   * Typo queries always route to the CPU reference engine — WGSL shaders
+   * are exact-only (see webgpu-engine.ts).
+   */
+  typoTolerance?: TypoToleranceOptions | boolean;
 }
 
 export interface SearchResultItem {
@@ -182,12 +200,8 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   facets?: Record<string, FacetRequest> | FacetRequest[];
   /** Faceting mode: force exact CPU candidate evaluation even if GPU buffer overflowed. Ignored unless `facets` is requested. */
   faceting?: 'auto' | 'force-exact';
-  /** Typo tolerance configuration */
-  typoTolerance?: TypoToleranceOptions | boolean;
-  /** Token mode matching options */
-  tokenMatch?: TokenMatchOptions;
-  /** Prefix mode matching options */
-  prefixMatch?: PrefixSearchOptions;
+  // Note: tokenMatch/prefixMatch/typoTolerance are inherited from
+  // SearchOptions (single source of truth — do not redeclare; drift risk).
   /** Deterministic ranking and tie-breaking options */
   ranking?: DeterministicRankingOptions;
   /** Per-query search extension overrides */
@@ -213,6 +227,13 @@ export interface DocumentSearchResultItem<TDoc = any> {
   matches?: Array<{ field: string; score: number; highlights?: HighlightRange[] }>;
 }
 
+/**
+ * Why a query was served by the CPU engine instead of WebGPU.
+ * v0.4 M4 adds 'unsupported-mode': 'token'/'prefix' modes and typo-tolerant
+ * queries route to the CPU reference engine (WGSL shaders are exact-only
+ * for 'fuzzy'/'substring'); recorded per the Issue #10 scoring-parity
+ * boundary (unsupported features route to CPU with a recorded reason).
+ */
 export type FallbackReason =
   | 'webgpu-unsupported'
   | 'device-request-failed'
@@ -222,6 +243,7 @@ export type FallbackReason =
   | 'prefer-cpu'
   | 'query-too-long'
   | 'cpu-algorithm-requested'
+  | 'unsupported-mode'
   | 'gpu-execution-error';
 
 export interface DocumentSearchResponse<TDoc = any> {
@@ -530,11 +552,13 @@ export type FacetResult = TermsFacetResult | RangeFacetResult;
 
 // 3.3 Expanded Search Modes & Typo Tolerance
 export interface TypoToleranceOptions {
+  /** Default: false. Note: maxDistance alone does NOT enable — must set enabled:true. */
   enabled?: boolean;                // Default: false
   maxDistance?: 1 | 2;              // Default: 1
   minWordLengthForOneTypo?: number; // Default: 4
   minWordLengthForTwoTypos?: number;// Default: 8
-  prefixExactLength?: number;       // Default: 1 (first N chars must match exactly)
+  /** Default: 1 (first N chars must match exactly; leading transpositions never match). */
+  prefixExactLength?: number;
 }
 
 export interface TokenMatchOptions {
@@ -543,7 +567,18 @@ export interface TokenMatchOptions {
 }
 
 export interface PrefixSearchOptions {
+  /**
+   * Leading query code points used for matching (undefined = full query).
+   * Over-length (prefixLength > query.length) throws RangeError fail-closed
+   * on every path including empty corpora — autocomplete callers should
+   * clamp or catch and treat as no-match.
+   */
   prefixLength?: number;
+  /**
+   * Must agree with the query caseSensitive flag when explicitly set;
+   * when omitted the index derives polarity from caseSensitive (default
+   * follows the query flag).
+   */
   exactCase?: boolean;
 }
 

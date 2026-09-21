@@ -400,24 +400,27 @@ async function runM1Tests() {
   const modes: SearchMode[] = ['fuzzy', 'substring', 'token', 'prefix'];
   if (modes.length !== 4) throw new Error('SearchMode should support all 4 modes');
 
-  // Verify DocumentIndex and CPU reference fail-fast on unimplemented M4 modes
-  let threwDocTokenMode = false;
-  try {
+  // v0.4 M4: token/prefix are implemented (CPU reference + DocumentIndex).
+  // Unknown modes still fail closed with IncompatibleOptionError.
+  {
     const testIdx = new DocumentIndex({ fields: ['title'] });
-    await testIdx.search('query', { mode: 'token' });
-  } catch (err: any) {
-    threwDocTokenMode = err instanceof IncompatibleOptionError && err.option === 'mode';
+    const docRes = await testIdx.search('query', { mode: 'token' });
+    if (docRes.totalMatches !== 0 || docRes.mode !== 'token') {
+      throw new Error('DocumentIndex.search must serve mode: "token" (empty index -> 0 matches).');
+    }
+    const cpuRes = searchCpuReference([new Uint32Array([1, 2])], new Uint32Array([1]), 'token' as any, 10, ['test']);
+    if (cpuRes.totalMatches !== 1) {
+      throw new Error('searchCpuReference must serve mode: "token" (single-term reduces to substring).');
+    }
+    let threwUnknown = false;
+    try {
+      searchCpuReference([new Uint32Array([1, 2])], new Uint32Array([1]), 'regex' as any, 10, ['test']);
+    } catch (err: any) {
+      threwUnknown = err instanceof IncompatibleOptionError && err.option === 'mode';
+    }
+    if (!threwUnknown) throw new Error('searchCpuReference must throw IncompatibleOptionError on unknown mode');
   }
-  if (!threwDocTokenMode) throw new Error('DocumentIndex.search must throw IncompatibleOptionError on mode: "token"');
-
-  let threwCpuTokenMode = false;
-  try {
-    searchCpuReference([new Uint32Array([1, 2])], new Uint32Array([1]), 'token' as any, 10, ['test']);
-  } catch (err: any) {
-    threwCpuTokenMode = err instanceof IncompatibleOptionError && err.option === 'mode';
-  }
-  if (!threwCpuTokenMode) throw new Error('searchCpuReference must throw IncompatibleOptionError on mode: "token"');
-  console.log('   ✅ SearchMode extended to fuzzy | substring | token | prefix (with M4 fail-fast guards)');
+  console.log('   ✅ SearchMode extended to fuzzy | substring | token | prefix (M4 functional)');
 
   // 11. Verifying Filter AST schemas and Columnar types
   console.log('11. Verifying Filter AST schemas and Columnar types...');

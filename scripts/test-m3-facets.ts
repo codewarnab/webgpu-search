@@ -668,7 +668,11 @@ async function runMilestone3Tests() {
       // Direct document/window/self/globalThis DOM use (typeof checks ok).
       const stripped = code.replace(/typeof\s+(document|window|navigator|self)\b/g, '');
       assert(!/(^|[^\w$.])document\s*\./.test(stripped), `Unexpected bare document use in ${filePath}`);
-      assert(!/(^|[^\w$.])window(?!\s*Client|\.js|\.cjs)/.test(stripped.replace(/worker-client|search-worker/gi, '')), `Unexpected bare window in ${filePath}`);
+      // v0.4 M4: boundary-aware (`window` must not continue into an
+      // identifier): M4 names like `windowLength`/`findBestTypoWindow` are
+      // record spans, not the DOM global. Still catches `window.foo`,
+      // `window `, and `(window)`.
+      assert(!/(^|[^\w$.])window(?![\w$])/.test(stripped.replace(/worker-client|search-worker/gi, '')), `Unexpected bare window in ${filePath}`);
     }
     console.log('   ✅ Zero DOM references confirmed across facet modules');
   }

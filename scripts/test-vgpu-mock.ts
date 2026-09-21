@@ -537,10 +537,10 @@ async function runMockTests() {
     let typeThrew = false;
     try { await gateEngine.search('alpha', { mode: 'substring', caseSensitive: 1 as any }); } catch (e: any) { typeThrew = e instanceof TypeError; }
     if (!typeThrew) throw new Error('forged caseSensitive:1 must throw TypeError');
-    // Invalid mode fails closed.
+    // Invalid mode fails closed (unified with indexes: IncompatibleOptionError).
     let modeThrew = false;
-    try { await gateEngine.search('alpha', { mode: 'regex' as any }); } catch (e: any) { modeThrew = e instanceof TypeError; }
-    if (!modeThrew) throw new Error('invalid mode must throw TypeError');
+    try { await gateEngine.search('alpha', { mode: 'regex' as any }); } catch (e: any) { modeThrew = e instanceof IncompatibleOptionError; }
+    if (!modeThrew) throw new Error('invalid mode must throw IncompatibleOptionError');
     // No-device gates: direct engine without init still enforces throw/echo.
     const bareEngine = new WebGPUEngine();
     const bareEmpty = await bareEngine.search('   ', { mode: 'substring' });

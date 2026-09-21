@@ -1,8 +1,11 @@
-import type { HighlightRange, SearchMode } from './types';
+import type { HighlightRange, PrefixSearchOptions, SearchMode, TokenMatchOptions, TypoToleranceOptions } from './types';
 import { toWellFormedSafe, normalizeText } from './unicode-preprocess';
 import { foldCodePoint } from './fold-table';
-import { scoreSubstringTokens } from './cpu-reference';
-import { IncompatibleOptionError } from './text-profile';
+import { scoreSubstringTokens, scoreSubstringTypoTokens } from './cpu-reference';
+import { normalizeTypoTolerance, allowedDistanceForTerm } from './modes/typo-distance';
+import { normalizeTokenMatchOptions, splitQueryTerms, scoreTokenTokens } from './modes/token-search';
+import { normalizePrefixOptions, assertPrefixLengthForQuery, scorePrefixTokens } from './modes/prefix-search';
+import { IncompatibleOptionError, ProfileMismatchError } from './text-profile';
 
 export interface SourceMappedText {
   /** Post-fold NFC scalar stream (u32 code points). */
@@ -22,7 +25,7 @@ export interface SourceMappedText {
 }
 
 export interface AlignHighlightOptions {
-  /** Search mode ('fuzzy' or 'substring', default: 'fuzzy') */
+  /** Search mode ('fuzzy', 'substring', 'token', or 'prefix'; default: 'fuzzy') */
   mode?: SearchMode;
   /** If true, folding is skipped (caseSensitive). Default: false */
   caseSensitive?: boolean;
@@ -32,6 +35,12 @@ export interface AlignHighlightOptions {
   sourceMap?: SourceMappedText;
   /** Optional pre-computed query tokens. */
   queryTokens?: Uint32Array;
+  /** Token-mode quorum options (only read when mode is 'token'). */
+  tokenMatch?: TokenMatchOptions;
+  /** Prefix-mode options (only read when mode is 'prefix'). */
+  prefixMatch?: PrefixSearchOptions;
+  /** Bounded typo tolerance (honored by 'substring', 'token', 'prefix'). */
+  typoTolerance?: TypoToleranceOptions | boolean;
 }
 
 export interface RenderHighlightOptions {
@@ -353,11 +362,94 @@ export function alignHighlights(
 
   const queryTokens = options.queryTokens ?? normalizeText(query, folded).tokens;
   const qLen = queryTokens.length;
-  if (qLen === 0 || sourceMap.tokenCount < qLen) return [];
+  if (qLen === 0) return [];
 
   const mode = options.mode ?? 'fuzzy';
 
+  // Per-mode length gates (score-highlight symmetry): the old global
+  // `tokenCount < qLen` gate broke token (multi-term), prefix
+  // (`prefixLength` truncation), and typo-substring
+  // (`qLen <= tokenCount + allowed`) queries.
+  if (mode === 'token') {
+    // No length gate: per-term checks in scoreTokenTokens suffice.
+  } else if (mode === 'prefix') {
+    const prefixOpts = normalizePrefixOptions(options.prefixMatch);
+    // Fail-closed parity with the scorer (throws on over-length).
+    const effLen: number = assertPrefixLengthForQuery(prefixOpts, qLen);
+    if (sourceMap.tokenCount < effLen) {
+      const typoEarly = normalizeTypoTolerance(options.typoTolerance);
+      const allowedEarly = allowedDistanceForTerm(effLen, typoEarly);
+      const minWin: number = effLen - allowedEarly >= 1 ? effLen - allowedEarly : 1;
+      if (sourceMap.tokenCount < minWin) return [];
+    }
+  } else if (mode === 'substring') {
+    const typoGate = normalizeTypoTolerance(options.typoTolerance);
+    if (typoGate.enabled) {
+      const allowedGate = allowedDistanceForTerm(qLen, typoGate);
+      if (allowedGate === 0) {
+        if (sourceMap.tokenCount < qLen) return [];
+      } else if (qLen > sourceMap.tokenCount + allowedGate) {
+        return [];
+      }
+    } else if (sourceMap.tokenCount < qLen) {
+      return [];
+    }
+  } else if (sourceMap.tokenCount < qLen) {
+    // Fuzzy (and unknown modes handled below): subsequence needs room.
+    return [];
+  }
+
+  /** Map a post-fold token span to one UTF-16 range (cluster-guarded). */
+  const spanToRange = (tokenStart: number, tokenLength: number): HighlightRange | null => {
+    if (tokenStart < 0 || tokenLength <= 0 || tokenStart + tokenLength > sourceMap.tokenCount) return null;
+    const start = sourceMap.starts[tokenStart];
+    const rawEnd = sourceMap.ends[tokenStart + tokenLength - 1];
+    const end = guardClusterBoundary(raw, rawEnd);
+    if (end <= start) return null;
+    return { start, end };
+  };
+
+  if (mode === 'token') {
+    // Multi-term highlights: one range per matched term, merged.
+    const tokenOpts = normalizeTokenMatchOptions(options.tokenMatch);
+    const typo = normalizeTypoTolerance(options.typoTolerance);
+    const terms = splitQueryTerms(queryTokens);
+    if (terms.length === 0) return [];
+    const scored = scoreTokenTokens(sourceMap.tokens, terms, tokenOpts, typo);
+    if (!scored.matched) return [];
+    const ranges: HighlightRange[] = [];
+    for (let i = 0; i < terms.length; i++) {
+      const r = spanToRange(scored.matchStarts[i] as number, scored.matchLengths[i] as number);
+      if (r !== null) ranges.push(r);
+    }
+    return mergeHighlightRanges(ranges);
+  }
+
+  if (mode === 'prefix') {
+    // Anchored prefix highlight: the winning token-start span.
+    const prefixOpts = normalizePrefixOptions(options.prefixMatch);
+    // Mirror index polarity enforcement (document-index/hybrid-index):
+    // prefixMatch.exactCase must agree with the folded mode.
+    if (prefixOpts.exactCase !== !folded) {
+      throw new ProfileMismatchError(!folded, prefixOpts.exactCase, 'prefixMatch.exactCase');
+    }
+    const typo = normalizeTypoTolerance(options.typoTolerance);
+    const scored = scorePrefixTokens(sourceMap.tokens, queryTokens, prefixOpts, typo);
+    if (!scored.matched) return [];
+    const r = spanToRange(scored.matchStart, scored.windowLength);
+    return r === null ? [] : [r];
+  }
+
   if (mode === 'substring') {
+    // Typo-tolerant substring highlights the aligned span; exact path
+    // stays bit-identical to the historical scorer.
+    const typo = normalizeTypoTolerance(options.typoTolerance);
+    if (typo.enabled) {
+      const match = scoreSubstringTypoTokens(sourceMap.tokens, queryTokens, typo);
+      if (!match.matched || match.matchStart < 0) return [];
+      const r = spanToRange(match.matchStart, match.windowLength);
+      return r === null ? [] : [r];
+    }
     const match = scoreSubstringTokens(sourceMap.tokens, queryTokens);
     if (!match.matched || match.matchStart < 0) return [];
 

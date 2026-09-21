@@ -5,8 +5,22 @@ import { packUnicodeToGPUBuffer, checkMemoryBudget } from './buffer';
 import { normalizeText } from './unicode-preprocess';
 import {
   searchMultiFieldCpuReference,
-  type FieldScoreDefinition
+  type FieldScoreDefinition,
+  type CpuModeOptions
 } from './cpu-reference';
+import {
+  normalizeTypoTolerance,
+  type NormalizedTypoOptions
+} from './modes/typo-distance';
+import {
+  normalizeTokenMatchOptions,
+  type NormalizedTokenMatchOptions
+} from './modes/token-search';
+import {
+  normalizePrefixOptions,
+  assertPrefixLengthForQuery,
+  type NormalizedPrefixOptions
+} from './modes/prefix-search';
 import {
   clampLimit,
   throwIfAborted,
@@ -485,6 +499,48 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         "cpuAlgorithm:'ufuzzy' is CPU-only; use preferGpu:false or cpuAlgorithm:'parity'."
       );
     }
+    if (mode !== 'fuzzy' && mode !== 'substring' && mode !== 'token' && mode !== 'prefix') {
+      throw new IncompatibleOptionError(
+        'mode',
+        `Unknown search mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
+      );
+    }
+    // v0.4 M4: fail-closed option validation up front so malformed
+    // token/prefix/typo shapes throw identically on GPU and CPU paths.
+    // 'fuzzy' validates typo shape but ignores it (subsequence matching is
+    // inherently typo-tolerant); 'substring'/'token'/'prefix' honor it.
+    const tokenOpts: NormalizedTokenMatchOptions = normalizeTokenMatchOptions(options.tokenMatch);
+    const prefixOpts: NormalizedPrefixOptions = normalizePrefixOptions(options.prefixMatch);
+    const typo: NormalizedTypoOptions = normalizeTypoTolerance(options.typoTolerance);
+    if (mode === 'prefix' && options.prefixMatch?.exactCase !== undefined && prefixOpts.exactCase !== caseSensitive) {
+      throw new ProfileMismatchError(caseSensitive, prefixOpts.exactCase, 'prefixMatch.exactCase');
+    }
+    // Legacy ufuzzy/native scorers only implement fuzzy/substring-exact.
+    if (cpuAlgorithm === 'ufuzzy' && (mode === 'token' || mode === 'prefix' || typo.enabled)) {
+      throw new IncompatibleOptionError(
+        'cpuAlgorithm',
+        `cpuAlgorithm:'ufuzzy' supports only exact 'fuzzy'/'substring' modes without typo tolerance (got mode '${mode}'${typo.enabled ? ' with typoTolerance' : ''}). Use cpuAlgorithm:'parity'.`
+      );
+    }
+    // Threaded into every parity CPU call below (single normalization).
+    const cpuModeOptions: CpuModeOptions = {
+      tokenMatch: { operator: tokenOpts.operator, minMatchCount: tokenOpts.minMatchCount },
+      prefixMatch: prefixOpts.prefixLength !== undefined
+        ? { prefixLength: prefixOpts.prefixLength, exactCase: prefixOpts.exactCase }
+        : { exactCase: prefixOpts.exactCase },
+      typoTolerance: {
+        enabled: typo.enabled,
+        maxDistance: typo.maxDistance,
+        minWordLengthForOneTypo: typo.minWordLengthForOneTypo,
+        minWordLengthForTwoTypos: typo.minWordLengthForTwoTypos,
+        prefixExactLength: typo.prefixExactLength
+      }
+    };
+    // v0.4 M4: token/prefix modes and typo-tolerant queries are CPU-only
+    // (exact-only WGSL kernels) and skip GPU dispatch with fallbackReason
+    // 'unsupported-mode' (Issue #10 parity boundary).
+    const isGpuSupportedMode: boolean =
+      (mode === 'fuzzy' || mode === 'substring') && !typo.enabled;
 
     const rawTrimmed = query.trim();
     let forceCpu = false;
@@ -514,6 +570,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     const clampedLimit = clampLimit(options.limit ?? options.maxResults ?? 50);
     throwIfAborted(signal);
+
+    // Hoisted prefixLength check: fail-closed even on empty queries/corpora.
+    // Skipped for empty queries to match the scorer's early noMatch.
+    if (mode === 'prefix' && normalizedQuery.tokens.length > 0) {
+      assertPrefixLengthForQuery(prefixOpts, normalizedQuery.tokens.length);
+    }
 
     // M3 (Issue #10): validate facet contracts fail-fast, before early exits.
     // An empty facet list is equivalent to not requesting facets (absent key).
@@ -559,13 +621,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         ? { facets: facetEngine.emptyResults(facetSpec) }
         : {})
     });
-
-    if (mode !== 'fuzzy' && mode !== 'substring') {
-      throw new IncompatibleOptionError(
-        'mode',
-        `Search mode '${String(mode)}' is scheduled for Milestone 4. Only 'fuzzy' and 'substring' are supported in Milestone 1.`
-      );
-    }
 
     let filterBitset: DocumentBitset | undefined = undefined;
     let filterPredicate: ((doc: TDoc) => boolean) | undefined = undefined;
@@ -617,9 +672,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     // fields from saturating GPU candidate buffer before low-priority allowed fields.
     const isFieldRestricted = allowedFieldIndices !== undefined && allowedFieldIndices.size < this.sortedFields.length;
 
-    // 1. WebGPU execution path
+    // 1. WebGPU execution path (exact fuzzy/substring only; token/prefix
+    // and typo queries skip dispatch via isGpuSupportedMode above).
     const gpuHandle = this.gpuEngine;
-    const isGpuSupportedMode = mode === 'fuzzy' || mode === 'substring';
     const useGpu = !forceCpu &&
       !isFieldRestricted &&
       isGpuSupportedMode &&
@@ -758,7 +813,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               allowedFieldIndices,
               this.tombstones,
               undefined,
-              true
+              true,
+              cpuModeOptions
             );
             facetCandidates = exact.allMatchedDocIndices ?? exact.results.map((r) => r.docIndex);
             facetIsApproximate = false;
@@ -788,12 +844,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         if (err.name === 'AbortError') {
           throw err;
         }
-        console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
-        this.engineType = 'cpu';
-        this.fallbackReason = 'gpu-execution-error';
-        if (this.gpuEngine) {
-          try { this.gpuEngine.destroy(); } catch {}
-          this.gpuEngine = null;
+        // Mirror hybrid-index: mode-routed rejections (token/prefix/typo via
+        // direct or raced calls) are not engine failures — keep a healthy GPU
+        // up and fall through to parity CPU.
+        const modeRouted: boolean =
+          err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
+        if (!modeRouted) {
+          console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
+          this.engineType = 'cpu';
+          this.fallbackReason = 'gpu-execution-error';
+          if (this.gpuEngine) {
+            try { this.gpuEngine.destroy(); } catch {}
+            this.gpuEngine = null;
+          }
         }
       }
     }
@@ -959,7 +1022,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         }
         return true;
       } : undefined,
-      wantsFacets
+      wantsFacets,
+      cpuModeOptions
     );
 
     if (this.isDestroyed || this.generation !== gen) {
@@ -1010,7 +1074,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           allowedFieldIndices,
           this.tombstones,
           undefined,
-          true
+          true,
+          cpuModeOptions
         );
         facetCandidates = unfiltered.allMatchedDocIndices ?? unfiltered.results.map((r) => r.docIndex);
         facetScanMs = unfiltered.durationMs;
@@ -1033,11 +1098,16 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     let effectiveFallbackReason = this.fallbackReason;
     if (forceCpu) {
       effectiveFallbackReason = 'query-too-long';
+    } else if (!isGpuSupportedMode) {
+      // v0.4 M4: token/prefix/typo queries are CPU-by-design (exact-only
+      // WGSL kernels) — recorded per the Issue #10 parity boundary.
+      effectiveFallbackReason = 'unsupported-mode';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
-    } else if (isFieldRestricted && !effectiveFallbackReason) {
-      effectiveFallbackReason = 'cpu-algorithm-requested';
     }
+    // Note: field-restricted routing (isFieldRestricted) intentionally leaves
+    // fallbackReason as-is — it is a routing decision, not a scorer request,
+    // so reusing 'cpu-algorithm-requested' would mislead telemetry.
 
     return {
       query,
@@ -1125,7 +1195,16 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
 
     const queryTokens = normalizeText(query, this.folded).tokens;
-    const alignOpts = { mode, folded: this.folded, queryTokens };
+    // v0.4 M4: thread token/prefix/typo options so highlight ranges track
+    // the serving scorer (score-highlight symmetry across all modes).
+    const alignOpts = {
+      mode,
+      folded: this.folded,
+      queryTokens,
+      tokenMatch: options.tokenMatch,
+      prefixMatch: options.prefixMatch,
+      typoTolerance: options.typoTolerance
+    };
 
     for (let i = 0; i < results.length; i++) {
       const item = results[i];
