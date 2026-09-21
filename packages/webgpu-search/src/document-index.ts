@@ -1461,6 +1461,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.rowToDocIndex = newRowToDocIndex;
     this.rowToFieldIndex = newRowToFieldIndex;
     this.docToRowIndices = newDocToRowIndices;
+    this.totalTokens = corpusTokens;
     const oldToNewDocIndexMap = new Map<number, number>();
     for (let newD = 0; newD < activeDocCount; newD++) {
       oldToNewDocIndexMap.set(activeOldDocIndices[newD], newD);

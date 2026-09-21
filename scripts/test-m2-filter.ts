@@ -403,8 +403,9 @@ async function runMilestone2Tests() {
       compileFilter(filter, store);
     }
 
-    // Benchmark 100 iterations
-    const iterations = 100;
+    // Benchmark 1000 iterations: averages out performance.now() (~1ms)
+    // granularity noise that made 100-iteration runs flaky (35-68µs spread).
+    const iterations = 1000;
     const t0 = performance.now();
     for (let i = 0; i < iterations; i++) {
       compileFilter(filter, store);

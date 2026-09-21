@@ -46,6 +46,24 @@ interface StringArrayColumn extends BaseColumn {
 
 type Column = StringColumn | NumberColumn | BooleanColumn | StringArrayColumn;
 
+/** Validates a numeric range bound, throwing InvalidFilterError on non-numeric input. */
+function toNumberBound(raw: unknown, op: string, field: string): number {
+  if (typeof raw !== 'number' && typeof raw !== 'string') {
+    throw new InvalidFilterError(
+      `Range operator "${op}" on field "${field}" expects a numeric bound, got ${raw === null ? 'null' : typeof raw}.`,
+      field
+    );
+  }
+  const n = Number(raw);
+  if (Number.isNaN(n)) {
+    throw new InvalidFilterError(
+      `Range operator "${op}" on field "${field}" expects a numeric bound, got ${JSON.stringify(String(raw))}.`,
+      field
+    );
+  }
+  return n;
+}
+
 export interface ColumnarStoreOptions {
   initialCapacity?: number;
   growthFactor?: number;
@@ -205,8 +223,34 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
     if (count > this.capacity) {
       this.ensureCapacity(count);
     }
-    this.activeDocs.clear(0);
+    // Full reset so re-init never leaks stale column state.
     this.activeDocs = new DocumentBitset(this.capacity);
+    for (const col of this.columns.values()) {
+      col.presence = new DocumentBitset(this.capacity);
+      switch (col.type) {
+        case 'string': {
+          col.stringTable = [];
+          col.stringToCode.clear();
+          col.codes = new Uint32Array(this.capacity);
+          col.invertedIndex.clear();
+          break;
+        }
+        case 'number': {
+          col.values = new Float64Array(this.capacity);
+          col.values.fill(NaN);
+          break;
+        }
+        case 'boolean': {
+          col.trueBitset = new DocumentBitset(this.capacity);
+          break;
+        }
+        case 'string[]': {
+          col.tagInverted.clear();
+          col.docTags.clear();
+          break;
+        }
+      }
+    }
 
     for (let d = 0; d < count; d++) {
       const doc = records[d];
@@ -217,6 +261,11 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
   }
 
   add(docIndex: number, doc: TDoc): void {
+    if (!Number.isInteger(docIndex) || docIndex < 0) {
+      throw new RangeError(
+        `[webgpu-search] ColumnarStore.add requires a non-negative integer docIndex, got ${String(docIndex)}.`
+      );
+    }
     if (docIndex >= this.capacity) {
       this.ensureCapacity(docIndex + 1);
     }
@@ -224,11 +273,19 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
 
     for (const col of this.columns.values()) {
       const rawVal = col.getter(doc);
+      // Clear-then-set so re-add on an occupied slot never leaks stale
+      // string codes or tag bits (mirrors update()).
+      this.clearDocColumnValue(col, docIndex);
       this.setDocColumnValue(col, docIndex, rawVal);
     }
   }
 
   update(docIndex: number, doc: TDoc): void {
+    if (!Number.isInteger(docIndex) || docIndex < 0) {
+      throw new RangeError(
+        `[webgpu-search] ColumnarStore.update requires a non-negative integer docIndex, got ${String(docIndex)}.`
+      );
+    }
     if (docIndex >= this.capacity) {
       this.ensureCapacity(docIndex + 1);
     }
@@ -555,12 +612,18 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
         return result.andInPlace(active);
       }
       case 'string[]': {
+        let includeNull = false;
         for (let i = 0; i < values.length; i++) {
           const v = values[i];
-          if (v !== null) {
+          if (v === null) {
+            includeNull = true;
+          } else {
             const bs = col.tagInverted.get(String(v));
             if (bs) result.orInPlace(bs);
           }
+        }
+        if (includeNull) {
+          result.orInPlace(active.andNot(col.presence));
         }
         return result.andInPlace(active);
       }
@@ -630,13 +693,13 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
 
     if (col.type === 'number') {
       const hasGt = gt !== undefined;
-      const gtVal = hasGt ? Number(gt) : -Infinity;
       const hasGte = gte !== undefined;
-      const gteVal = hasGte ? Number(gte) : -Infinity;
       const hasLt = lt !== undefined;
-      const ltVal = hasLt ? Number(lt) : Infinity;
       const hasLte = lte !== undefined;
-      const lteVal = hasLte ? Number(lte) : Infinity;
+      const gtVal = hasGt ? toNumberBound(gt, 'gt', name) : -Infinity;
+      const gteVal = hasGte ? toNumberBound(gte, 'gte', name) : -Infinity;
+      const ltVal = hasLt ? toNumberBound(lt, 'lt', name) : Infinity;
+      const lteVal = hasLte ? toNumberBound(lte, 'lte', name) : Infinity;
 
       const activeWords = active.words;
       const presWords = col.presence.words;

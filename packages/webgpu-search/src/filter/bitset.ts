@@ -11,7 +11,8 @@ export class DocumentBitset {
   private isDirty: boolean = true;
 
   constructor(capacity: number = 0) {
-    this.capacity = Math.max(0, Math.floor(capacity));
+    const safe = Number.isFinite(capacity) ? Math.max(0, Math.floor(capacity)) : 0;
+    this.capacity = safe;
     const wordCount = (this.capacity + 31) >>> 5;
     this.words = new Uint32Array(Math.max(wordCount, 1));
   }
@@ -29,13 +30,14 @@ export class DocumentBitset {
   static fromIndices(indices: number[], capacity?: number): DocumentBitset {
     let maxIdx = -1;
     for (let i = 0; i < indices.length; i++) {
-      if (indices[i] > maxIdx) maxIdx = indices[i];
+      const idx = indices[i];
+      if (Number.isInteger(idx) && idx > maxIdx) maxIdx = idx;
     }
     const cap = capacity !== undefined ? Math.max(capacity, maxIdx + 1) : maxIdx + 1;
     const bs = new DocumentBitset(cap);
     for (let i = 0; i < indices.length; i++) {
       const idx = indices[i];
-      if (idx >= 0) {
+      if (Number.isInteger(idx) && idx >= 0) {
         bs.set(idx);
       }
     }
@@ -47,6 +49,8 @@ export class DocumentBitset {
   }
 
   ensureCapacity(minCapacity: number): void {
+    if (!Number.isFinite(minCapacity)) return;
+    minCapacity = Math.floor(minCapacity);
     if (minCapacity <= this.capacity) return;
     const newWordCount = (minCapacity + 31) >>> 5;
     if (newWordCount > this.words.length) {
@@ -59,7 +63,7 @@ export class DocumentBitset {
   }
 
   set(docIndex: number): void {
-    if (docIndex < 0) return;
+    if (!Number.isInteger(docIndex) || docIndex < 0) return;
     if (docIndex >= this.capacity) {
       this.ensureCapacity(docIndex + 1);
     }
@@ -72,7 +76,7 @@ export class DocumentBitset {
   }
 
   clear(docIndex: number): void {
-    if (docIndex < 0 || docIndex >= this.capacity) return;
+    if (!Number.isInteger(docIndex) || docIndex < 0 || docIndex >= this.capacity) return;
     const wordIdx = docIndex >>> 5;
     const bitMask = 1 << (docIndex & 31);
     if ((this.words[wordIdx] & bitMask) !== 0) {
@@ -82,7 +86,7 @@ export class DocumentBitset {
   }
 
   has(docIndex: number): boolean {
-    if (docIndex < 0 || docIndex >= this.capacity) return false;
+    if (!Number.isInteger(docIndex) || docIndex < 0 || docIndex >= this.capacity) return false;
     const wordIdx = docIndex >>> 5;
     return (this.words[wordIdx] & (1 << (docIndex & 31))) !== 0;
   }
@@ -92,7 +96,7 @@ export class DocumentBitset {
   }
 
   toggle(docIndex: number): void {
-    if (docIndex < 0) return;
+    if (!Number.isInteger(docIndex) || docIndex < 0) return;
     if (docIndex >= this.capacity) {
       this.ensureCapacity(docIndex + 1);
     }
@@ -102,7 +106,8 @@ export class DocumentBitset {
   }
 
   fill(value: boolean, count?: number): void {
-    const limit = count !== undefined ? Math.min(count, this.capacity) : this.capacity;
+    const rawLimit = count !== undefined ? count : this.capacity;
+    const limit = Number.isFinite(rawLimit) ? Math.min(Math.floor(rawLimit), this.capacity) : 0;
     if (limit <= 0) {
       this.words.fill(0);
       this.cachedPopcount = 0;
@@ -205,6 +210,7 @@ export class DocumentBitset {
     for (let w = 0; w < wordCount; w++) {
       result.words[w] = this.words[w] & other.words[w];
     }
+    maskRemainder(result.words, cap);
     return result;
   }
 
@@ -227,11 +233,14 @@ export class DocumentBitset {
     const cap = Math.max(this.capacity, other.capacity);
     const result = new DocumentBitset(cap);
     const wordCount = (cap + 31) >>> 5;
+    const thisNumWords = (this.capacity + 31) >>> 5;
+    const otherNumWords = (other.capacity + 31) >>> 5;
     for (let w = 0; w < wordCount; w++) {
-      const w1 = w < this.words.length ? this.words[w] : 0;
-      const w2 = w < other.words.length ? other.words[w] : 0;
+      const w1 = w < thisNumWords ? this.words[w] : 0;
+      const w2 = w < otherNumWords ? other.words[w] : 0;
       result.words[w] = w1 | w2;
     }
+    maskRemainder(result.words, cap);
     return result;
   }
 
@@ -251,10 +260,12 @@ export class DocumentBitset {
     const cap = this.capacity;
     const result = new DocumentBitset(cap);
     const wordCount = (cap + 31) >>> 5;
+    const otherNumWords = (other.capacity + 31) >>> 5;
     for (let w = 0; w < wordCount; w++) {
-      const otherWord = w < other.words.length ? other.words[w] : 0;
+      const otherWord = w < otherNumWords ? other.words[w] : 0;
       result.words[w] = this.words[w] & ~otherWord;
     }
+    maskRemainder(result.words, cap);
     return result;
   }
 
@@ -270,11 +281,14 @@ export class DocumentBitset {
   }
 
   not(capacity?: number): DocumentBitset {
-    const cap = capacity !== undefined ? capacity : this.capacity;
+    const cap = capacity !== undefined
+      ? (Number.isFinite(capacity) ? Math.max(0, Math.floor(capacity)) : 0)
+      : this.capacity;
     const result = new DocumentBitset(cap);
     const wordCount = (cap + 31) >>> 5;
+    const thisNumWords = (this.capacity + 31) >>> 5;
     for (let w = 0; w < wordCount; w++) {
-      const srcWord = w < this.words.length ? this.words[w] : 0;
+      const srcWord = w < thisNumWords ? this.words[w] : 0;
       result.words[w] = ~srcWord;
     }
     const remainder = cap & 31;
@@ -286,8 +300,11 @@ export class DocumentBitset {
   }
 
   notInPlace(capacity?: number): this {
-    const cap = capacity !== undefined ? capacity : this.capacity;
+    const cap = capacity !== undefined
+      ? (Number.isFinite(capacity) ? Math.max(0, Math.floor(capacity)) : 0)
+      : this.capacity;
     this.ensureCapacity(cap);
+    this.capacity = cap;
     const wordCount = (cap + 31) >>> 5;
     for (let w = 0; w < wordCount; w++) {
       this.words[w] = ~this.words[w];
@@ -297,7 +314,20 @@ export class DocumentBitset {
       const mask = ~0 >>> (32 - remainder);
       this.words[wordCount - 1] &= mask;
     }
+    if (wordCount < this.words.length) {
+      this.words.fill(0, wordCount);
+    }
     this.isDirty = true;
     return this;
+  }
+}
+
+/** Masks off trailing bits above the logical capacity in the last word. */
+function maskRemainder(words: Uint32Array, cap: number): void {
+  const remainder = cap & 31;
+  const wordCount = (cap + 31) >>> 5;
+  if (remainder > 0 && wordCount > 0 && wordCount <= words.length) {
+    const mask = ~0 >>> (32 - remainder);
+    words[wordCount - 1] &= mask;
   }
 }
