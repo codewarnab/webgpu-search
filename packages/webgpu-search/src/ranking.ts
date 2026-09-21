@@ -5,13 +5,23 @@
  * (WebGPU readback, parity CPU, legacy ufuzzy CPU, suggest candidates):
  *   1. `score` DESC — primary integer match score.
  *   2. `weight` DESC — matches in higher-weighted fields take precedence.
- *   3. `exact` DESC — full post-fold string equality precedes partial/fuzzy.
+ *   3. `exact` DESC — full post-fold token equality precedes partial/fuzzy.
  *   4. `length` ASC — shorter matched-field token spans precede longer ones.
  *   5. `id` ASC — stable string/numeric document ID breaks remaining ties.
+ *
+ * Search paths rank per document (best-field-wins); suggest ranks per
+ * (doc, field) row with the same comparator, so a document may appear
+ * multiple times in suggestions. Custom hierarchies are honored on both
+ * surfaces (see `SuggestOptions.tieBreakers`).
  *
  * All comparisons are wrap-free (`>` / `<`, never `|0` subtraction) and use
  * code-unit order for strings (never locale collation) so ordering is
  * bit-for-bit identical across browsers, workers, and Node.js.
+ *
+ * Fail-closed on non-finite keys: NaN/Infinity scores, weights, lengths, or
+ * numeric IDs throw `TypeError` instead of producing implementation-defined
+ * `Array.sort` order. Field weights are validated positive-finite at index
+ * construction, snapshot restore, and deterministic parity entry points.
  *
  * Portable: no DOM refs. Operates on plain numbers/strings only.
  */
@@ -84,22 +94,45 @@ function compareStringsAsc(a: string, b: string): number {
 
 /**
  * Deterministic ID comparison:
- * - number vs number: numeric ascending.
+ * - number vs number: numeric ascending (both must be finite; NaN/Infinity
+ *   throw fail-closed to preserve the total-order contract).
  * - otherwise: String(id) code-unit ascending (covers string/string and
- *   mixed string/number pairs deterministically).
+ *   mixed string/number pairs deterministically; note numeric `2` and string
+ *   `"2"` compare id-equal and fall through to `docIndex`).
  */
 export function compareIdsAsc(a: string | number, b: string | number): number {
   if (typeof a === 'number' && typeof b === 'number') {
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      throw new TypeError(
+        `[webgpu-search] compareIdsAsc requires finite numeric ids, got ${String(a)} vs ${String(b)}.`
+      );
+    }
     if (a !== b) return a > b ? 1 : -1;
     return 0;
   }
+  if (typeof a === 'number' && !Number.isFinite(a)) {
+    throw new TypeError(`[webgpu-search] compareIdsAsc requires finite numeric id, got ${String(a)}.`);
+  }
+  if (typeof b === 'number' && !Number.isFinite(b)) {
+    throw new TypeError(`[webgpu-search] compareIdsAsc requires finite numeric id, got ${String(b)}.`);
+  }
   return compareStringsAsc(String(a), String(b));
+}
+
+/** Throw fail-closed on non-finite ranking keys (preserves total order). */
+function assertFiniteRankKey(value: number, key: string): void {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError(
+      `[webgpu-search] compareRanked requires a finite number for '${key}', got ${String(value)}.`
+    );
+  }
 }
 
 /**
  * Total-order comparator over the requested tie-breaker hierarchy.
  * Criteria not listed are ignored; `docIndex` ascending is the implicit
  * final fallback so the order is total even for duplicate IDs.
+ * Non-finite `score`/`fieldWeight`/`matchedLength` throw fail-closed.
  */
 export function compareRanked(
   a: RankableCandidate,
@@ -109,14 +142,20 @@ export function compareRanked(
   for (let i = 0; i < tieBreakers.length; i++) {
     const c = tieBreakers[i];
     if (c === 'score') {
+      assertFiniteRankKey(a.score, 'score');
+      assertFiniteRankKey(b.score, 'score');
       if (b.score !== a.score) return b.score > a.score ? 1 : -1;
     } else if (c === 'weight') {
+      assertFiniteRankKey(a.fieldWeight, 'fieldWeight');
+      assertFiniteRankKey(b.fieldWeight, 'fieldWeight');
       if (b.fieldWeight !== a.fieldWeight) return b.fieldWeight > a.fieldWeight ? 1 : -1;
     } else if (c === 'exact') {
       const ea = a.isExactMatch ? 1 : 0;
       const eb = b.isExactMatch ? 1 : 0;
       if (eb !== ea) return eb > ea ? 1 : -1;
     } else if (c === 'length') {
+      assertFiniteRankKey(a.matchedLength, 'matchedLength');
+      assertFiniteRankKey(b.matchedLength, 'matchedLength');
       if (a.matchedLength !== b.matchedLength) return a.matchedLength > b.matchedLength ? 1 : -1;
     } else if (c === 'id') {
       const idCmp = compareIdsAsc(a.id, b.id);

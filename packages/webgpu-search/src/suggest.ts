@@ -19,9 +19,11 @@
  * enumeration lives in `document-index.ts` (avoids import cycles).
  */
 
-import type { SuggestOptions } from './types';
+import type { SuggestOptions, TieBreakerCriterion } from './types';
 import { RESULT_LIMIT_MAX } from './text-profile';
 import { IncompatibleOptionError } from './errors';
+import { normalizeTieBreakers, DEFAULT_TIE_BREAKERS } from './ranking';
+import type { RankableCandidate } from './ranking';
 
 export const SUGGEST_DEFAULT_LIMIT = 5 as const;
 export const SUGGEST_DEFAULT_MODE = 'prefix' as const;
@@ -33,26 +35,31 @@ export interface NormalizedSuggestOptions {
   mode: 'prefix' | 'fuzzy';
   fuzzyDistance: number;
   field?: string;
+  tieBreakers: TieBreakerCriterion[];
 }
 
 /**
  * Validate and normalize suggest options (fail-closed).
  * - `undefined`/`true` resolve to defaults.
- * - `limit` coerces like search limits (non-finite → default 5, floor,
- *   clamp 1..RESULT_LIMIT_MAX).
+ * - `false` is only meaningful as inline `search({ suggest: false })`
+ *   (disabled); standalone `suggest()` rejects it — omit the option instead.
+ * - `limit` coerces like search limits (string numerics via `Number()`,
+ *   non-finite → default 5, fractions floored, clamp 1..RESULT_LIMIT_MAX;
+ *   note `fuzzyDistance` is strict number-only by contrast).
  * - `mode` must be 'prefix' or 'fuzzy'.
- * - `fuzzyDistance` must be an integer 0..2.
+ * - `fuzzyDistance` must be an integer 0..2 (strict `typeof number`; `'1'` throws).
  * - `field` must be a non-empty string when provided (existence is checked
  *   against the index at suggest() time).
+ * - `tieBreakers` defaults to the M5 5-tier order; validated fail-closed.
  */
 export function normalizeSuggestOptions(
   raw: SuggestOptions | boolean | undefined
 ): NormalizedSuggestOptions {
   if (raw === undefined || raw === true) {
-    return { limit: SUGGEST_DEFAULT_LIMIT, mode: SUGGEST_DEFAULT_MODE, fuzzyDistance: 0 };
+    return { limit: SUGGEST_DEFAULT_LIMIT, mode: SUGGEST_DEFAULT_MODE, fuzzyDistance: 0, tieBreakers: [...DEFAULT_TIE_BREAKERS] };
   }
   if (raw === false) {
-    throw new TypeError('[webgpu-search] suggest:false disables suggestions; omit the option instead.');
+    throw new TypeError('[webgpu-search] suggest:false disables inline search suggestions; omit the option (or standalone suggest() call) instead.');
   }
   if (typeof raw !== 'object' || raw === null) {
     throw new TypeError('[webgpu-search] suggest options must be an object, true, or undefined.');
@@ -99,19 +106,15 @@ export function normalizeSuggestOptions(
     field = opts.field;
   }
 
-  return field === undefined ? { limit, mode, fuzzyDistance } : { limit, mode, fuzzyDistance, field };
+  const tieBreakers = normalizeTieBreakers(opts.tieBreakers);
+
+  const base = { limit, mode, fuzzyDistance, tieBreakers };
+  return field === undefined ? base : { ...base, field };
 }
 
 /**
- * Totally-ordered suggestion candidate keys (mirrors RankableCandidate).
- * Kept local to avoid a ranking.ts value import cycle in either direction;
- * `document-index.ts` maps these onto `RankableCandidate` for sorting.
+ * Alias for the deterministic ranking keys used by suggest candidates.
+ * Identical to `RankableCandidate`; kept as an alias so existing imports
+ * keep working without a duplicate interface to drift.
  */
-export interface SuggestCandidateKeys {
-  score: number;
-  fieldWeight: number;
-  isExactMatch: boolean;
-  matchedLength: number;
-  id: string | number;
-  docIndex: number;
-}
+export type SuggestCandidateKeys = RankableCandidate;

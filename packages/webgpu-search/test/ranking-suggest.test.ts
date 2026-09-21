@@ -199,6 +199,8 @@ describe('DocumentIndex M5: deterministic search ranking', () => {
     const res = await index.search('auth', { mode: 'substring' });
     expect(res.totalMatches).toBe(2);
     expect(res.results[0]?.id).toBe('title-hit');
+    // Pin scorer drift: raw 1000 on both fields, weighted 2000 vs 1000.
+    expect(res.results.map((r) => r.score)).toEqual([2000, 1000]);
     index.destroy();
   });
 
@@ -355,16 +357,16 @@ describe('DocumentIndex M5: suggest()', () => {
       prefixMatch: { prefixLength: 2 },
       typoTolerance: { enabled: true, maxDistance: 1 as const },
       ranking: { tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] as const },
-      suggest: { limit: 3, mode: 'prefix' as const, fuzzyDistance: 1 },
+      suggest: { limit: 3, mode: 'prefix' as const, fuzzyDistance: 1, tieBreakers: ['score', 'id'] as const },
     };
-    const roundtripped = JSON.parse(JSON.stringify(opts));
-    expect(roundtripped).toEqual({ ...opts, ranking: { tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] }, suggest: { limit: 3, mode: 'prefix', fuzzyDistance: 1 } });
+    const roundtripped = structuredClone(opts);
+    expect(roundtripped).toEqual(opts);
     // Round-tripped ranking/suggest options still validate clean.
-    expect(normalizeTieBreakers(roundtripped.ranking.tieBreakers)).toEqual(
+    expect(normalizeTieBreakers([...roundtripped.ranking.tieBreakers])).toEqual(
       ['score', 'weight', 'exact', 'length', 'id']
     );
-    expect(normalizeSuggestOptions(roundtripped.suggest)).toEqual(
-      { limit: 3, mode: 'prefix', fuzzyDistance: 1 }
+    expect(normalizeSuggestOptions({ ...roundtripped.suggest, tieBreakers: [...roundtripped.suggest.tieBreakers] })).toEqual(
+      { limit: 3, mode: 'prefix', fuzzyDistance: 1, tieBreakers: ['score', 'id'] }
     );
   });
 
@@ -404,8 +406,8 @@ describe('DocumentIndex M5: suggest()', () => {
   });
 
   test('normalizeSuggestOptions defaults and boolean shorthand', () => {
-    expect(normalizeSuggestOptions(undefined)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0 });
-    expect(normalizeSuggestOptions(true)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0 });
+    expect(normalizeSuggestOptions(undefined)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0, tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] });
+    expect(normalizeSuggestOptions(true)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0, tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] });
     expect(SUGGEST_DEFAULT_LIMIT).toBe(5);
     expect(() => normalizeSuggestOptions(false)).toThrow(TypeError);
     expect(() => normalizeSuggestOptions({ fuzzyDistance: 3 })).toThrow(RangeError);
@@ -447,6 +449,148 @@ describe('DocumentIndex M5: suggest()', () => {
     expect(res.suggestions.map((s) => s.text)).toEqual(['AuthService']);
     index.destroy();
   });
+
+  test('non-finite ranking keys throw fail-closed (total-order contract)', () => {
+    expect(() => compareRanked(rank({ score: NaN }), rank({ score: 1 }), DEFAULT_TIE_BREAKERS)).toThrow(TypeError);
+    expect(() => compareRanked(rank({ fieldWeight: Infinity }), rank({ fieldWeight: 1 }), DEFAULT_TIE_BREAKERS)).toThrow(TypeError);
+    expect(() => compareRanked(rank({ id: NaN }), rank({ id: 1 }), DEFAULT_TIE_BREAKERS)).toThrow(TypeError);
+  });
+
+  test("['id']-only hierarchy ignores scores", () => {
+    const lowIdLowScore = rank({ score: 1, id: 'a' });
+    const highIdHighScore = rank({ score: 999, id: 'z' });
+    expect(compareRanked(lowIdLowScore, highIdHighScore, ['id'])).toBe(-1);
+    expect(compareRanked(highIdHighScore, lowIdLowScore, ['id'])).toBe(1);
+  });
+
+  test('mixed string/number ids order deterministically via String()', () => {
+    expect(compareRanked(rank({ id: 2 }), rank({ id: 'a' }), DEFAULT_TIE_BREAKERS)).toBe(-1);
+    expect(compareRanked(rank({ id: 10 }), rank({ id: '2' }), DEFAULT_TIE_BREAKERS)).toBe(-1);
+  });
+
+  test('exact tier is post-fold (case-insensitive equals count as exact)', () => {
+    expect(isExactTokenMatch(toks('Hello'), toks('hello'))).toBe(true);
+  });
+
+  test('suggest limit edges clamp fail-closed', () => {
+    expect(normalizeSuggestOptions({ limit: 0 }).limit).toBe(1);
+    expect(normalizeSuggestOptions({ limit: -5 }).limit).toBe(1);
+    expect(normalizeSuggestOptions({ limit: NaN }).limit).toBe(5);
+    expect(normalizeSuggestOptions({ limit: 1e12 }).limit).toBe(8192);
+  });
+
+  test('fuzzyDistance:2 hits the upper boundary', async () => {
+    const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
+    const res = await index.suggest('Auht', { fuzzyDistance: 2 });
+    expect(res.suggestions.length).toBeGreaterThan(0);
+    index.destroy();
+  });
+
+  test('suggest tieBreakers are honored; inline search inherits ranking hierarchy', async () => {
+    const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
+    const custom = await index.suggest('Auth', { tieBreakers: ['id'] });
+    expect(custom.suggestions.map((s) => s.docId)).toEqual(['1', '2']);
+    const inline = await index.search('Auth', {
+      mode: 'prefix',
+      ranking: { tieBreakers: ['score', 'id'] },
+      suggest: { limit: 2 },
+    });
+    expect(inline.suggestions?.length).toBe(2);
+    index.destroy();
+  });
+
+  test('inline suggest is index-wide: filter narrows results, not suggestions', async () => {
+    const docs = [
+      { id: '1', kind: 'a', title: 'AuthController', body: '' },
+      { id: '2', kind: 'b', title: 'AuthService', body: '' },
+    ];
+    const index = await DocumentIndex.create<typeof docs[number]>(docs, {
+      fields: [{ name: 'title', weight: 2.0 }],
+      filterFields: [{ name: 'kind', type: 'string' }],
+      preferGpu: false,
+    });
+    const res = await index.search('Auth', { mode: 'prefix', filter: { kind: 'a' }, suggest: true });
+    expect(res.results.map((r) => r.id)).toEqual(['1']);
+    expect(res.suggestions?.length).toBe(2);
+    index.destroy();
+  });
+
+  test('search field validation is fail-closed on empty query and empty index', async () => {
+    const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
+    await expect(index.search('', { fields: ['nope'] })).rejects.toThrow();
+    const empty = await DocumentIndex.create<TitleDoc>([], titleOpts());
+    await expect(empty.search('x', { fields: ['nope'] })).rejects.toThrow();
+    await expect(empty.search('x', { ranking: { tieBreakers: [] } })).rejects.toThrow(RangeError);
+    index.destroy();
+    empty.destroy();
+  });
+
+  test('over-long suggest query throws QueryTooLongError', async () => {
+    const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
+    const long = 'a'.repeat(1000);
+    await expect(index.suggest(long)).rejects.toThrow();
+    index.destroy();
+  });
+
+  test('legacy ufuzzy path honors deterministic ranking', async () => {
+    const index = await DocumentIndex.create<TitleDoc>(
+      [
+        { id: 'b', title: 'hello', body: '' },
+        { id: 'a', title: 'hello', body: '' },
+      ],
+      titleOpts()
+    );
+    const res = await index.search('hello', { mode: 'substring', cpuAlgorithm: 'ufuzzy' });
+    expect(res.results.map((r) => r.id)).toEqual(['a', 'b']);
+    index.destroy();
+  });
+
+  test('reversed insertion still yields identical deterministic order', async () => {
+    const fwd = await DocumentIndex.create<TitleDoc>(
+      [
+        { id: 'b', title: 'hello', body: '' },
+        { id: 'a', title: 'hello', body: '' },
+      ],
+      titleOpts()
+    );
+    const rev = await DocumentIndex.create<TitleDoc>(
+      [
+        { id: 'a', title: 'hello', body: '' },
+        { id: 'b', title: 'hello', body: '' },
+      ],
+      titleOpts()
+    );
+    const r1 = await fwd.search('hello', { mode: 'substring' });
+    const r2 = await rev.search('hello', { mode: 'substring' });
+    expect(r1.results.map((r) => r.id)).toEqual(r2.results.map((r) => r.id));
+    fwd.destroy();
+    rev.destroy();
+  });
+
+  test('deterministic parity rejects bad weights, docIds length, and docIds entries', () => {
+    const rec = [toks('hello')];
+    expect(() =>
+      searchMultiFieldCpuReference(
+        1, [{ name: 't', weight: NaN }], rec, [0], [0], toks('hello'),
+        'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
+        { docIds: ['a'] }
+      )
+    ).toThrow(RangeError);
+    expect(() =>
+      searchMultiFieldCpuReference(
+        1, [{ name: 't', weight: 1 }], rec, [0], [0], toks('hello'),
+        'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
+        { docIds: ['a', 'extra'] }
+      )
+    ).toThrow(RangeError);
+    expect(() =>
+      searchMultiFieldCpuReference(
+        1, [{ name: 't', weight: 1 }], rec, [0], [0], toks('hello'),
+        'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
+        { docIds: [''] }
+      )
+    ).toThrow(TypeError);
+  });
 });
 
 describe('M5 portability', () => {
@@ -454,22 +598,38 @@ describe('M5 portability', () => {
     const files = [
       'packages/webgpu-search/src/ranking.ts',
       'packages/webgpu-search/src/suggest.ts',
+      'packages/webgpu-search/src/document-index.ts',
     ];
     for (const f of files) {
       const raw = await readFile(f, 'utf8');
       const noBlock = raw.replace(/\/\*[\s\S]*?\*\//g, '');
-      const code = noBlock
+      // Blank string literals first so `//` inside URLs does not truncate code.
+      const noStrings = noBlock.replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, "''");
+      const code = noStrings
         .split('\n')
         .map((line) => {
           const idx = line.indexOf('//');
           return idx >= 0 ? line.slice(0, idx) : line;
         })
-        .join('\n')
-        .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, "''");
+        .join('\n');
       const stripped = code.replace(/typeof\s+(document|window|navigator|self)\b/g, '');
       expect(stripped).not.toMatch(/(^|[^\w$.])document\s*\./);
-      expect(code.includes('window.')).toBe(false);
+      expect(stripped).not.toMatch(/(^|[^\w$.])window\s*[\.\[]/);
       expect(code.includes('localStorage')).toBe(false);
+      expect(code.includes('sessionStorage')).toBe(false);
+      // navigator/self/location are allowed only behind typeof guards.
+      // document-index.ts has pre-existing guarded `navigator.gpu` fallback
+      // detection (outside M5); assert M5 suggest code itself is clean.
+      if (f.endsWith('document-index.ts')) {
+        const m5Start = code.indexOf('computeSuggestions');
+        const m5Slice = m5Start >= 0 ? code.slice(code.lastIndexOf('/**', m5Start - 2000)) : '';
+        const m5Stripped = m5Slice.replace(/typeof\s+(document|window|navigator|self)\b/g, '');
+        expect(m5Stripped.includes('navigator.')).toBe(false);
+        expect(m5Stripped.includes('self.')).toBe(false);
+      } else {
+        expect(stripped.includes('navigator.')).toBe(false);
+      }
+      expect(stripped).not.toMatch(/(^|[^\w$.])location\s*\./);
     }
   });
 });

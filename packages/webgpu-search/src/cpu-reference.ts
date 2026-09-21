@@ -350,7 +350,8 @@ export interface FieldScoreDefinition {
  */
 export interface MultiFieldRankingOptions {
   tieBreakers?: TieBreakerCriterion[];
-  docIds?: ReadonlyArray<string | number>;
+  /** Parallel to the document space; null/undefined holes mark removed docs. */
+  docIds?: ReadonlyArray<string | number | null | undefined>;
 }
 
 export function searchMultiFieldCpuReference(
@@ -470,12 +471,40 @@ export function searchMultiFieldCpuReference(
   if (rankingOptions?.tieBreakers !== undefined) {
     normalizeTieBreakers(rankingOptions.tieBreakers);
   }
-  if (rankingOptions?.docIds !== undefined && rankingOptions.docIds.length < docCount) {
-    throw new RangeError(
-      `[webgpu-search] ranking docIds length (${rankingOptions.docIds.length}) is shorter than docCount (${docCount}).`
-    );
-  }
   const useDeterministicRanking = rankingOptions?.docIds !== undefined;
+  if (useDeterministicRanking) {
+    const docIds = rankingOptions?.docIds as ReadonlyArray<string | number | null | undefined>;
+    if (docIds.length !== docCount) {
+      throw new RangeError(
+        `[webgpu-search] ranking docIds length (${docIds.length}) must equal docCount (${docCount}).`
+      );
+    }
+    for (let i = 0; i < docIds.length; i++) {
+      const id = docIds[i];
+      // Null/undefined holes mark removed docs (tombstones never produce
+      // hits, so they never reach the comparator); only validate live IDs.
+      if (id === null || id === undefined) continue;
+      if (typeof id === 'number') {
+        if (!Number.isFinite(id)) {
+          throw new TypeError(
+            `[webgpu-search] ranking docIds[${i}] must be a finite number, got ${String(id)}.`
+          );
+        }
+      } else if (typeof id !== 'string' || id.length === 0) {
+        throw new TypeError(
+          `[webgpu-search] ranking docIds[${i}] must be a non-empty string or finite number, got ${String(id)}.`
+        );
+      }
+    }
+    for (let i = 0; i < fields.length; i++) {
+      const w = fields[i].weight;
+      if (typeof w !== 'number' || !Number.isFinite(w) || w <= 0) {
+        throw new RangeError(
+          `[webgpu-search] Field "${fields[i].name}" weight must be a positive finite number, got ${String(w)}.`
+        );
+      }
+    }
+  }
   const tieBreakers: readonly TieBreakerCriterion[] = useDeterministicRanking
     ? normalizeTieBreakers(rankingOptions?.tieBreakers)
     : [];
@@ -489,7 +518,7 @@ export function searchMultiFieldCpuReference(
     }
     if (auxMatches.length > 1) {
       auxMatches.sort((a, b) => {
-        if (b.score !== a.score) return b.score - a.score;
+        if (b.score !== a.score) return b.score > a.score ? 1 : -1;
         return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
       });
     }
@@ -502,12 +531,18 @@ export function searchMultiFieldCpuReference(
     });
     if (useDeterministicRanking) {
       const bestRowTokens = rowTokens[entry.bestRowIdx] as Uint32Array;
+      const hitId = (rankingOptions?.docIds as ReadonlyArray<string | number | null | undefined>)[dIdx];
+      if (hitId === null || hitId === undefined) {
+        throw new TypeError(
+          `[webgpu-search] ranking docIds[${dIdx}] is missing for a matched document.`
+        );
+      }
       rankKeys.push({
         score: entry.bestScore,
         fieldWeight: primaryField.weight,
         isExactMatch: isExactTokenMatch(bestRowTokens, queryTokens),
         matchedLength: bestRowTokens.length,
-        id: (rankingOptions?.docIds as ReadonlyArray<string | number>)[dIdx] as string | number,
+        id: hitId as string | number,
         docIndex: dIdx
       });
     }
