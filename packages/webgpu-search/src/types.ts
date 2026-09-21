@@ -372,6 +372,14 @@ export interface DocumentIndexSchema {
     name: string;
     type?: FilterFieldType;
   }>;
+  /**
+   * v0.4 M6: declarative extension hook identifiers recorded at snapshot
+   * time. Closures are never serialized — only these stable IDs are stored.
+   * Restore validates that matching hook handlers are supplied (see
+   * `assertHooksSatisfied` in extensions.ts); missing handlers throw
+   * `IncompatibleHookError` fail-closed.
+   */
+  hookIds?: ExtensionHookIds;
 }
 
 export interface SerializeDocumentIndexOptions {
@@ -646,6 +654,44 @@ export interface MatchInfo {
   normalizedScore: number;
 }
 
+/**
+ * Declarative extension hook identifiers persisted in snapshots.
+ * Each present key records the stable ID of the corresponding hook at
+ * serialize time (function `hookId` property when set, else
+ * `function.name`, else `'anonymous'`). Hosts requiring stable restores
+ * across builds should assign explicit IDs:
+ * `myScorer.hookId = 'recency-v1'` (or use named functions).
+ */
+export interface ExtensionHookIds {
+  tokenizer?: string;
+  scoringHook?: string;
+  filterPredicate?: string;
+  postProcess?: string;
+}
+
+/**
+ * Type-safe extension hooks for host applications (v0.4 M6).
+ *
+ * - `tokenizer`: custom query term splitting for `'token'` mode (e.g. code
+ *   symbols `_`, `-`, `camelCase`). Only affects `'token'` mode query term
+ *   parsing on the CPU path (`'token'` is CPU-by-design with fallbackReason
+ *   `'unsupported-mode'`); other modes ignore it. Must be a pure function.
+ * - `scoringHook`: post-match boost over surviving Top-K candidates only
+ *   (never per-candidate scanning). Receives `(doc, baseScore, matchInfo)`
+ *   and returns a finite number. Applied identically on GPU and CPU paths
+ *   after deterministic ranking + limit truncation, followed by a
+ *   deterministic re-sort.
+ * - `filterPredicate`: conjunctive post-match predicate composed (AND) with
+ *   `options.filter` (function or structured). Applied on every path.
+ * - `postProcess`: final result transformation after scoring boosts,
+ *   deterministic re-sort, and highlight enrichment. Must return an array.
+ *
+ * Persistence: closures are never serialized. `serialize()` records only
+ * `ExtensionHookIds`; `restore` requires matching handlers via
+ * `options.options.extensions` or throws `IncompatibleHookError`.
+ * Hooks cannot cross the Web Worker boundary — `SearchWorkerClient`
+ * rejects `extensions` fail-closed with `IncompatibleHookError`.
+ */
 export interface SearchExtensionHooks<TDoc = any> {
   tokenizer?: (text: string) => string[];
   scoringHook?: (doc: TDoc, baseScore: number, matchInfo: MatchInfo) => number;
