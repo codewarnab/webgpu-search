@@ -22,7 +22,7 @@ import {
 import { abortError, throwIfAborted } from '../runtime-guards';
 import { deserializeDocumentSnapshotHeader } from '../persistence';
 import { SERIALIZED_DOC_HEADER_BYTES } from '../text-profile';
-import { InvalidFilterError, IncompatibleHookError } from '../errors';
+import { IncompatibleHookError } from '../errors';
 
 interface InternalFieldDef<TDoc> {
   name: string;
@@ -58,6 +58,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
   private readonly docMap: Map<DocumentId, TDoc> = new Map();
   private getId: (doc: TDoc) => DocumentId = (doc: any) => doc?.id;
   private fieldDefinitions: InternalFieldDef<TDoc>[] = [];
+  private filterDefinitions: Array<{ name: string; getter: (doc: any) => any }> = [];
   private messageListener: ((event: MessageEvent) => void) | null = null;
   private errorListener: ((err: any) => void) | null = null;
 
@@ -251,6 +252,13 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       const val = f.getter(doc);
       out[f.name] = val !== undefined && val !== null ? val : '';
     }
+    for (let i = 0; i < this.filterDefinitions.length; i++) {
+      const ff = this.filterDefinitions[i];
+      const val = ff.getter(doc);
+      if (val !== undefined) {
+        out[ff.name] = val;
+      }
+    }
     return out;
   }
 
@@ -333,6 +341,22 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       }
     }
 
+    const filterDefs: Array<{ name: string; getter: (doc: any) => any }> = [];
+    if (options.filterFields) {
+      for (let i = 0; i < options.filterFields.length; i++) {
+        const ff = options.filterFields[i];
+        if (typeof ff === 'string') {
+          filterDefs.push({ name: ff, getter: (doc: any) => doc[ff] });
+        } else if (ff && typeof ff === 'object' && ff.name) {
+          filterDefs.push({
+            name: ff.name,
+            getter: ff.getter ?? ((doc: any) => doc[ff.name])
+          });
+        }
+      }
+    }
+    this.filterDefinitions = filterDefs;
+
     const nextDocMap = new Map<DocumentId, TDoc>();
     const serializableRecords: Record<string, unknown>[] = [];
     for (let i = 0; i < records.length; i++) {
@@ -408,12 +432,9 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     const { filter, signal, limit, maxResults, ...restOptions } = options || {};
 
     if (filter !== undefined && typeof filter !== 'function') {
-      if (typeof filter === 'object' && filter !== null) {
-        throw new InvalidFilterError(
-          'Structured FilterExpression evaluation is scheduled for Milestone 2. Only predicate functions ((doc) => boolean) are supported in Milestone 1.'
-        );
+      if (typeof filter !== 'object' || filter === null) {
+        throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
       }
-      throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
     }
 
     const requestedLimit = limit ?? maxResults ?? 50;
@@ -429,6 +450,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     const workerOptions = {
       ...restOptions,
       ...(workerBudget ? { budget: workerBudget } : {}),
+      ...(filter && !isPredicate ? { filter } : {}),
       limit: isPredicate ? ((options as any)?.candidateCapacity ?? 8192) : requestedLimit
     };
 
@@ -599,6 +621,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     }
 
     let stagedFieldDefs = this.fieldDefinitions;
+    let stagedFilterDefs = this.filterDefinitions;
     let stagedGetId = this.getId;
     const stagedDocMap = new Map<DocumentId, TDoc>();
 
@@ -629,6 +652,29 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
             return {
               name: f.name,
               weight: f.weight ?? 1.0,
+              getter
+            };
+          });
+        }
+        if (schema && Array.isArray(schema.filterFields)) {
+          const userFilterFields = options?.options?.filterFields;
+          const userFilterMap = new Map<string, any>();
+          if (Array.isArray(userFilterFields)) {
+            for (const uff of userFilterFields) {
+              if (typeof uff === 'string') {
+                userFilterMap.set(uff, uff);
+              } else if (uff && typeof uff === 'object' && typeof uff.name === 'string') {
+                userFilterMap.set(uff.name, uff);
+              }
+            }
+          }
+          stagedFilterDefs = schema.filterFields.map((ff: any) => {
+            const uf = userFilterMap.get(ff.name);
+            const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
+              ? uf.getter
+              : (doc: any) => doc[ff.name];
+            return {
+              name: ff.name,
               getter
             };
           });
@@ -685,6 +731,13 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         fields: options.options.fields?.map((f) =>
           typeof f === 'string' ? f : { name: f.name, weight: f.weight }
         ),
+        filterFields: options.options.filterFields?.map((f) => {
+          if (typeof f === 'object' && f !== null) {
+            const { getter, ...serializableField } = f;
+            return serializableField;
+          }
+          return f;
+        }),
         idField: typeof options.options.idField === 'string' ? options.options.idField : undefined
       } : undefined
     } : undefined;
@@ -695,6 +748,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
 
     // Commit only after successful restore response from worker
     this.fieldDefinitions = stagedFieldDefs;
+    this.filterDefinitions = stagedFilterDefs;
     this.getId = stagedGetId;
     this.docMap.clear();
     for (const [k, v] of stagedDocMap) {

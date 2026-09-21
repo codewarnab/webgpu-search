@@ -25,7 +25,9 @@ import {
   QueryTooLongError,
   type TextProfileId
 } from './text-profile';
-import { InvalidFilterError } from './errors';
+import { DocumentBitset } from './filter/bitset';
+import { ColumnarStore } from './filter/columnar-store';
+import { compileFilter } from './filter/filter-evaluator';
 import { alignHighlights, renderHighlightedText } from './highlight';
 import {
   deserializeDocumentSnapshot,
@@ -50,7 +52,9 @@ import type {
   SearchMode,
   SearchTimings,
   SerializeDocumentIndexOptions,
-  DocumentIndexSchema
+  DocumentIndexSchema,
+  FilterFieldDefinition,
+  FilterFieldType
 } from './types';
 
 export interface InternalField<TDoc> extends FieldScoreDefinition {
@@ -103,6 +107,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   private generation: number = 0;
   private readonly initialCapacity: number;
   private readonly growthFactor: number;
+  private columnarStore: ColumnarStore<TDoc>;
+  private filterFieldDefinitions: FilterFieldDefinition<TDoc>[] = [];
 
   constructor(options: DocumentIndexOptions<TDoc>) {
     if (!options || !Array.isArray(options.fields) || options.fields.length === 0) {
@@ -183,6 +189,55 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     for (let i = 0; i < this.sortedFields.length; i++) {
       this.fieldNameToIndex.set(this.sortedFields[i].name, i);
     }
+
+    const seenFilterNames = new Set<string>();
+    const normalizedFilterFields: FilterFieldDefinition<TDoc>[] = [];
+    if (options.filterFields !== undefined) {
+      if (!Array.isArray(options.filterFields)) {
+        throw new TypeError('[webgpu-search] DocumentIndex expects options.filterFields to be an array.');
+      }
+      for (let i = 0; i < options.filterFields.length; i++) {
+        const ff = options.filterFields[i];
+        let name: string;
+        let type: FilterFieldType | undefined = undefined;
+        let getter: ((doc: TDoc) => any) | undefined = undefined;
+
+        if (typeof ff === 'string') {
+          if (ff.trim().length === 0) {
+            throw new TypeError('[webgpu-search] Filter field name string must not be empty.');
+          }
+          name = ff;
+          getter = (doc: any) => doc[name];
+        } else if (ff && typeof ff === 'object') {
+          if (typeof ff.name !== 'string' || ff.name.trim().length === 0) {
+            throw new TypeError('[webgpu-search] Filter field definition requires a non-empty string name.');
+          }
+          name = ff.name;
+          type = ff.type;
+          if (ff.getter !== undefined) {
+            if (typeof ff.getter !== 'function') {
+              throw new TypeError(`[webgpu-search] Filter field "${name}" getter must be a function.`);
+            }
+            getter = ff.getter;
+          } else {
+            getter = (doc: any) => doc[name];
+          }
+        } else {
+          throw new TypeError('[webgpu-search] Filter field must be a string or FilterFieldDefinition object.');
+        }
+
+        if (seenFilterNames.has(name)) {
+          throw new Error(`[webgpu-search] Duplicate filter field name: "${name}".`);
+        }
+        seenFilterNames.add(name);
+        normalizedFilterFields.push({ name, type, getter });
+      }
+    }
+    this.filterFieldDefinitions = normalizedFilterFields;
+    this.columnarStore = new ColumnarStore<TDoc>(normalizedFilterFields, {
+      initialCapacity: this.initialCapacity,
+      growthFactor: this.growthFactor
+    });
   }
 
   static async create<TDoc = Record<string, unknown>>(
@@ -291,6 +346,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
 
     this.totalTokens = corpusTokens;
+    this.columnarStore.init(this.records);
 
     if (docCount === 0) {
       this.engineType = 'cpu';
@@ -478,13 +534,20 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       );
     }
 
-    if (filter !== undefined && typeof filter !== 'function') {
-      if (typeof filter === 'object' && filter !== null) {
-        throw new InvalidFilterError(
-          'Structured FilterExpression evaluation is scheduled for Milestone 2. Only predicate functions ((doc) => boolean) are supported in Milestone 1.'
-        );
+    let filterBitset: DocumentBitset | undefined = undefined;
+    let filterPredicate: ((doc: TDoc) => boolean) | undefined = undefined;
+
+    if (filter !== undefined) {
+      if (typeof filter === 'function') {
+        filterPredicate = filter;
+      } else if (typeof filter === 'object' && filter !== null) {
+        filterBitset = compileFilter(filter, this.columnarStore);
+        if (filterBitset.isEmpty()) {
+          return noHits(query);
+        }
+      } else {
+        throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
       }
-      throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
     }
 
     if (normalizedQuery.isEmpty) {
@@ -559,9 +622,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           const fIdx = this.rowToFieldIndex[r];
           if (allowedFieldIndices && !allowedFieldIndices.has(fIdx)) continue;
           const dIdx = this.rowToDocIndex[r];
+          if (filterBitset && !filterBitset.has(dIdx)) continue;
           const doc = this.records[dIdx];
           if (!doc) continue;
-          if (filter && !filter(doc)) continue;
+          if (filterPredicate && !filterPredicate(doc)) continue;
 
           const rawScore = item.score;
           const fDef = this.sortedFields[fIdx];
@@ -685,9 +749,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
         for (const hit of legacyResult.results) {
           const dIdx = hit.index;
+          if (filterBitset && !filterBitset.has(dIdx)) continue;
           const doc = this.records[dIdx];
           if (!doc) continue;
-          if (filter && !filter(doc)) continue;
+          if (filterPredicate && !filterPredicate(doc)) continue;
           const weightedScore = Math.round(hit.score * fDef.weight);
           let entry = docMatches.get(dIdx);
           if (!entry) {
@@ -791,9 +856,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       this.candidateCapacity,
       allowedFieldIndices,
       this.tombstones,
-      filter ? (dIdx) => {
-        const doc = this.records[dIdx];
-        return doc !== null && doc !== undefined && filter(doc);
+      (filterBitset || filterPredicate) ? (dIdx) => {
+        if (filterBitset && !filterBitset.has(dIdx)) return false;
+        if (filterPredicate) {
+          const doc = this.records[dIdx];
+          return doc !== null && doc !== undefined && filterPredicate(doc);
+        }
+        return true;
       } : undefined
     );
 
@@ -1154,6 +1223,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           this.docIds[d] = null as any;
           this.rawFieldStrings[d] = null as any;
           this.docToRowIndices[d] = null as any;
+          this.columnarStore.remove(d);
           removedCount++;
         }
       }
@@ -1177,12 +1247,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.docIds[oldD] = null as any;
         this.rawFieldStrings[oldD] = null as any;
         this.docToRowIndices[oldD] = null as any;
+        this.columnarStore.remove(oldD);
 
         const newD = this.records.length;
         this.records.push(upd.doc);
         this.docIds.push(upd.id);
         this.idToDocIndex.set(upd.id, newD);
         this.rawFieldStrings.push(upd.rawStrings);
+        this.columnarStore.add(newD, upd.doc);
 
         const docRows: number[] = new Array(this.sortedFields.length);
         for (let f = 0; f < this.sortedFields.length; f++) {
@@ -1212,6 +1284,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           this.docIds[oldD] = null as any;
           this.rawFieldStrings[oldD] = null as any;
           this.docToRowIndices[oldD] = null as any;
+          this.columnarStore.remove(oldD);
           updatedCount++;
         } else {
           addedCount++;
@@ -1222,6 +1295,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.docIds.push(ad.id);
         this.idToDocIndex.set(ad.id, newD);
         this.rawFieldStrings.push(ad.rawStrings);
+        this.columnarStore.add(newD, ad.doc);
 
         const docRows: number[] = new Array(this.sortedFields.length);
         for (let f = 0; f < this.sortedFields.length; f++) {
@@ -1388,6 +1462,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.rowToFieldIndex = newRowToFieldIndex;
     this.docToRowIndices = newDocToRowIndices;
     this.totalTokens = corpusTokens;
+    const oldToNewDocIndexMap = new Map<number, number>();
+    for (let newD = 0; newD < activeDocCount; newD++) {
+      oldToNewDocIndexMap.set(activeOldDocIndices[newD], newD);
+    }
+    this.columnarStore.compact(oldToNewDocIndexMap, activeDocCount);
     this.tombstones.clear();
   }
 
@@ -1484,6 +1563,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     return SCORING_VERSION;
   }
 
+  getColumnarStore(): ColumnarStore<TDoc> {
+    return this.columnarStore;
+  }
+
+  getFilterFieldDefinitions(): FilterFieldDefinition<TDoc>[] {
+    return this.filterFieldDefinitions.slice();
+  }
+
   serialize(options?: SerializeDocumentIndexOptions): ArrayBuffer {
     if (this.isDestroyed) {
       throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
@@ -1549,7 +1636,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       threshold: options?.options?.threshold ?? snapshot.schema.threshold,
       candidateCapacity: options?.options?.candidateCapacity ?? snapshot.schema.candidateCapacity,
       initialCapacity: options?.options?.initialCapacity ?? snapshot.schema.initialCapacity,
-      growthFactor: options?.options?.growthFactor ?? snapshot.schema.growthFactor
+      growthFactor: options?.options?.growthFactor ?? snapshot.schema.growthFactor,
+      filterFields: options?.options?.filterFields ?? (snapshot.schema.filterFields as any)
     };
 
     const index = new DocumentIndex<TDoc>(mergedOptions);
@@ -1684,6 +1772,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.records[i] = { [idProp]: this.docIds[i] } as any;
       }
     }
+
+    this.columnarStore.init(this.records);
 
     const rawCap = this.options.candidateCapacity;
     const validUserCap = typeof rawCap === 'number' && Number.isFinite(rawCap) && rawCap > 0
@@ -1933,6 +2023,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.rawFieldStrings = [];
     this.totalTokens = 0;
     this.tombstones.clear();
+    this.columnarStore = new ColumnarStore<TDoc>(this.filterFieldDefinitions, {
+      initialCapacity: this.initialCapacity,
+      growthFactor: this.growthFactor
+    });
     this.engineType = 'cpu';
     this.vramAllocatedBytes = 0;
     const p = this.searchMutex.then(() => {}, () => {});
