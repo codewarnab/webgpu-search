@@ -77,10 +77,10 @@ export interface SearchTimings {
   readbackMs: number;             // mapAsync() & CPU candidate slice latency
   /**
    * Scorer wall-clock: scan + highlight + post-match hooks + facets.
-   * Excludes inline `suggest` work (see `QueryDiagnostics.timings.totalMs`
-   * for end-to-end including suggest, and `suggestMs` for the suggest slice).
+   * Excludes inline `autocomplete` work (see `QueryDiagnostics.timings.totalMs`
+   * for end-to-end including autocomplete, and `autocompleteMs` for the slice).
    */
-  totalMs: number;                // Scorer wall-clock query duration (excludes inline suggest)
+  totalMs: number;                // Scorer wall-clock query duration (excludes inline autocomplete)
   gpuDispatchMs?: number;         // Backwards compatibility alias for encodeSubmitMs
 }
 
@@ -674,12 +674,12 @@ export interface DeterministicRankingOptions {
 export interface AutocompleteOptions {
   limit?: number;                   // Default: 5
   mode?: 'prefix' | 'fuzzy';        // Default: 'prefix'
-  fuzzyDistance?: number;           // Default: 0 (integer 0..2; explicit 1 enables typo-tolerant suggest)
+  fuzzyDistance?: number;           // Default: 0 (integer 0..2; explicit 1 enables typo-tolerant autocomplete)
   field?: string;                   // Restrict to specific field (beats search.fields when both set)
   /**
    * Suggestion tie-breaker hierarchy. Default: the 5-tier order.
-   * Inline `search({ ranking, suggest })` inherits the search `ranking`
-   * hierarchy when the suggest object omits this key.
+   * Inline `search({ ranking, autocomplete })` inherits the search `ranking`
+   * hierarchy when the autocomplete object omits this key.
    */
   tieBreakers?: TieBreakerCriterion[];
 }
@@ -792,9 +792,11 @@ export interface QueryDiagnosticsTimings {
   scoringMs: number;              // Time spent in compute kernel or CPU reference
   highlightMs: number;            // Time spent extracting Unicode highlight ranges
   facetingMs?: number;            // Time spent aggregating facet buckets (absent when facets unrequested; string index never emits)
-  /** Time spent in inline suggest scan (absent when suggest unrequested). */
+  /** Time spent in inline autocomplete scan (absent when autocomplete unrequested). */
+  autocompleteMs?: number;
+  /** @deprecated Use autocompleteMs. */
   suggestMs?: number;
-  /** End-to-end query latency (filtering + scoring + highlight + faceting + suggest). */
+  /** End-to-end query latency (filtering + scoring + highlight + faceting + autocomplete). */
   totalMs: number;                // End-to-end query latency
 }
 

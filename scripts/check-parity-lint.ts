@@ -1,8 +1,8 @@
 /**
  * parity-path lint: bans locale/UTF-16 helpers in the parity path.
  *
- * Strict targets (fail on hit): unicode-preprocess.ts, exact-scorer.ts,
- * guard.ts, fold-table.ts, buffer.ts, webgpu-engine.ts. Extended
+ * Strict targets (fail on hit): text-normalization.ts, exact-scorer.ts,
+ * guard.ts, case-fold-table.ts, dataset-packing.ts, webgpu-engine.ts. Extended
  * bans: charCodeAt (except the vetted ASCII/surrogate-scan contexts below),
  * toLowerCase, toUpperCase, toLocaleLowerCase, toLocaleUpperCase,
  * localeCompare, indexOf, `.includes(` (as indexOf substitute), charAt.
@@ -10,11 +10,11 @@
  * unit access splits surrogates; substring search must use scalar ===.
  * `codePointAt` / `fromCodePoint` are the approved replacements.
  *
- * promotion: buffer.ts + webgpu-engine.ts moved from info-only to strict —
+ * promotion: dataset-packing.ts + webgpu-engine.ts moved from info-only to strict —
  * the representation swap makes them parity code (u32 scalars, pure `==`
  * shaders, `normalizeText` queries). Legacy `sanitizeStringForSlot` /
  * `packStringsToGPUBuffer` stay exported behind a `@deprecated` shim (
- * migration, removal ) and were rewritten to use `codePointAt` so the
+ * migration) and were rewritten to use `codePointAt` so the
  * strict gate holds without deleting them.
  *
  * Legacy-quarantined files (cpu-engine.ts) use banned helpers behind the
@@ -28,14 +28,14 @@
 import { readFile } from 'node:fs/promises';
 
 const strictTargets = [
-  '../packages/webgpu-search/src/unicode-preprocess.ts',
+  '../packages/webgpu-search/src/text-normalization.ts',
   '../packages/webgpu-search/src/exact-scorer.ts',
-  '../packages/webgpu-search/src/modes/typo-distance.ts',
-  '../packages/webgpu-search/src/modes/token-search.ts',
-  '../packages/webgpu-search/src/modes/prefix-search.ts',
-  '../packages/webgpu-search/src/runtime-guards.ts',
-  '../packages/webgpu-search/src/fold-table.ts',
-  '../packages/webgpu-search/src/buffer.ts',
+  '../packages/webgpu-search/src/search/typo-tolerance.ts',
+  '../packages/webgpu-search/src/search/token-search.ts',
+  '../packages/webgpu-search/src/search/prefix-search.ts',
+  '../packages/webgpu-search/src/guard.ts',
+  '../packages/webgpu-search/src/case-fold-table.ts',
+  '../packages/webgpu-search/src/dataset-packing.ts',
   '../packages/webgpu-search/src/webgpu-engine.ts',
   '../packages/webgpu-search/src/document-index.ts',
   '../packages/webgpu-search/src/highlight.ts',
@@ -45,7 +45,7 @@ const legacyInfoTargets = [
 ];
 // charCodeAt is allowed only in these vetted ASCII-only fast paths.
 const charCodeAtAllowlist: Record<string, number[]> = {
-  'unicode-preprocess.ts': [],
+  'text-normalization.ts': [],
 };
 const banned = [
   'toLowerCase',

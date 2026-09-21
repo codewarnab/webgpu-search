@@ -918,80 +918,80 @@ async function runSnapshotTests() {
       { id: 'u2d3-1', title: 'legacy snapshot migration alpha' },
       { id: 'u2d3-2', title: 'legacy snapshot migration beta' }
     ];
-    // Build a canonical snapshot snapshot with no filter fields (columnarLen 0),
-    // then reframe its payloads as a genuine 48 B legacy snapshot snapshot.
-    const u2d4Index = await DocumentIndex.create(legacyDocs, { fields: ['title'] });
-    const u2d4Snap = u2d4Index.serialize();
-    const u2d4Header = decodeSnapshotHeader(u2d4Snap);
-    assert.strictEqual(u2d4Header.columnarByteLength ?? 0, 0);
-    const u2d4Dv = new DataView(u2d4Snap);
-    const profileEnum = u2d4Dv.getUint32(8, true);
-    const unicodeEnum = u2d4Dv.getUint32(12, true);
-    const scoringEnum = u2d4Dv.getUint32(16, true);
-    const docCount = u2d4Dv.getUint32(20, true);
-    const rowCount = u2d4Dv.getUint32(24, true);
-    const tokenCount = u2d4Dv.getUint32(28, true);
-    const foldedVal = u2d4Dv.getUint32(32, true);
-    const schemaLen = u2d4Dv.getUint32(36, true);
-    const docsLen = u2d4Dv.getUint32(40, true);
-    const schemaBytes = new Uint8Array(u2d4Snap, SNAPSHOT_HEADER_BYTES, schemaLen);
-    const tokensBytes = new Uint8Array(u2d4Snap, SNAPSHOT_HEADER_BYTES + schemaLen, tokenCount * 4);
+    // Build a canonical snapshot with no filter fields (columnarLen 0),
+    // then reframe its payloads as a genuine 48 B legacy snapshot.
+    const snapshotIndex = await DocumentIndex.create(legacyDocs, { fields: ['title'] });
+    const snapshotBuf = snapshotIndex.serialize();
+    const snapshotHeader = decodeSnapshotHeader(snapshotBuf);
+    assert.strictEqual(snapshotHeader.columnarByteLength ?? 0, 0);
+    const snapshotDv = new DataView(snapshotBuf);
+    const profileEnum = snapshotDv.getUint32(8, true);
+    const unicodeEnum = snapshotDv.getUint32(12, true);
+    const scoringEnum = snapshotDv.getUint32(16, true);
+    const docCount = snapshotDv.getUint32(20, true);
+    const rowCount = snapshotDv.getUint32(24, true);
+    const tokenCount = snapshotDv.getUint32(28, true);
+    const foldedVal = snapshotDv.getUint32(32, true);
+    const schemaLen = snapshotDv.getUint32(36, true);
+    const docsLen = snapshotDv.getUint32(40, true);
+    const schemaBytes = new Uint8Array(snapshotBuf, SNAPSHOT_HEADER_BYTES, schemaLen);
+    const tokensBytes = new Uint8Array(snapshotBuf, SNAPSHOT_HEADER_BYTES + schemaLen, tokenCount * 4);
     const offsetsBytes = new Uint8Array(
-      u2d4Snap,
+      snapshotBuf,
       SNAPSHOT_HEADER_BYTES + schemaLen + tokenCount * 4,
       (rowCount + 1) * 4
     );
     const docsBytes = new Uint8Array(
-      u2d4Snap,
+      snapshotBuf,
       SNAPSHOT_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4,
       docsLen
     );
-    const u2d3Total = LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4 + docsLen;
-    const u2d3Buf = new ArrayBuffer(u2d3Total);
-    const u2d3Dv = new DataView(u2d3Buf);
-    u2d3Dv.setUint32(0, LEGACY_SNAPSHOT_MAGIC, true);
-    u2d3Dv.setUint32(4, LEGACY_SNAPSHOT_VERSION, true);
-    u2d3Dv.setUint32(8, profileEnum, true);
-    u2d3Dv.setUint32(12, unicodeEnum, true);
-    u2d3Dv.setUint32(16, scoringEnum, true);
-    u2d3Dv.setUint32(20, docCount, true);
-    u2d3Dv.setUint32(24, rowCount, true);
-    u2d3Dv.setUint32(28, tokenCount, true);
-    u2d3Dv.setUint32(32, foldedVal, true);
-    u2d3Dv.setUint32(36, schemaLen, true);
-    u2d3Dv.setUint32(40, docsLen, true);
-    new Uint8Array(u2d3Buf, LEGACY_SNAPSHOT_HEADER_BYTES, schemaLen).set(schemaBytes);
-    new Uint8Array(u2d3Buf, LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen, tokensBytes.length).set(tokensBytes);
+    const legacyTotal = LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen + tokenCount * 4 + (rowCount + 1) * 4 + docsLen;
+    const legacyBuf = new ArrayBuffer(legacyTotal);
+    const legacyDv = new DataView(legacyBuf);
+    legacyDv.setUint32(0, LEGACY_SNAPSHOT_MAGIC, true);
+    legacyDv.setUint32(4, LEGACY_SNAPSHOT_VERSION, true);
+    legacyDv.setUint32(8, profileEnum, true);
+    legacyDv.setUint32(12, unicodeEnum, true);
+    legacyDv.setUint32(16, scoringEnum, true);
+    legacyDv.setUint32(20, docCount, true);
+    legacyDv.setUint32(24, rowCount, true);
+    legacyDv.setUint32(28, tokenCount, true);
+    legacyDv.setUint32(32, foldedVal, true);
+    legacyDv.setUint32(36, schemaLen, true);
+    legacyDv.setUint32(40, docsLen, true);
+    new Uint8Array(legacyBuf, LEGACY_SNAPSHOT_HEADER_BYTES, schemaLen).set(schemaBytes);
+    new Uint8Array(legacyBuf, LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen, tokensBytes.length).set(tokensBytes);
     new Uint8Array(
-      u2d3Buf,
+      legacyBuf,
       LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen + tokensBytes.length,
       offsetsBytes.length
     ).set(offsetsBytes);
     new Uint8Array(
-      u2d3Buf,
+      legacyBuf,
       LEGACY_SNAPSHOT_HEADER_BYTES + schemaLen + tokensBytes.length + offsetsBytes.length,
       docsBytes.length
     ).set(docsBytes);
-    const u2d3Crc = crc32Parts([
-      new Uint8Array(u2d3Buf, 0, 44),
-      new Uint8Array(u2d3Buf, LEGACY_SNAPSHOT_HEADER_BYTES)
+    const legacyCrc = crc32Parts([
+      new Uint8Array(legacyBuf, 0, 44),
+      new Uint8Array(legacyBuf, LEGACY_SNAPSHOT_HEADER_BYTES)
     ]);
-    u2d3Dv.setUint32(44, u2d3Crc, true);
+    legacyDv.setUint32(44, legacyCrc, true);
 
-    const legacyHeader = decodeSnapshotHeader(u2d3Buf);
+    const legacyHeader = decodeSnapshotHeader(legacyBuf);
     assert.strictEqual(legacyHeader.magic, LEGACY_SNAPSHOT_MAGIC);
     assert.strictEqual(legacyHeader.formatVersion, LEGACY_SNAPSHOT_VERSION);
     assert.strictEqual(legacyHeader.columnarByteLength ?? 0, 0);
     assert.strictEqual(legacyHeader.docCount, 2);
-    const legacyRestored = await restoreSnapshot(u2d3Buf);
+    const legacyRestored = await restoreSnapshot(legacyBuf);
     assert.strictEqual(legacyRestored.getStats().docCount, 2);
     const legacyRes = await legacyRestored.search('migration');
     assert.strictEqual(legacyRes.totalMatches, 2);
     // Legacy tamper still fails closed.
-    const badLegacy = u2d3Buf.slice(0);
+    const badLegacy = legacyBuf.slice(0);
     new Uint8Array(badLegacy, LEGACY_SNAPSHOT_HEADER_BYTES, 1)[0] ^= 0xff;
     await assert.rejects(async () => restoreSnapshot(badLegacy));
-    u2d4Index.destroy();
+    snapshotIndex.destroy();
     legacyRestored.destroy();
     console.log('   ✅ legacy snapshot legacy migration read path confirmed');
   }

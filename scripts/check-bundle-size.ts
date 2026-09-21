@@ -66,21 +66,21 @@
  * Budget: 64 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
  * (token & prefix modes + typo tolerance) search-mode expansion:
- * Adds modes/typo-distance.ts (bounded Damerau-Levenshtein + length gates),
- * modes/token-search.ts (multi-term AND/OR/quorum + proximity scoring),
- * modes/prefix-search.ts (anchored symbol matching), typo-aware substring
+ * Adds search/typo-tolerance.ts (bounded Damerau-Levenshtein + length gates),
+ * search/token-search.ts (multi-term AND/OR/quorum + proximity scoring),
+ * search/prefix-search.ts (anchored symbol matching), typo-aware substring
  * scoring in exact-scorer.ts, token/prefix/typo routing + validation in
  * search-index.ts / document-index.ts / webgpu-engine.ts, and highlight
  * branches for all modes (+~2.5 KB gzip, delta still within the 30 KB cap).
  * Total bumped 64 KB -> 68 KB with this documented rationale.
  * Budget: 68 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
- * (deterministic ranking + autocomplete) ranking/suggest expansion:
+ * (deterministic ranking + autocomplete) ranking/autocomplete expansion:
  * Adds ranking.ts (five-tier tie-breaker comparator + validation) and
- * suggest.ts (option normalization), deterministic rank keys on all three
+ * autocomplete.ts (option normalization), deterministic rank keys on all three
  * DocumentIndex paths (GPU readback, legacy ufuzzy, exact CPU via new
- * rankingOptions/docIds params), the suggest() enumeration primitive, and
- * inline search({ suggest }) enrichment (+~2 KB gzip, delta still within
+ * rankingOptions/docIds params), the autocomplete() enumeration primitive, and
+ * inline search({ autocomplete }) enrichment (+~2 KB gzip, delta still within
  * the 30 KB cap).
  * Total bumped 68 KB -> 72 KB with this documented rationale.
  * Budget: 72 KB gzip total per file (dist/index.js + dist/index.cjs).
@@ -114,7 +114,7 @@
  * Delta cap bumped 32 KB -> 34 KB with this documented rationale.
  * Budget: 82 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
- * Fail-closed: missing dist or dist older than src/fold-table.ts fails
+ * Fail-closed: missing dist or dist older than src/case-fold-table.ts fails
  * (a size gate that passes when there is nothing to measure is decoration).
  *
  * Portable: node:fs + node:zlib only (runs on Bun and Node).
@@ -138,7 +138,7 @@ function gzipDeterministic(buf: Uint8Array): number {
 
 const distJsUrl = new URL('../packages/webgpu-search/dist/index.js', import.meta.url);
 const distCjsUrl = new URL('../packages/webgpu-search/dist/index.cjs', import.meta.url);
-const srcFoldUrl = new URL('../packages/webgpu-search/src/fold-table.ts', import.meta.url);
+const srcFoldUrl = new URL('../packages/webgpu-search/src/case-fold-table.ts', import.meta.url);
 
 let distStat;
 try {
@@ -165,7 +165,7 @@ try {
   const foldStat = await stat(srcFoldUrl);
   if (foldStat.mtimeMs > newestSrcMs) newestSrcMs = foldStat.mtimeMs;
 } catch {
-  console.error('FAIL src/fold-table.ts missing.');
+  console.error('FAIL src/case-fold-table.ts missing.');
   process.exit(1);
 }
 if (newestSrcMs > 0 && distStat.mtimeMs < newestSrcMs) {
@@ -196,7 +196,7 @@ console.log(`total budget:  ${gz} / ${TOTAL_BUDGET_GZIP} B gzip (index.js)`);
 
 let fail = false;
 if (dGz > DELTA_CAP_GZIP) {
-  console.error(`FAIL fold-table gzip delta +${dGz} B exceeds +${DELTA_CAP_GZIP} B cap. Split table into a lazy chunk or re-encode.`);
+  console.error(`FAIL case-fold-table gzip delta +${dGz} B exceeds +${DELTA_CAP_GZIP} B cap. Split table into a lazy chunk or re-encode.`);
   fail = true;
 } else {
   console.log('pass delta within cap');

@@ -648,7 +648,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
      * assemble response diagnostics (undefined unless requested).
      * `filteringMs` is read at call time so early exits after compilation
      * report measured filter cost; `totalMs` is wall-clock from query entry
-     * (end-to-end including inline suggest; see `suggestMs` for the slice).
+     * (end-to-end including inline autocomplete; see `autocompleteMs` for the slice).
      * Scoring includes post-match scoring-hook time on all paths.
      */
     const buildDiagnostics = (
@@ -670,7 +670,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         scoringMs,
         highlightMs,
         ...(facetingMs !== undefined ? { facetingMs } : {}),
-        ...(suggestMs !== undefined ? { suggestMs } : {}),
+        ...(suggestMs !== undefined ? { autocompleteMs: suggestMs, suggestMs } : {}),
         totalMs
       };
       const diag: QueryDiagnostics = {
@@ -1366,8 +1366,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         legacyFacetMs = nowMs() - fT0;
       }
 
-      // inline suggest precedes the diagnostics snapshot so
-      // diagnostics.totalMs covers end-to-end latency (suggestMs bucket).
+      // inline autocomplete precedes the diagnostics snapshot so
+      // diagnostics.totalMs covers end-to-end latency (autocompleteMs bucket).
       const tLegacySuggest0 = wantsDiagnostics && suggestSpec ? nowMs() : 0;
       const legacySuggestions = suggestSpec
         ? this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices)
@@ -1527,7 +1527,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const parityFacetingMs = wantsFacets ? facetScanMs + facetMs : undefined;
 
     // Public totalMs is scorer wall-clock: scan + hooks + highlight + facets
-    // (excludes inline suggest; diagnostics.totalMs is end-to-end).
+    // (excludes inline autocomplete; diagnostics.totalMs is end-to-end).
     const timings: SearchTimings = {
       queryUploadMs: 0,
       encodeSubmitMs: 0,
@@ -1555,8 +1555,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     // fallbackReason as-is — it is a routing decision, not a scorer request,
     // so reusing 'cpu-algorithm-requested' would mislead telemetry.
 
-    // inline suggest precedes the diagnostics snapshot so
-    // diagnostics.totalMs covers end-to-end latency (suggestMs bucket).
+    // inline autocomplete precedes the diagnostics snapshot so
+    // diagnostics.totalMs covers end-to-end latency (autocompleteMs bucket).
     const tParitySuggest0 = wantsDiagnostics && suggestSpec ? nowMs() : 0;
     const paritySuggestions = suggestSpec
       ? this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices)
@@ -1601,7 +1601,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   /**
    * First-party autocomplete / did-you-mean primitive.
    *
-   * Scans active documents over the suggest field (or all search fields),
+   * Scans active documents over the autocomplete field (or all search fields),
    * scores each field row with the prefix scorer (`mode: 'prefix'`) or the
    * fuzzy scorer (`mode: 'fuzzy'`; typo-tolerant substring when
    * `fuzzyDistance > 0`), ranks with the deterministic comparator, and
@@ -1626,7 +1626,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
    * Latency is a single O(docs x fields) scan plus a full sort of the match
    * set (unbounded pre-truncation by design; highlights are bounded to
    * top-K). Measured ~35ms prefix / ~95ms fuzzy+d2 over 50k rows (25k docs
-   * x 2 fields); inline `search({ suggest })` pays both scans (~2x). There
+   * x 2 fields); inline `search({ autocomplete })` pays both scans (~2x). There
    * is no `AbortSignal` support on this path; per-keystroke callers should
    * debounce. Queries longer than `QUERY_TOKENS_MAX` throw `QueryTooLongError`.
    */
@@ -1668,9 +1668,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   }
 
   /**
-   * Synchronous suggestion enumeration shared by `suggest()` and inline
-   * `search({ suggest })`. Callers pass pre-normalized query tokens and a
-   * validated spec; `searchFields` scopes the scan when the suggest spec
+   * Synchronous suggestion enumeration shared by `autocomplete()` and inline
+   * `search({ autocomplete })`. Callers pass pre-normalized query tokens and a
+   * validated spec; `searchFields` scopes the scan when the autocomplete spec
    * carries no explicit field.
    */
   private computeSuggestions(

@@ -82,7 +82,7 @@ async function main() {
             // 2. Test: Candidate collection across >1000 items with late high-scoring matches
             // Generate synthetic dataset of 3,000 variable-length items where
             // items 1200..1249 start with the query (highest substring score).
-            // : variable-length u32 packing -- plain strings in, the engine
+            // Variable-length u32 packing -- plain strings in, the engine
             // normalizes to post-normalization tokens (no 59-char truncation, no slots).
             const count = 3000;
             const strings = new Array<string>(count);
@@ -202,7 +202,7 @@ async function main() {
         // instead of a clear gate failure.
         if (!(testResults as any).success) {
             (testResults as any).results.push({
-                name: ' parity (skipped: WebGPU engine not ready)',
+                name: 'parity (skipped: WebGPU engine not ready)',
                 passed: false,
                 details: testResults
             });
@@ -225,7 +225,7 @@ async function main() {
             }, { strings: parityStrings, cells: parityCells });
             const gpuParityOut = await Promise.race([
                 parityEvaluate,
-                new Promise<never>((_, rej) => setTimeout(() => rej(new Error(' parity browser evaluate timed out after 120s')), PARITY_TIMEOUT_MS)),
+                new Promise<never>((_, rej) => setTimeout(() => rej(new Error('parity browser evaluate timed out after 120s')), PARITY_TIMEOUT_MS)),
             ]);
             if ((testResults as any).success && Array.isArray((testResults as any).results)) {
                 parityCells.forEach((cell, ci) => {
@@ -251,7 +251,7 @@ async function main() {
                         }
                     }
                     (testResults as any).results.push({
-                        name: ` parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
+                        name: `parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
                         passed: pass,
                         details: { totalMatches: got.totalMatches, candidateCount: got.candidateCount, expected: expected.totalMatches }
                     });

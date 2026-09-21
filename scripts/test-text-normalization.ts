@@ -106,7 +106,7 @@ async function main(): Promise<void> {
     const saved = proto.toWellFormed;
     try {
       (proto as Record<string, unknown>).toWellFormed = undefined;
-      const { toWellFormedSafe } = await import('../packages/webgpu-search/src/unicode-preprocess');
+      const { toWellFormedSafe } = await import('../packages/webgpu-search/src/text-normalization');
       ok('regex fallback high->FFFD', toWellFormedSafe(s) === FFFD_STR);
       ok('regex fallback high+high->2', toWellFormedSafe(HIGH + HIGH) === FFFD_STR + FFFD_STR);
     } finally {

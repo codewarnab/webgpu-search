@@ -104,13 +104,13 @@ For custom benchmarks, fine-grained buffer manipulation, or custom GPU pipelines
 import {
   WebGPUEngine,
   CPUEngine,
-  packUnicodeToGPUBuffer,
-  serializeUnicodeDataset,
-  deserializeUnicodeDataset
+  packDataset,
+  serializeDataset,
+  deserializeDataset
 } from 'webgpu-search';
 
 // 1. Pack arbitrary strings into normalized u32 Unicode scalar tokens
-const packed = packUnicodeToGPUBuffer(myStrings, { folded: true });
+const packed = packDataset(myStrings, { normalized: true });
 
 // 2. Direct WebGPU compute pipeline with packed or deserialized dataset
 const gpu = new WebGPUEngine();
@@ -129,10 +129,10 @@ gpu.destroy();
 ### `SearchIndex.create(items, options?)`
 - `items: string[]`: Array of strings to index.
 - `options.threshold`: Item cutoff to use WebGPU vs CPU (default: `30000`).
-- `options.preferGpu`: Force WebGPU if available (default: `false`). Conflicts with `search({ cpuAlgorithm: 'ufuzzy' })` → `IncompatibleOptionError`.
-- `options.slotBytes`: v0.2 throw-on-use (`IncompatibleOptionError`; dynamic variable-length indexing replaced fixed slots; removal in v0.3). Remove it and rebuild.
+- `options.preferGpu`: Force WebGPU if available (default: `false`). Conflicts with `search({ cpuScorer: 'ufuzzy' })` → `IncompatibleOptionError`.
+- `options.slotBytes`: throw-on-use (`IncompatibleOptionError`; dynamic variable-length indexing replaced fixed slots). Remove it and rebuild.
 - `options.textProfile`: Index-level immutable profile (default: `'unicode-default'`; unknown values throw `ProfileMismatchError`).
-- `options.caseSensitive`: Pack-time fold control (default: `false` = folded/NFC+C+F; `true` = NFC-only). Fixed at construction.
+- `options.caseSensitive`: Pack-time fold control (default: `false` = normalized/NFC+C+F; `true` = NFC-only). Fixed at construction.
 - `options.device`: Custom injected `GPUDevice`.
 
 ### `index.search(query, options?)`
@@ -140,17 +140,17 @@ gpu.destroy();
 - `options.mode`: `'fuzzy'` (subsequence + word-boundary scoring) or `'substring'` (case-insensitive substring).
 - `options.limit`: Maximum results to return. Defaults to `50` and is clamped to the inclusive range `1..8192` (`RESULT_LIMIT_MAX`) on both CPU and WebGPU.
 - `options.maxResults`: Backwards-compatible alias for `limit`; `limit` takes precedence when both are provided.
-- `options.caseSensitive`: Must match the index packed mode (default: `false`). Mismatch throws `ProfileMismatchError` — build one index per mode instead of varying per query (breaking v0.2 change).
-- `options.cpuAlgorithm`: `'parity'` (default, v0.2 contract) or `'ufuzzy'` (explicit opt-in CPU-only, skips GPU).
+- `options.caseSensitive`: Must match the index packed mode (default: `false`). Mismatch throws `ProfileMismatchError` — build one index per mode instead of varying per query.
+- `options.cpuScorer`: `'exact'` (default) or `'ufuzzy'` (explicit opt-in CPU-only, skips GPU). Legacy `cpuAlgorithm: 'parity'` maps to `'exact'` with a warning.
 - `options.onQueryTooLong`: `'throw'` (default, throws `QueryTooLongError` over `QUERY_TOKENS_MAX=128` tokens) or `'cpu-fallback'` (forces CPU for that query).
 - `options.signal`: `AbortSignal` to cancel stale query readback during fast typing.
-- Returns `SearchResponse` with `profileId`/`scoringVersion`/`cpuAlgorithm` echo.
+- Returns `SearchResponse` with `profileId`/`scoringVersion`/`cpuScorer` echo (`cpuAlgorithm` mirrors as deprecated).
 
 ### `index.getStats()`
-Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer, profileId, unicodeVersion, scoringVersion, tokenCount, folded, formatVersion }`. `tokenCount` is the post-fold Unicode scalar count.
+Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer, profileId, unicodeVersion, scoringVersion, tokenCount, normalized, formatVersion }`. `tokenCount` is the post-fold Unicode scalar count.
 
-### 🚨 Breaking v0.2 Migration Guide
-Every v0.1 index must be rebuilt: records changed from 8-bit bytes to `u32` scalar tokens; offsets changed from byte offsets to token offsets; binary format is now `U2F2` (magic `0x55324632`). See the full [**v0.2 Migration Guide (`docs/migration-v0.2.md`)**](../../docs/migration-v0.2.md).
+### Snapshot format
+Records are packed as u32 scalar tokens with token offsets; the binary snapshot format is versioned (`SNAPSHOT_MAGIC 0x55324434`, legacy `LEGACY_SNAPSHOT_MAGIC 0x55324433` read-only). See the full [**Snapshot Format (`docs/snapshot-format.md`)**](../../docs/snapshot-format.md).
 
 ### `index.destroy()`
 Releases GPU buffers and releases reference from the shared context manager.

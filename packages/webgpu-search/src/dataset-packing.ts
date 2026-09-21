@@ -101,6 +101,7 @@ export function sanitizeStringForSlot(str: string, maxChars?: number): string {
   return typeof maxChars === 'number' && maxChars > 0 ? asciiOnly.slice(0, maxChars) : asciiOnly;
 }
 
+/** @deprecated Use sanitizeStringForSlot. Kept for migration only. */
 export const sanitizeString = sanitizeStringForSlot;
 
 /** Legacy byte packer (not the exact path). @deprecated See sanitizeStringForSlot. */
@@ -215,7 +216,7 @@ export function packDataset(
     for (let i = 0; i < rowCount; i++) {
       const el: unknown = strs[i];
       if (typeof el !== 'string') {
-        throw new TypeError(`[webgpu-search] packUnicode: bad item ${i}.`);
+        throw new TypeError(`[webgpu-search] packDataset: bad item ${i}.`);
       }
       const norm = normalizeText(el as string, folded);
       tokenRows[i] = norm.tokens;
@@ -231,7 +232,7 @@ export function packDataset(
         (typeof ArrayBuffer !== 'undefined' && typeof (ArrayBuffer as any).isView === 'function' &&
           (ArrayBuffer as any).isView(el) && (el as any).constructor?.name === 'Uint32Array');
       if (!isU32) {
-        throw new TypeError(`[webgpu-search] packUnicode: bad item ${i}.`);
+        throw new TypeError(`[webgpu-search] packDataset: bad item ${i}.`);
       }
       const t = el as Uint32Array;
       tokenRows[i] = t;

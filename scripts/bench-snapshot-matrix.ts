@@ -73,7 +73,7 @@ interface MatrixRow {
 }
 
 function resolveOutPath(raw: string | undefined): string {
-  const fallback = 'benchmark_v04_matrix.json';
+  const fallback = 'benchmark_snapshot_matrix.json';
   if (!raw) return fallback;
   // Allow explicit absolute paths under cwd or /tmp (CI uses /tmp), otherwise
   // sanitize to basename inside cwd to avoid arbitrary writes (e.g. /etc/passwd).
@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     );
     const suggestRes = await index.suggest('comp', { mode: 'prefix', limit: 5 });
     rows.push({
-      scenario: 'ide-symbols-5k', docs: 5000, operation: 'suggest-autocomplete',
+      scenario: 'ide-symbols-5k', docs: 5000, operation: 'autocomplete',
       medianMs: suggest.medianMs, p95Ms: suggest.p95Ms, samples: suggest.samples,
       extra: { suggestionCount: suggestRes.suggestions.length }
     });
@@ -216,12 +216,12 @@ async function main(): Promise<void> {
       void resSingleMs;
       const probe = await restored.search('timeout', { mode: 'fuzzy', limit: 5 });
       rows.push({
-        scenario: 'log-grid-10k', docs: count, operation: 'u2d4-serialize',
+        scenario: 'log-grid-10k', docs: count, operation: 'snapshot-serialize',
         medianMs: serSamples.medianMs, p95Ms: serSamples.p95Ms, samples: serSamples.samples,
         extra: { snapshotBytes: snapshot.byteLength, schemaBytes: schemaLen, columnarBytes: columnarLen, docsBytes: docsLen }
       });
       rows.push({
-        scenario: 'log-grid-10k', docs: count, operation: 'u2d4-restore',
+        scenario: 'log-grid-10k', docs: count, operation: 'snapshot-restore',
         medianMs: resSamples.medianMs, p95Ms: resSamples.p95Ms, samples: resSamples.samples,
         extra: { restoredMatches: probe.totalMatches }
       });
@@ -234,7 +234,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   // Report
   // ------------------------------------------------------------------
-  console.log('\n##  Benchmark Matrix (headless CPU, median of 10)\n');
+  console.log('\n## Benchmark Matrix (headless CPU, median of 10)\n');
   console.log('| Scenario | Docs | Operation | Median (ms) | p95 (ms) | Extra |');
   console.log('|---|---|---|---:|---:|---|');
   for (const r of rows) {

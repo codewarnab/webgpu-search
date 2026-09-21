@@ -41,7 +41,7 @@ export interface NormalizedAutocompleteOptions {
 /**
  * Validate and normalize autocomplete options (fail-closed).
  * - `undefined`/`true` resolve to defaults.
- * - `false` is only meaningful as inline `search({ suggest: false })`
+ * - `false` is only meaningful as inline `search({ autocomplete: false })`
  * (disabled); standalone `autocomplete()` rejects it — omit the option instead.
  * - `limit` coerces like search limits (string numerics via `Number()`,
  * non-finite → default 5, fractions floored, clamp 1..RESULT_LIMIT_MAX;

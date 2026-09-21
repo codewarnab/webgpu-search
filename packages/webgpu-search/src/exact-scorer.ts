@@ -311,7 +311,7 @@ export function scoreExactMatches(
     }
   }
   const totalMatches: number = hits.length;
-  hits.sort(compareParityResults);
+  hits.sort(compareExactResults);
   // Shared clamp (1..8192, NaN/non-finite → 50, fractions floored) — same
   // helper shared with search-index so direct callers cannot bypass the cap.
   const capped: number = clampLimit(limit);

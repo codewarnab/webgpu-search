@@ -110,7 +110,7 @@ async function main() {
         if (!isQualified) {
             console.warn('\n[HARDWARE QUALIFICATION NOTICE]');
             console.warn('Measurements ran on software adapter or mock WebGPU device.');
-            console.warn('Cells are flagged as "pending-hardware" per unicode-contract.md §5.\n');
+            console.warn('Cells are flagged as "pending-hardware" per text-normalization.md §5.\n');
         } else {
             console.log('\n[HARDWARE QUALIFICATION]');
             console.log('Measurements qualified on physical GPU device.\n');

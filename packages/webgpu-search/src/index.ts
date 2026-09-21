@@ -1,7 +1,7 @@
 // High-Level Primary API
 export { SearchIndex } from './search-index';
 export { DocumentIndex, assertSnapshotFilterGettersSatisfied } from './document-index';
-export { SearchWorkerClient } from './worker/worker-client';
+export { SearchWorkerClient, INTERNAL_WORKER_ID_KEY } from './worker/worker-client';
 
 
 // Low-Level Engines & Hardware Utilities for Power Users & Benchmarks

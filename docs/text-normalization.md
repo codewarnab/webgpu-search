@@ -18,8 +18,8 @@ raw JS string
 ```
 
 Single function `normalizeText()` serves records and queries. `sanitizeStringForSlot`
-is deleted from the exact path (kept behind the deprecated legacy export only;
-removal in ). Limit/empty checks apply to **post-normalization token count**;
+is excluded from the exact path (kept behind the deprecated legacy export only).
+Limit/empty checks apply to **post-normalization token count**;
 whitespace-only (incl. U+3000) / empty queries return unified empty results
 (`query: ''`). Lone-mark / VS-only / ZWJ-only / tatweel-only inputs survive
 NFC+C+F as single tokens per the survival rule, so they search normally
@@ -28,8 +28,8 @@ spans, `str_len − query_len` are in **post-normalization code points**. Highli
 caveat: `"Straße"` → `"strasse"` (6→7 tokens); normalized coordinates must NOT
 slice the original string.
 
- representation swap (landed): GPU packs the same post-normalization u32 scalars via
-`packUnicodeToGPUBuffer` (pre-tokenized fast path, no second normalization)
+ representation swap: GPU packs the same post-normalization u32 scalars via
+`packDataset` (pre-tokenized fast path, no second normalization)
 and searches with a pure-`==` scalar WGSL comparator (32 B uniform header +
 512 B persistent storage query buffer, 5 bindings). `flagsAndProfile` (word 3)
 is reserved wire format for the harness/debug — shaders do not read it;
@@ -55,7 +55,7 @@ executing hardware is gated by the browser block in
 `scripts/test-regression.ts` (per-PR CI gate and release gate; oracle in
 Bun/Node vs subject in Chrome -- same-host assumption, see in-file note).
 By type design that block is order/text-only: `WebGPUSearchResult` (engine
-level) carries no version fields, so `profileId/scoringVersion/cpuAlgorithm`
+level) carries no version fields, so `profileId/scoringVersion/cpuScorer`
 identity is pinned at the `SearchIndex` level in the mock harness instead
 (fallback changes only `engine`/timings by assertion).
 
@@ -69,9 +69,9 @@ identity is pinned at the `SearchIndex` level in the mock harness instead
 | `QUERY_TOKENS_MAX` | `128` | Post-normalization tokens; bounds `str_len × query_len` shader loops |
 | `RESULT_LIMIT_MAX` | `8192` | Clamp, tested |
 | `TextProfileId` | `'unicode-default'` | Only text profile |
-| `normalized` | index-construction-time | `IndexOptions.caseSensitive` (default `false`); per-query mismatch → `ProfileMismatchError` (breaking : build one index per mode) |
+| `normalized` | index-construction-time | `IndexOptions.caseSensitive` (default `false`); per-query mismatch → `ProfileMismatchError` (build one index per mode) |
 | `CpuScorer` | `'exact' \| 'ufuzzy'`, default `'exact'` | uFuzzy explicit opt-in only (CPU-only, explicitly non-conforming scores, skips GPU, excluded from differential matrix); default and GPU-failure fallback serve the exact `exact-scorer.ts` (legacy `'parity'` value maps to `'exact'`). `preferGpu:true + cpuScorer:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
-| `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. : enforced on the exact post-normalization token count (`normalizeText(query, normalized)` vs `QUERY_TOKENS_MAX`), with a cheap raw-length pre-gate before NFC+folding. `'cpu-fallback'` forces the CPU path for that query. |
+| `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. Enforced on the exact post-normalization token count (`normalizeText(query, normalized)` vs `QUERY_TOKENS_MAX`), with a cheap raw-length pre-gate before NFC+folding. `'cpu-fallback'` forces the CPU path for that query. |
 
 **Differential status (exact matching on both paths):** comparator, exact scorer,
 post-normalization sizing, u32 packing, and scalar WGSL are enforced on both paths.
@@ -81,13 +81,13 @@ in §1).
 Comparator both paths: score desc, index asc (wrap-free comparisons;
 `Math.imul`/`|0` retained for the score formulas only). CPU
 (`exact-scorer.ts`) and GPU readback sort share it; the WGSL scalar
-rewrite landed in (pure-`==`, i32-arithmetic form). `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
-in (breaking; see `unicode-preprocess.ts` JSDoc). Determinism guaranteed iff
+rewrite is pure-`==` i32-arithmetic form. `LONE_SURROGATE_PATTERN` is non-global + pair-preserving
+(see `text-normalization.ts` JSDoc). Determinism guaranteed iff
 `hasOverflow === false`; above cap assert `totalMatches + hasOverflow + score
 multiset` only.
 `mode:'fuzzy'` semantic change (uFuzzy → exact-subsequence) is
 a documented breaking change. `slotBytes` throws `IncompatibleOptionError`
-with migration message (throw-on-use in, removal in ).
+with migration message (throw-on-use).
 
 ## 3. M0 spike results (measured 2026-09-17, Bun 1.4.2; method notes inline)
 
@@ -138,21 +138,20 @@ Generator script + packed bytes + `minify:true` delta land in.
 Decision: **sparse-encoded eager table, delta cap ≤8 KB gzip over baseline**;
 Simple-only (C+S) is fallback only (drops contracted `ß/ss`: ß is F-only).
 
-**Bundle baseline (measured 2026-09-17 post--fix working tree):**
+**Bundle baseline (measured 2026-09-17 post-fix working tree):**
 `packages/webgpu-search/dist/index.js` 44,581 B raw / 10,206 B gzip
-(historical `gzip -c` numbers; the gate `scripts/check-m2-bundle.ts` uses
+(historical `gzip -c` numbers; the gate `scripts/check-bundle-size.ts` uses
 deterministic gzip level 6 mtime=0, which differs from `gzip -c` by ~200–300 B
 filename/mtime bytes — do not compare across methods; re-baseline with the
 gate method before enforcing byte-tight deltas. `tsup` with `minify:false` —
 i.e. gzip of the current unminified build, not a shipped min+gzip). Headroom
-to the 20 KB gzip budget ≈ 10 KB at. Pre-PR baseline was 40,428 B / ~9,125 B;
+to the 20 KB gzip budget ≈ 10 KB. Pre-PR baseline was 40,428 B / ~9,125 B;
 the delta is the contract code itself. asserted the case-fold-table delta
-against the ≤8 KB **gzip** cap. re-baselined to the post- tree (`dist/index.js`
+against the ≤8 KB **gzip** cap. re-baselined to the post tree (`dist/index.js`
 70,455 B raw / 18,343 B gzip, gate method): base +1,841 B, review hardening
 (fail-closed trust boundaries) +~1.2 KB → ~21.4 KB gzip vs the 22 KB budget
-(delta cap 4 KB) — see `scripts/check-m2-bundle.ts` (re-baseline + bump
-rationale inline, not exemption). needs a budget re-plan before adding
-harness weight.
+(delta cap 4 KB) — see `scripts/check-bundle-size.ts` (re-baseline + bump
+rationale inline, not exemption).
 
 ## 4. Buffers and bindings
 

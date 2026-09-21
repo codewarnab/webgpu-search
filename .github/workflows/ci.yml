@@ -47,6 +47,9 @@ jobs:
       - name: Check Bundle Size Budget
         run: bun run check:bundle-size
 
+      - name: Validate Snapshot Benchmark Matrix (headless)
+        run: bun scripts/bench-snapshot-matrix.ts --out /tmp/benchmark_snapshot_matrix.json
+
       - name: Run Text-Normalization Tests
         run: bun run test:normalization
 

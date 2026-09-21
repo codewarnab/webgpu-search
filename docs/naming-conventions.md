@@ -42,3 +42,18 @@ jargon (`fold`, `sanitize`, `parity`) in user-visible identifiers.
 `bun run lint:naming` (`scripts/check-naming.ts`) bans temporal/codename
 leaks in sources. It excludes `docs/archive/**`, `@deprecated` alias lines,
 and wire-magic comments. Keep it clean.
+
+## Observable renames (intentional, not zero-change)
+
+Canonical renames change these observable surfaces; deprecated aliases cover
+imports/options, but exact strings do not round-trip:
+
+- `INTERNAL_WORKER_ID_KEY` stays exported from the package root for compat
+  (internal use only).
+- `IncompatibleOptionError.option` is `'cpuScorer'` (was `'cpuAlgorithm'`);
+  worker hook guard throws `IncompatibleHookError('hooks')` (was `'extensions'`).
+  Branch on the canonical names; `cpuAlgorithm`/`extensions` inputs still parse.
+- `Unknown autocomplete field` (was `Unknown suggest field`);
+  `slotBytes is not supported` (was versioned throw-on-use text).
+- `QueryDiagnostics.timings` emits both `autocompleteMs` and deprecated
+  `suggestMs` with identical values.
