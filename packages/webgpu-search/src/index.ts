@@ -105,13 +105,43 @@ export {
   isAsciiTokens,
   isPrintableAsciiTokens,
 } from './runtime-guards';
+// v0.4 Token & prefix search modes with bounded typo tolerance (M4)
+export {
+  damerauLevenshteinBounded,
+  findBestTypoWindow,
+  normalizeTypoTolerance,
+  allowedDistanceForTerm,
+  TYPO_DISTANCE_PENALTY,
+  DEFAULT_MAX_DISTANCE,
+  DEFAULT_MIN_WORD_LENGTH_FOR_ONE_TYPO,
+  DEFAULT_MIN_WORD_LENGTH_FOR_TWO_TYPOS,
+  DEFAULT_PREFIX_EXACT_LENGTH,
+  type NormalizedTypoOptions,
+  type TypoWindowMatch,
+} from './modes/typo-distance';
+export {
+  isTokenDelimiter,
+  splitQueryTerms,
+  normalizeTokenMatchOptions,
+  scoreTokenTokens,
+  type NormalizedTokenMatchOptions,
+  type TokenMatchResult,
+} from './modes/token-search';
+export {
+  normalizePrefixOptions,
+  scorePrefixTokens,
+  type NormalizedPrefixOptions,
+  type PrefixMatchResult,
+} from './modes/prefix-search';
 export {
   compareParityResults,
   scoreFuzzyTokens,
   scoreSubstringTokens,
+  scoreSubstringTypoTokens,
   searchCpuReference,
   searchMultiFieldCpuReference,
   WORD_BOUNDARY_PREV,
+  type CpuModeOptions,
   type CpuReferenceOutput,
   type MultiFieldHit,
   type MultiFieldMatch,

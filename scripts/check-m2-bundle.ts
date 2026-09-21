@@ -65,6 +65,16 @@
  * Total bumped 60 KB -> 64 KB with this documented rationale.
  * Budget: 64 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
+ * Issue #10 M4 (token & prefix modes + typo tolerance) search-mode expansion:
+ * Adds modes/typo-distance.ts (bounded Damerau-Levenshtein + length gates),
+ * modes/token-search.ts (multi-term AND/OR/quorum + proximity scoring),
+ * modes/prefix-search.ts (anchored symbol matching), typo-aware substring
+ * scoring in cpu-reference.ts, token/prefix/typo routing + validation in
+ * hybrid-index.ts / document-index.ts / webgpu-engine.ts, and highlight
+ * branches for all modes (+~2.5 KB gzip, delta still within the 30 KB cap).
+ * Total bumped 64 KB -> 68 KB with this documented rationale.
+ * Budget: 68 KB gzip total per file (dist/index.js + dist/index.cjs).
+ *
  * Fail-closed: missing dist or dist older than src/fold-table.ts fails
  * (a size gate that passes when there is nothing to measure is decoration).
  *
@@ -77,7 +87,7 @@ import { stat, readFile } from 'node:fs/promises';
 const BASELINE_RAW = 234907;
 const BASELINE_GZIP = 49246;
 const DELTA_CAP_GZIP = 30 * 1024;
-const TOTAL_BUDGET_GZIP = 64 * 1024;
+const TOTAL_BUDGET_GZIP = 68 * 1024;
 
 
 function gzipDeterministic(buf: Uint8Array): number {

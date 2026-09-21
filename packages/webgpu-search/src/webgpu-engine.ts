@@ -20,9 +20,11 @@ import {
   UNICODE_VERSION,
   UNICODE_VERSION_TO_ENUM,
   IncompatibleIndexError,
+  IncompatibleOptionError,
   ProfileMismatchError,
   QueryTooLongError,
 } from './text-profile';
+import { normalizeTypoTolerance } from './modes/typo-distance';
 import type { AdapterInfo, SearchOptions, SearchResultItem, SearchTimings, SearchMode } from './types';
 
 const BufferUsage = (typeof globalThis !== 'undefined' && 'GPUBufferUsage' in globalThis ? (globalThis as any).GPUBufferUsage : {
@@ -622,8 +624,29 @@ export class WebGPUEngine {
 
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
     const rawMode = options.mode ?? 'fuzzy';
-    if (rawMode !== 'fuzzy' && rawMode !== 'substring') {
-      throw new TypeError(`[webgpu-search] search mode must be 'fuzzy'|'substring', got ${String(rawMode)}.`);
+    if (rawMode !== 'fuzzy' && rawMode !== 'substring' && rawMode !== 'token' && rawMode !== 'prefix') {
+      throw new TypeError(`[webgpu-search] search mode must be 'fuzzy'|'substring'|'token'|'prefix', got ${String(rawMode)}.`);
+    }
+    // v0.4 M4: WGSL shaders are exact-only ('fuzzy'/'substring'). Token and
+    // prefix modes route to the CPU reference engine — the hybrid/document
+    // indexes catch this and fall back with fallbackReason 'unsupported-mode'
+    // (Issue #10 scoring-parity boundary). Direct engine callers must route
+    // themselves; the engine never silently serves approximate results.
+    if (rawMode === 'token' || rawMode === 'prefix') {
+      throw new IncompatibleOptionError(
+        'mode',
+        `Search mode '${rawMode}' is CPU-only in v0.4 (no WGSL kernel). Route token/prefix queries to the CPU reference scorer.`
+      );
+    }
+    // Typo-tolerant queries cannot run on the exact-only shaders either.
+    // Normalized here (fail-closed on malformed shapes) so direct callers
+    // get identical validation with or without a device.
+    const engineTypo = normalizeTypoTolerance(options.typoTolerance);
+    if (engineTypo.enabled) {
+      throw new IncompatibleOptionError(
+        'typoTolerance',
+        '[webgpu-search] Typo-tolerant queries are CPU-only in v0.4 (WGSL kernels are exact-only). Route to the CPU reference scorer.'
+      );
     }
     const mode = rawMode;
     const limit = clampLimit(options.limit ?? options.maxResults ?? 50);

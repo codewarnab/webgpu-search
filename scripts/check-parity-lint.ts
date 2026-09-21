@@ -30,6 +30,9 @@ import { readFile } from 'node:fs/promises';
 const strictTargets = [
   '../packages/webgpu-search/src/unicode-preprocess.ts',
   '../packages/webgpu-search/src/cpu-reference.ts',
+  '../packages/webgpu-search/src/modes/typo-distance.ts',
+  '../packages/webgpu-search/src/modes/token-search.ts',
+  '../packages/webgpu-search/src/modes/prefix-search.ts',
   '../packages/webgpu-search/src/runtime-guards.ts',
   '../packages/webgpu-search/src/fold-table.ts',
   '../packages/webgpu-search/src/buffer.ts',

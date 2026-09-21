@@ -29,6 +29,24 @@ export interface SearchOptions {
    * 'cpu-fallback' forces the CPU path.
    */
   onQueryTooLong?: OnQueryTooLong;
+  /**
+   * v0.4 M4: token-mode quorum options (operator/minMatchCount).
+   * Only read when mode is 'token'; validated fail-closed otherwise.
+   */
+  tokenMatch?: TokenMatchOptions;
+  /**
+   * v0.4 M4: prefix-mode options (prefixLength/exactCase).
+   * Only read when mode is 'prefix'; validated fail-closed otherwise.
+   */
+  prefixMatch?: PrefixSearchOptions;
+  /**
+   * v0.4 M4: bounded typo tolerance (boolean shorthand or full options).
+   * Applies to 'substring', 'token', and 'prefix' modes; 'fuzzy' validates
+   * but ignores (inherently typo-tolerant via subsequence matching).
+   * Typo queries always route to the CPU reference engine — WGSL shaders
+   * are exact-only (see webgpu-engine.ts).
+   */
+  typoTolerance?: TypoToleranceOptions | boolean;
 }
 
 export interface SearchResultItem {
@@ -213,6 +231,13 @@ export interface DocumentSearchResultItem<TDoc = any> {
   matches?: Array<{ field: string; score: number; highlights?: HighlightRange[] }>;
 }
 
+/**
+ * Why a query was served by the CPU engine instead of WebGPU.
+ * v0.4 M4 adds 'unsupported-mode': 'token'/'prefix' modes and typo-tolerant
+ * queries route to the CPU reference engine (WGSL shaders are exact-only
+ * for 'fuzzy'/'substring'); recorded per the Issue #10 scoring-parity
+ * boundary (unsupported features route to CPU with a recorded reason).
+ */
 export type FallbackReason =
   | 'webgpu-unsupported'
   | 'device-request-failed'
@@ -222,6 +247,7 @@ export type FallbackReason =
   | 'prefer-cpu'
   | 'query-too-long'
   | 'cpu-algorithm-requested'
+  | 'unsupported-mode'
   | 'gpu-execution-error';
 
 export interface DocumentSearchResponse<TDoc = any> {

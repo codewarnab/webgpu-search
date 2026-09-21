@@ -14,9 +14,84 @@
  * Portable: no DOM refs. Parity path uses scalar `===` only.
  */
 
-import type { SearchResultItem, SearchMode } from './types';
+import type { SearchResultItem, SearchMode, TokenMatchOptions, PrefixSearchOptions, TypoToleranceOptions } from './types';
 import { clampLimit, nowMs } from './runtime-guards';
 import { IncompatibleOptionError } from './errors';
+import {
+  normalizeTypoTolerance,
+  allowedDistanceForTerm,
+  findBestTypoWindow,
+  TYPO_DISTANCE_PENALTY,
+  type NormalizedTypoOptions
+} from './modes/typo-distance';
+import {
+  normalizeTokenMatchOptions,
+  splitQueryTerms,
+  scoreTokenTokens,
+  type NormalizedTokenMatchOptions
+} from './modes/token-search';
+import {
+  normalizePrefixOptions,
+  scorePrefixTokens,
+  type NormalizedPrefixOptions
+} from './modes/prefix-search';
+
+/**
+ * Per-query mode options threading token/prefix/typo configuration into
+ * the parity scorers. All fields optional; defaults resolve per module.
+ * `exactCase` polarity (prefixMatch.exactCase vs index folded mode) is
+ * enforced by index callers (document-index.ts, hybrid-index.ts), which
+ * own the pack-time polarity — the scorer validates shape only.
+ */
+export interface CpuModeOptions {
+  tokenMatch?: TokenMatchOptions;
+  prefixMatch?: PrefixSearchOptions;
+  typoTolerance?: TypoToleranceOptions | boolean;
+}
+
+interface NormalizedModeOptions {
+  tokenOpts: NormalizedTokenMatchOptions;
+  prefixOpts: NormalizedPrefixOptions;
+  typo: NormalizedTypoOptions;
+}
+
+function normalizeModeOptions(raw: CpuModeOptions | undefined): NormalizedModeOptions {
+  return {
+    tokenOpts: normalizeTokenMatchOptions(raw?.tokenMatch),
+    prefixOpts: normalizePrefixOptions(raw?.prefixMatch),
+    typo: normalizeTypoTolerance(raw?.typoTolerance)
+  };
+}
+
+/**
+ * Typo-tolerant substring score for one record. With zero allowed edits
+ * this delegates to the exact path (bit-identical scores); otherwise the
+ * best bounded-DL alignment scores as
+ * `1000 - start·10 - (strLen - queryLen) - distance·100` (i32).
+ */
+export function scoreSubstringTypoTokens(
+  record: Uint32Array | readonly number[],
+  query: Uint32Array | readonly number[],
+  typo: NormalizedTypoOptions
+): { matched: boolean; score: number; matchStart: number; distance: number; windowLength: number } {
+  const strLen: number = record.length;
+  const queryLen: number = query.length;
+  if (queryLen === 0 || strLen === 0) {
+    return { matched: false, score: 0, matchStart: -1, distance: 0, windowLength: 0 };
+  }
+  const allowed: 0 | 1 | 2 = allowedDistanceForTerm(queryLen, typo);
+  if (allowed === 0) {
+    const r = scoreSubstringTokens(record as Uint32Array, query as Uint32Array);
+    return { matched: r.matched, score: r.score, matchStart: r.matchStart, distance: 0, windowLength: r.matched ? queryLen : 0 };
+  }
+  const win = findBestTypoWindow(record, query, allowed, typo.prefixExactLength);
+  if (!win.matched || win.distance > allowed) {
+    return { matched: false, score: 0, matchStart: -1, distance: 0, windowLength: 0 };
+  }
+  const score: number =
+    ((1000 - Math.imul(win.start, 10) - (strLen - queryLen) - Math.imul(win.distance, TYPO_DISTANCE_PENALTY)) | 0);
+  return { matched: true, score, matchStart: win.start, distance: win.distance, windowLength: win.windowLength };
+}
 
 /**
  * ASCII delimiter set shared with shaders/fuzzy.wgsl (documented v0.2
@@ -157,26 +232,44 @@ export function searchCpuReference(
   queryTokens: Uint32Array,
   mode: SearchMode,
   limit: number,
-  texts: readonly string[]
+  texts: readonly string[],
+  modeOptions?: CpuModeOptions
 ): CpuReferenceOutput {
   const t0: number = nowMs();
-  if (mode !== 'substring' && mode !== 'fuzzy') {
+  if (mode !== 'substring' && mode !== 'fuzzy' && mode !== 'token' && mode !== 'prefix') {
     throw new IncompatibleOptionError(
       'mode',
-      `CPU reference mode '${String(mode)}' is scheduled for Milestone 4. Only 'fuzzy' and 'substring' are supported in Milestone 1.`
+      `CPU reference encountered unknown mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
     );
   }
+  // Fail-closed option validation before scanning (invalid token/prefix/
+  // typo shapes throw even when the corpus is empty).
+  const opts: NormalizedModeOptions = normalizeModeOptions(modeOptions);
+  // 'fuzzy' is inherently typo-tolerant via subsequence matching; typo
+  // options are validated but do not alter fuzzy scoring (documented).
+  const queryTerms: Uint32Array[] | null =
+    mode === 'token' ? splitQueryTerms(queryTokens) : null;
   const hits: SearchResultItem[] = [];
-  if (queryTokens.length !== 0) {
+  if (queryTokens.length !== 0 && (queryTerms === null || queryTerms.length !== 0)) {
     for (let idx = 0; idx < recordTokens.length; idx++) {
       const rec: Uint32Array = recordTokens[idx] as Uint32Array;
       if (mode === 'substring') {
-        const r = scoreSubstringTokens(rec, queryTokens);
+        const r = scoreSubstringTypoTokens(rec, queryTokens, opts.typo);
+        if (r.matched) {
+          hits.push({ index: idx, score: r.score, text: texts[idx] ?? '' });
+        }
+      } else if (mode === 'fuzzy') {
+        const r = scoreFuzzyTokens(rec, queryTokens);
+        if (r.matched) {
+          hits.push({ index: idx, score: r.score, text: texts[idx] ?? '' });
+        }
+      } else if (mode === 'token') {
+        const r = scoreTokenTokens(rec, queryTerms as Uint32Array[], opts.tokenOpts, opts.typo);
         if (r.matched) {
           hits.push({ index: idx, score: r.score, text: texts[idx] ?? '' });
         }
       } else {
-        const r = scoreFuzzyTokens(rec, queryTokens);
+        const r = scorePrefixTokens(rec, queryTokens, opts.prefixOpts, opts.typo);
         if (r.matched) {
           hits.push({ index: idx, score: r.score, text: texts[idx] ?? '' });
         }
@@ -233,6 +326,8 @@ export interface FieldScoreDefinition {
  * Multi-field parity reference scorer.
  * Evaluates records across multiple fields, applies fixed-point integer weighting,
  * aggregates matching fields per document, and returns ranked document hits.
+ * v0.4 M4: token `minMatchCount` quorums evaluate per field-row (best-row-wins
+ * per document); cross-row term coverage does not combine.
  */
 export function searchMultiFieldCpuReference(
   docCount: number,
@@ -247,16 +342,21 @@ export function searchMultiFieldCpuReference(
   allowedFieldIndices?: ReadonlySet<number>,
   tombstonedRows?: ReadonlySet<number>,
   filterDoc?: (docIndex: number) => boolean,
-  collectAllMatched: boolean = true
+  collectAllMatched: boolean = true,
+  modeOptions?: CpuModeOptions
 ): MultiFieldCpuReferenceOutput {
   const t0: number = nowMs();
-  if (mode !== 'substring' && mode !== 'fuzzy') {
+  if (mode !== 'substring' && mode !== 'fuzzy' && mode !== 'token' && mode !== 'prefix') {
     throw new IncompatibleOptionError(
       'mode',
-      `CPU reference mode '${String(mode)}' is scheduled for Milestone 4. Only 'fuzzy' and 'substring' are supported in Milestone 1.`
+      `CPU reference encountered unknown mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
     );
   }
-  if (queryTokens.length === 0 || docCount === 0 || rowTokens.length === 0) {
+  const opts: NormalizedModeOptions = normalizeModeOptions(modeOptions);
+  const queryTerms: Uint32Array[] | null =
+    mode === 'token' ? splitQueryTerms(queryTokens) : null;
+  if (queryTokens.length === 0 || docCount === 0 || rowTokens.length === 0 ||
+    (queryTerms !== null && queryTerms.length === 0)) {
     return {
       totalMatches: 0,
       candidateCount: 0,
@@ -283,13 +383,29 @@ export function searchMultiFieldCpuReference(
     if (filterDoc && !filterDoc(dIdx)) continue;
 
     const rec = rowTokens[r];
-    const raw = mode === 'substring'
-      ? scoreSubstringTokens(rec, queryTokens)
-      : scoreFuzzyTokens(rec, queryTokens);
+    let matched = false;
+    let rawScore = 0;
+    if (mode === 'substring') {
+      const scored = scoreSubstringTypoTokens(rec, queryTokens, opts.typo);
+      matched = scored.matched;
+      rawScore = scored.score;
+    } else if (mode === 'fuzzy') {
+      const scored = scoreFuzzyTokens(rec, queryTokens);
+      matched = scored.matched;
+      rawScore = scored.score;
+    } else if (mode === 'token') {
+      const scored = scoreTokenTokens(rec, queryTerms as Uint32Array[], opts.tokenOpts, opts.typo);
+      matched = scored.matched;
+      rawScore = scored.score;
+    } else {
+      const scored = scorePrefixTokens(rec, queryTokens, opts.prefixOpts, opts.typo);
+      matched = scored.matched;
+      rawScore = scored.score;
+    }
 
-    if (raw.matched) {
+    if (matched) {
       const fDef = fields[fIdx];
-      const weightedScore = Math.round(raw.score * fDef.weight);
+      const weightedScore = Math.round(rawScore * fDef.weight);
       let entry = docMatches.get(dIdx);
       if (!entry) {
         entry = {

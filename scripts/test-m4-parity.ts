@@ -402,7 +402,10 @@ async function main(): Promise<void> {
     const imulHits = (codeOnly.match(/Math\.imul/g) ?? []).length;
     const cmpBlock = codeOnly.slice(codeOnly.indexOf('export function compareParityResults'));
     const cmpBody = cmpBlock.slice(cmpBlock.indexOf('{'), cmpBlock.indexOf('\n}') + 1);
-    ok('(e) Math.imul confined to score formulas', imulHits === 3 && !cmpBody.includes('Math.imul'), `imul x${imulHits}`);
+    // v0.4 M4: 5 = substring start penalty + fuzzy run bonus + fuzzy span
+    // penalty + typo-substring start/distance penalties. Comparator stays
+    // imul-free (wrap-free total order).
+    ok('(e) Math.imul confined to score formulas', imulHits === 5 && !cmpBody.includes('Math.imul'), `imul x${imulHits}`);
   }
 
   // (f) WORD_BOUNDARY_PREV set pinned; CJK/U+3000 no-bonus documented.
