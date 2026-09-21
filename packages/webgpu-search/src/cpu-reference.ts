@@ -534,7 +534,7 @@ export function searchMultiFieldCpuReference(
       const hitId = (rankingOptions?.docIds as ReadonlyArray<string | number | null | undefined>)[dIdx];
       if (hitId === null || hitId === undefined) {
         throw new TypeError(
-          `[webgpu-search] ranking docIds[${dIdx}] is missing for a matched document.`
+          `[webgpu-search] ranking docIds[${dIdx}] is missing for a matched entry.`
         );
       }
       rankKeys.push({
