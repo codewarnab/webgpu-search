@@ -23,6 +23,28 @@ import { abortError, throwIfAborted } from '../runtime-guards';
 import { deserializeDocumentSnapshotHeader } from '../persistence';
 import { SERIALIZED_DOC_HEADER_BYTES } from '../text-profile';
 import { IncompatibleHookError } from '../errors';
+import { hasAnyHook, normalizeSearchExtensionHooks } from '../extensions';
+
+/**
+ * Fail-closed worker extensions guard: empty `{}` is a no-op (consistent
+ * with `normalizeSearchExtensionHooks`), any real hook rejects with
+ * `IncompatibleHookError`. Malformed shapes throw `TypeError` via normalize.
+ */
+function assertNoWorkerExtensions(
+  extensions: unknown,
+  method: 'init' | 'search' | 'restore'
+): void {
+  if (extensions === undefined) return;
+  const normalized = normalizeSearchExtensionHooks(
+    extensions as Parameters<typeof normalizeSearchExtensionHooks>[0]
+  );
+  if (hasAnyHook(normalized)) {
+    throw new IncompatibleHookError(
+      'extensions',
+      `SearchExtensionHooks contain function closures which cannot be cloned across Web Worker boundaries (${method} rejected fail-closed).`
+    );
+  }
+}
 
 interface InternalFieldDef<TDoc> {
   name: string;
@@ -393,10 +415,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     }
 
     if (options.extensions) {
-      throw new IncompatibleHookError(
-        'extensions',
-        'SearchExtensionHooks contain function closures which cannot be cloned across Web Worker boundaries.'
-      );
+      assertNoWorkerExtensions(options.extensions, 'init');
     }
 
     const workerFields = this.fieldDefinitions.map((f) => ({
@@ -445,13 +464,10 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     throwIfAborted(options?.signal);
 
     if (options?.extensions) {
-      throw new IncompatibleHookError(
-        'extensions',
-        'SearchExtensionHooks contain function closures which cannot be cloned across Web Worker boundaries.'
-      );
+      assertNoWorkerExtensions(options.extensions, 'search');
     }
 
-    const { filter, signal, limit, maxResults, ...restOptions } = options || {};
+    const { filter, signal, limit, maxResults, extensions: _omitExtensions, ...restOptions } = options || {};
 
     if (filter !== undefined && typeof filter !== 'function') {
       if (typeof filter !== 'object' || filter === null) {
@@ -645,6 +661,9 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     if (!buffer || typeof (buffer as any).byteLength !== 'number') {
       throw new TypeError('[webgpu-search] restore expects an ArrayBuffer.');
     }
+    if (options?.options?.extensions) {
+      assertNoWorkerExtensions(options.options.extensions, 'restore');
+    }
 
     let stagedFieldDefs = this.fieldDefinitions;
     let stagedFilterDefs = this.filterDefinitions;
@@ -747,13 +766,16 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       // Allow worker to handle fail-closed validation and throw IncompatibleIndexError
     }
 
-    // Sanitize options to avoid DataCloneError over postMessage
+    // Sanitize options to avoid DataCloneError over postMessage.
+    // Extensions are rejected fail-closed above; strip them defensively so
+    // an empty `{}` no-op never crosses the boundary.
     const sanitizedOptions: RestoreDocumentIndexOptions<TDoc> | undefined = options ? {
       ...options,
       device: undefined,
       options: options.options ? {
         ...options.options,
         device: undefined,
+        extensions: undefined,
         fields: options.options.fields?.map((f) =>
           typeof f === 'string' ? f : { name: f.name, weight: f.weight }
         ),

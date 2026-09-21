@@ -41,6 +41,13 @@ export interface AlignHighlightOptions {
   prefixMatch?: PrefixSearchOptions;
   /** Bounded typo tolerance (honored by 'substring', 'token', 'prefix'). */
   typoTolerance?: TypoToleranceOptions | boolean;
+  /**
+   * v0.4 M6: pre-split custom tokenizer terms for `'token'` mode.
+   * When provided, replaces `splitQueryTerms(queryTokens)` so highlight
+   * ranges track the serving scorer (score-highlight symmetry with custom
+   * tokenizers). Empty override yields no ranges.
+   */
+  tokenTermsOverride?: Uint32Array[];
 }
 
 export interface RenderHighlightOptions {
@@ -341,6 +348,18 @@ export function alignHighlights(
   query: string,
   options: AlignHighlightOptions = {}
 ): HighlightRange[] {
+  // v0.4 M6: fail-closed custom tokenizer terms validation before any early
+  // exit so malformed overrides throw identically on empty corpora/queries.
+  if (options.tokenTermsOverride !== undefined) {
+    if (!Array.isArray(options.tokenTermsOverride)) {
+      throw new TypeError('[webgpu-search] tokenTermsOverride must be an array of Uint32Array.');
+    }
+    for (let i = 0; i < options.tokenTermsOverride.length; i++) {
+      if (!(options.tokenTermsOverride[i] instanceof Uint32Array)) {
+        throw new TypeError('[webgpu-search] tokenTermsOverride entries must be Uint32Array.');
+      }
+    }
+  }
   if (typeof raw !== 'string' || typeof query !== 'string') return [];
   if (raw.length === 0 || query.length === 0) return [];
 
@@ -411,9 +430,10 @@ export function alignHighlights(
 
   if (mode === 'token') {
     // Multi-term highlights: one range per matched term, merged.
+    // v0.4 M6: custom tokenizer terms replace the default split when supplied.
     const tokenOpts = normalizeTokenMatchOptions(options.tokenMatch);
     const typo = normalizeTypoTolerance(options.typoTolerance);
-    const terms = splitQueryTerms(queryTokens);
+    const terms = options.tokenTermsOverride ?? splitQueryTerms(queryTokens);
     if (terms.length === 0) return [];
     const scored = scoreTokenTokens(sourceMap.tokens, terms, tokenOpts, typo);
     if (!scored.matched) return [];

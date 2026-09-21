@@ -372,6 +372,14 @@ export interface DocumentIndexSchema {
     name: string;
     type?: FilterFieldType;
   }>;
+  /**
+   * v0.4 M6: declarative extension hook identifiers recorded at snapshot
+   * time. Closures are never serialized — only these stable IDs are stored.
+   * Restore validates that matching hook handlers are supplied (see
+   * `assertHooksSatisfied` in extensions.ts); missing handlers throw
+   * `IncompatibleHookError` fail-closed.
+   */
+  hookIds?: ExtensionHookIds;
 }
 
 export interface SerializeDocumentIndexOptions {
@@ -387,6 +395,12 @@ export interface RestoreDocumentIndexOptions<TDoc = Record<string, unknown>> {
   /**
    * Optional custom DocumentIndex options to override or extend schema options
    * (e.g. custom getters, device, preferGpu, threshold).
+   *
+   * v0.4 M6: `options.extensions` (when supplied to `restore` /
+   * `fromSnapshotData` / instance `restore()`) replaces live index hooks
+   * wholesale (not per-key merged); the merged set must then satisfy the
+   * snapshot `hookIds` via `assertHooksSatisfied` or `IncompatibleHookError`
+   * is thrown fail-closed.
    */
   options?: Partial<DocumentIndexOptions<TDoc>>;
   /**
@@ -646,6 +660,57 @@ export interface MatchInfo {
   normalizedScore: number;
 }
 
+/**
+ * Declarative extension hook identifiers persisted in snapshots.
+ * Each present key records the stable ID of the corresponding hook at
+ * serialize time (function `hookId` property when set and non-blank, else
+ * `function.name`, else `'anonymous'`). Name-derived IDs can collide across
+ * distinct functions sharing an inferred name, and every truly anonymous
+ * closure maps to `'anonymous'` (fail-open). Hosts requiring stable restores
+ * across builds should assign explicit IDs:
+ * `myScorer.hookId = 'recency-v1'` (or use named functions).
+ */
+export interface ExtensionHookIds {
+  tokenizer?: string;
+  scoringHook?: string;
+  filterPredicate?: string;
+  postProcess?: string;
+}
+
+/**
+ * Type-safe extension hooks for host applications (v0.4 M6).
+ *
+ * - `tokenizer`: custom query term splitting for `'token'` mode (e.g. code
+ *   symbols `_`, `-`, `camelCase`). Only affects `'token'` mode query term
+ *   parsing on the CPU path (`'token'` is CPU-by-design with fallbackReason
+ *   `'unsupported-mode'`); other modes ignore it. Must be a pure,
+ *   deterministic function (runs once per query, never per record).
+ * - `scoringHook`: post-match boost over surviving Top-K candidates only
+ *   (never per-candidate scanning). Receives `(doc, baseScore, matchInfo)`
+ *   and must return a finite integer (unified descending normalized integer
+ *   score contract; floats throw `TypeError`). Applied identically on GPU
+ *   and CPU paths after deterministic ranking + limit truncation, followed
+ *   by a deterministic re-sort. Must be pure and deterministic.
+ * - `filterPredicate`: conjunctive post-match predicate composed (AND) with
+ *   `options.filter` (function or structured). Applied on every path.
+ *   Return values are truthiness-coerced (`!predicate(doc)` excludes).
+ *   Must be pure: invocation order is engine-dependent (GPU result order vs
+ *   parity row order), so non-deterministic predicates diverge.
+ * - `postProcess`: final result transformation after scoring boosts,
+ *   deterministic re-sort, and highlight enrichment. Must return an array
+ *   (hook throws propagate). Affects only `results`: `totalMatches` /
+ *   `candidateCount` / `hasOverflow` are snapshotted pre-pipeline and
+ *   `facets` / `suggestions` ignore it. Skipped on empty no-hit paths
+ *   (empty query / corpus / empty filter) where there is nothing to transform.
+ *
+ * Persistence: closures are never serialized. `serialize()` records only
+ * `ExtensionHookIds`; `restore` requires matching handlers via
+ * `options.options.extensions` or throws `IncompatibleHookError`.
+ * Restore-supplied handlers replace (not merge with) live index hooks.
+ * Hooks cannot cross the Web Worker boundary — `SearchWorkerClient`
+ * `init` / `search` / `restore` reject `extensions` fail-closed with
+ * `IncompatibleHookError` (empty `{}` is a no-op and allowed).
+ */
 export interface SearchExtensionHooks<TDoc = any> {
   tokenizer?: (text: string) => string[];
   scoringHook?: (doc: TDoc, baseScore: number, matchInfo: MatchInfo) => number;

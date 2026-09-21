@@ -106,6 +106,23 @@ export {
   type SuggestCandidateKeys,
 } from './suggest';
 
+// v0.4 Extensibility pipeline & safe hook architecture (M6)
+export {
+  defaultTokenizer,
+  codeTokenizer,
+  normalizeSearchExtensionHooks,
+  resolveEffectiveHooks,
+  hasAnyHook,
+  getHookId,
+  collectHookIds,
+  assertHooksSatisfied,
+  tokenizeWithHook,
+  getTokenTermsForQuery,
+  applyScoringHook,
+  applyPostProcess,
+  type CodeTokenizerOptions,
+} from './extensions';
+
 // v0.2 shared preprocessing + CPU reference (M2)
 export {
   normalizeText,

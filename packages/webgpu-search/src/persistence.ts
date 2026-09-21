@@ -1,4 +1,5 @@
 import { crc32Parts, validatePackedOffsets } from './buffer';
+import { collectHookIds } from './extensions';
 import {
   DOC_FORMAT_VERSION,
   ENUM_TO_PROFILE,
@@ -132,7 +133,9 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
     throw new IncompatibleIndexError(1, 'unknown-version');
   }
 
-  // Schema segment encoding
+  // Schema segment encoding (v0.4 M6: declarative hookIds only — closures
+  // are never serialized).
+  const hookIds = collectHookIds(index.getExtensions?.() as any);
   const schema: DocumentIndexSchema = {
     fields: sortedFields.map((f: InternalField<TDoc>) => ({
       name: f.name,
@@ -150,7 +153,8 @@ export function serializeDocumentIndex<TDoc = Record<string, unknown>>(
     filterFields: index.getFilterFieldDefinitions().map((ff) => ({
       name: ff.name,
       type: ff.type
-    }))
+    })),
+    ...(hookIds !== undefined ? { hookIds } : {})
   };
 
   const schemaJson = JSON.stringify(schema);
@@ -342,6 +346,23 @@ export function deserializeDocumentSnapshot<TDoc = Record<string, unknown>>(
     const f = schema.fields[i];
     if (!f || typeof f !== 'object' || typeof f.name !== 'string' || f.name.trim().length === 0) {
       throw new IncompatibleIndexError('valid-schema-fields', typeof f);
+    }
+  }
+
+  // v0.4 M6: fail-closed hookIds validation (declarative IDs only).
+  if (schema.hookIds !== undefined) {
+    if (typeof schema.hookIds !== 'object' || schema.hookIds === null || Array.isArray(schema.hookIds)) {
+      throw new IncompatibleIndexError('valid-hookIds-object', typeof schema.hookIds);
+    }
+    const allowedHookKeys = ['tokenizer', 'scoringHook', 'filterPredicate', 'postProcess'];
+    for (const key of Object.keys(schema.hookIds)) {
+      if (allowedHookKeys.indexOf(key) < 0) {
+        throw new IncompatibleIndexError('valid-hookIds-keys', key);
+      }
+      const val = (schema.hookIds as Record<string, unknown>)[key];
+      if (typeof val !== 'string' || (val as string).trim().length === 0) {
+        throw new IncompatibleIndexError(`valid-hookIds.${key}-string`, typeof val);
+      }
     }
   }
 

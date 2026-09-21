@@ -49,25 +49,44 @@ import {
  * `exactCase` polarity (prefixMatch.exactCase vs index folded mode) is
  * enforced by index callers (document-index.ts, hybrid-index.ts), which
  * own the pack-time polarity — the scorer validates shape only.
+ *
+ * v0.4 M6: `tokenTermsOverride` carries pre-split custom tokenizer terms
+ * for `'token'` mode (see extensions.ts `getTokenTermsForQuery`). When
+ * provided, it replaces `splitQueryTerms(queryTokens)` on every path
+ * (flat + multi-field + highlight symmetry). Empty override matches nothing,
+ * mirroring all-delimiter queries.
  */
 export interface CpuModeOptions {
   tokenMatch?: TokenMatchOptions;
   prefixMatch?: PrefixSearchOptions;
   typoTolerance?: TypoToleranceOptions | boolean;
+  tokenTermsOverride?: Uint32Array[];
 }
 
 interface NormalizedModeOptions {
   tokenOpts: NormalizedTokenMatchOptions;
   prefixOpts: NormalizedPrefixOptions;
   typo: NormalizedTypoOptions;
+  tokenTermsOverride?: Uint32Array[];
 }
 
 function normalizeModeOptions(raw: CpuModeOptions | undefined): NormalizedModeOptions {
-  return {
+  const base = {
     tokenOpts: normalizeTokenMatchOptions(raw?.tokenMatch),
     prefixOpts: normalizePrefixOptions(raw?.prefixMatch),
     typo: normalizeTypoTolerance(raw?.typoTolerance)
   };
+  if (raw?.tokenTermsOverride === undefined) return base;
+  const override = raw.tokenTermsOverride;
+  if (!Array.isArray(override)) {
+    throw new TypeError('[webgpu-search] tokenTermsOverride must be an array of Uint32Array.');
+  }
+  for (let i = 0; i < override.length; i++) {
+    if (!(override[i] instanceof Uint32Array)) {
+      throw new TypeError('[webgpu-search] tokenTermsOverride entries must be Uint32Array.');
+    }
+  }
+  return { ...base, tokenTermsOverride: override.slice() };
 }
 
 /**
@@ -261,8 +280,9 @@ export function searchCpuReference(
   }
   // 'fuzzy' is inherently typo-tolerant via subsequence matching; typo
   // options are validated but do not alter fuzzy scoring (documented).
+  // v0.4 M6: custom tokenizer terms replace the default split when supplied.
   const queryTerms: Uint32Array[] | null =
-    mode === 'token' ? splitQueryTerms(queryTokens) : null;
+    mode === 'token' ? (opts.tokenTermsOverride ?? splitQueryTerms(queryTokens)) : null;
   const hits: SearchResultItem[] = [];
   if (queryTokens.length !== 0 && (queryTerms === null || queryTerms.length !== 0)) {
     for (let idx = 0; idx < recordTokens.length; idx++) {
@@ -383,7 +403,7 @@ export function searchMultiFieldCpuReference(
     assertPrefixLengthForQuery(opts.prefixOpts, queryTokens.length);
   }
   const queryTerms: Uint32Array[] | null =
-    mode === 'token' ? splitQueryTerms(queryTokens) : null;
+    mode === 'token' ? (opts.tokenTermsOverride ?? splitQueryTerms(queryTokens)) : null;
   if (queryTokens.length === 0 || docCount === 0 || rowTokens.length === 0 ||
     (queryTerms !== null && queryTerms.length === 0)) {
     return {

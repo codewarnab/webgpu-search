@@ -35,6 +35,14 @@ import {
   type NormalizedSuggestOptions
 } from './suggest';
 import {
+  normalizeSearchExtensionHooks,
+  resolveEffectiveHooks,
+  getTokenTermsForQuery,
+  applyScoringHook,
+  applyPostProcess,
+  assertHooksSatisfied
+} from './extensions';
+import {
   clampLimit,
   throwIfAborted,
   abortError,
@@ -82,6 +90,7 @@ import type {
   MutationBatch,
   MutationResult,
   RestoreDocumentIndexOptions,
+  SearchExtensionHooks,
   SearchMode,
   SearchTimings,
   SerializeDocumentIndexOptions,
@@ -148,6 +157,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   private readonly growthFactor: number;
   private columnarStore: ColumnarStore<TDoc>;
   private filterFieldDefinitions: FilterFieldDefinition<TDoc>[] = [];
+  private indexExtensions: SearchExtensionHooks<TDoc> | undefined = undefined;
 
   constructor(options: DocumentIndexOptions<TDoc>) {
     if (!options || !Array.isArray(options.fields) || options.fields.length === 0) {
@@ -156,6 +166,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.options = options;
     this.folded = !(options.caseSensitive ?? false);
     this.preferGpu = options.preferGpu ?? false;
+    // v0.4 M6: fail-closed extension hook validation at construction.
+    this.indexExtensions = normalizeSearchExtensionHooks(options.extensions);
     this.initialCapacity = typeof options.initialCapacity === 'number' && Number.isFinite(options.initialCapacity) && options.initialCapacity > 0
       ? Math.floor(options.initialCapacity)
       : 0;
@@ -540,6 +552,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         `cpuAlgorithm:'ufuzzy' supports only exact 'fuzzy'/'substring' modes without typo tolerance (got mode '${mode}'${typo.enabled ? ' with typoTolerance' : ''}). Use cpuAlgorithm:'parity'.`
       );
     }
+    // v0.4 M6: fail-closed extension hook validation up front so malformed
+    // hook shapes throw identically on GPU and CPU paths (before early exits).
+    const effectiveHooks = resolveEffectiveHooks(this.indexExtensions, options.extensions);
     // Threaded into every parity CPU call below (single normalization).
     const cpuModeOptions: CpuModeOptions = {
       tokenMatch: { operator: tokenOpts.operator, minMatchCount: tokenOpts.minMatchCount },
@@ -593,6 +608,21 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     // Skipped for empty queries to match the scorer's early noMatch.
     if (mode === 'prefix' && normalizedQuery.tokens.length > 0) {
       assertPrefixLengthForQuery(prefixOpts, normalizedQuery.tokens.length);
+    }
+
+    // v0.4 M6: custom tokenizer terms for 'token' mode (CPU-only).
+    // Other modes ignore the tokenizer. Empty queries skip hook invocation
+    // (no-match by design); non-empty token queries expand via the hook so
+    // scoring and highlights share one term set (score-highlight symmetry).
+    let customTokenTerms: Uint32Array[] | undefined = undefined;
+    if (effectiveHooks?.tokenizer !== undefined && mode === 'token' && !normalizedQuery.isEmpty) {
+      customTokenTerms = getTokenTermsForQuery(
+        query,
+        normalizedQuery.tokens,
+        this.folded,
+        effectiveHooks.tokenizer
+      );
+      cpuModeOptions.tokenTermsOverride = customTokenTerms;
     }
 
     // M3 (Issue #10): validate facet contracts fail-fast, before early exits.
@@ -709,6 +739,24 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       }
     }
 
+    // v0.4 M6: extension filter predicates compose conjunctively (AND) with
+    // `options.filter` functions. Index-level vs per-query hooks already
+    // merged via `resolveEffectiveHooks` (per-query wins per key).
+    const extensionPredicate = effectiveHooks?.filterPredicate;
+    if (extensionPredicate !== undefined) {
+      const basePredicate = filterPredicate;
+      if (basePredicate === undefined) {
+        filterPredicate = extensionPredicate;
+      } else {
+        const optFn = basePredicate;
+        const extFn = extensionPredicate;
+        filterPredicate = (doc: TDoc) => {
+          const d = doc as TDoc;
+          return optFn(d) && extFn(d);
+        };
+      }
+    }
+
     if (normalizedQuery.isEmpty) {
       return noHits('');
     }
@@ -735,8 +783,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       gpuHandle.isReady;
 
     if (useGpu && gpuHandle !== null) {
+      // v0.4 M6 fix: narrow GPU try to dispatch only so extension hook
+      // errors (filterPredicate / scoringHook / postProcess) propagate
+      // directly without destroying the engine or double-invoking via CPU
+      // fallback. Only dispatch failures fall through to CPU.
+      let gpuResult: Awaited<ReturnType<WebGPUEngine['search']>> | undefined = undefined;
       try {
-        const gpuResult = await gpuHandle.search(query, {
+        gpuResult = await gpuHandle.search(query, {
           ...options,
           mode,
           limit: this.candidateCapacity,
@@ -748,6 +801,29 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           throw abortError();
         }
         throwIfAborted(signal);
+      } catch (err: any) {
+        if (err.name === 'AbortError') {
+          throw err;
+        }
+        // Mirror hybrid-index: mode-routed rejections (token/prefix/typo via
+        // direct or raced calls) are not engine failures — keep a healthy GPU
+        // up and fall through to parity CPU.
+        const modeRouted: boolean =
+          err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
+        if (!modeRouted) {
+          console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
+          this.engineType = 'cpu';
+          this.fallbackReason = 'gpu-execution-error';
+          if (this.gpuEngine) {
+            try { this.gpuEngine.destroy(); } catch {}
+            this.gpuEngine = null;
+          }
+        }
+        gpuResult = undefined;
+      }
+
+      if (gpuResult !== undefined) {
+        const gpuResultOk = gpuResult;
 
         // WebGPU candidate readback & fixed-point score enrichment
         const docMatches = new Map<number, {
@@ -758,8 +834,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         // M3: unfiltered query match set for facet aggregation (filter applied below).
         const queryMatchedAll = wantsFacets ? new Set<number>() : null;
 
-        for (let i = 0; i < gpuResult.results.length; i++) {
-          const item = gpuResult.results[i];
+        // v0.4 M6 fix: hook errors propagate (no fallback / no double-invoke).
+        // Only GPU dispatch failures fall back; readback + M6 pipeline runs
+        // outside the dispatch try above.
+        for (let i = 0; i < gpuResultOk.results.length; i++) {
+          const item = gpuResultOk.results[i];
           const r = item.index;
           if (this.tombstones.has(r)) continue;
           const fIdx = this.rowToFieldIndex[r];
@@ -850,8 +929,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
         const totalMatches = hits.length;
         const candidateCount = Math.min(totalMatches, this.candidateCapacity);
-        const results = hits.slice(0, clampedLimit).map((h) => h.item);
-        this.enrichHighlights(results, query, mode, options);
+        let results = hits.slice(0, clampedLimit).map((h) => h.item);
+        this.enrichHighlights(results, query, mode, options, customTokenTerms);
+
+        // v0.4 M6: post-match extension pipeline (Top-K only). Scoring boosts
+        // apply identically on GPU and CPU paths (parity preserved), followed
+        // by a deterministic re-sort; postProcess is the final transform.
+        if (effectiveHooks?.scoringHook !== undefined) {
+          applyScoringHook(results, effectiveHooks.scoringHook, query);
+          this.resortResultsAfterScoring(results, normalizedQuery.tokens, tieBreakers);
+        }
+        if (effectiveHooks?.postProcess !== undefined) {
+          results = applyPostProcess(results, effectiveHooks.postProcess);
+        }
 
         // M3: facet aggregation. Exact when the GPU pool covered all matches;
         // approximate over the top pool on overflow unless force-exact rescan.
@@ -859,8 +949,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         if (wantsFacets && facetEngine && facetSpec && queryMatchedAll !== null) {
           const facetT0 = nowMs();
           let facetCandidates: Iterable<number> = queryMatchedAll;
-          let facetIsApproximate = gpuResult.hasOverflow;
-          if (gpuResult.hasOverflow && facetingMode === 'force-exact') {
+          let facetIsApproximate = gpuResultOk.hasOverflow;
+          if (gpuResultOk.hasOverflow && facetingMode === 'force-exact') {
             const exact = searchMultiFieldCpuReference(
               this.records.length,
               this.sortedFields,
@@ -884,18 +974,18 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, facetIsApproximate
           );
           const facetMs = nowMs() - facetT0;
-          gpuResult.timings.totalMs += facetMs;
+          gpuResultOk.timings.totalMs += facetMs;
         }
 
         return {
-          query: gpuResult.query,
-          mode: gpuResult.mode,
+          query: gpuResultOk.query,
+          mode: gpuResultOk.mode,
           engine: 'webgpu',
           totalMatches,
           candidateCount,
-          hasOverflow: gpuResult.hasOverflow,
+          hasOverflow: gpuResultOk.hasOverflow,
           results,
-          timings: gpuResult.timings,
+          timings: gpuResultOk.timings,
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
           cpuAlgorithm,
@@ -904,24 +994,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
             : {})
         };
-      } catch (err: any) {
-        if (err.name === 'AbortError') {
-          throw err;
-        }
-        // Mirror hybrid-index: mode-routed rejections (token/prefix/typo via
-        // direct or raced calls) are not engine failures — keep a healthy GPU
-        // up and fall through to parity CPU.
-        const modeRouted: boolean =
-          err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
-        if (!modeRouted) {
-          console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
-          this.engineType = 'cpu';
-          this.fallbackReason = 'gpu-execution-error';
-          if (this.gpuEngine) {
-            try { this.gpuEngine.destroy(); } catch {}
-            this.gpuEngine = null;
-          }
-        }
       }
     }
 
@@ -1037,8 +1109,17 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
       const totalMatches = hits.length;
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
-      const results = hits.slice(0, clampedLimit).map((h) => h.item);
-      this.enrichHighlights(results, query, mode, options);
+      let results = hits.slice(0, clampedLimit).map((h) => h.item);
+      this.enrichHighlights(results, query, mode, options, customTokenTerms);
+
+      // v0.4 M6: post-match extension pipeline (Top-K only).
+      if (effectiveHooks?.scoringHook !== undefined) {
+        applyScoringHook(results, effectiveHooks.scoringHook, query);
+        this.resortResultsAfterScoring(results, normalizedQuery.tokens, tieBreakers);
+      }
+      if (effectiveHooks?.postProcess !== undefined) {
+        results = applyPostProcess(results, effectiveHooks.postProcess);
+      }
       const preFacetMs = nowMs() - t0;
 
       // M3: CPU evaluates the full match set, so legacy facets are exact
@@ -1114,7 +1195,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     throwIfAborted(signal);
 
     const idProp = typeof this.options.idField === 'string' ? this.options.idField : 'id';
-    const enrichedResults: DocumentSearchResultItem<TDoc>[] = [];
+    let enrichedResults: DocumentSearchResultItem<TDoc>[] = [];
     for (let i = 0; i < parityResult.results.length; i++) {
       const hit = parityResult.results[i];
       const id = this.docIds[hit.docIndex];
@@ -1128,7 +1209,18 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         matches: hit.matches
       });
     }
-    this.enrichHighlights(enrichedResults, query, mode, options);
+    this.enrichHighlights(enrichedResults, query, mode, options, customTokenTerms);
+
+    // v0.4 M6: post-match extension pipeline (Top-K only). Scoring boosts run
+    // after highlight enrichment (highlights travel with items), followed by
+    // a deterministic re-sort; postProcess is the final transform.
+    if (effectiveHooks?.scoringHook !== undefined) {
+      applyScoringHook(enrichedResults, effectiveHooks.scoringHook, query);
+      this.resortResultsAfterScoring(enrichedResults, normalizedQuery.tokens, tieBreakers);
+    }
+    if (effectiveHooks?.postProcess !== undefined) {
+      enrichedResults = applyPostProcess(enrichedResults, effectiveHooks.postProcess);
+    }
 
     // M3: exact facet aggregation. Disjunctive facets need the unfiltered
     // query match set, so a structured filter triggers one extra unfiltered
@@ -1446,11 +1538,64 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     return out;
   }
 
+  /**
+   * v0.4 M6: deterministic re-sort after `scoringHook` boosts.
+   * Reconstructs M5 rank keys from index state (field weight, exactness via
+   * `isExactTokenMatch` on the winning row, matched length, id, docIndex)
+   * with updated scores, then sorts via `compareRanked` + `tieBreakers`.
+   * Preserves the total-order contract (deterministic across engines).
+   */
+  private resortResultsAfterScoring(
+    results: DocumentSearchResultItem<TDoc>[],
+    queryTokens: Uint32Array,
+    tieBreakers: TieBreakerCriterion[]
+  ): void {
+    if (results.length <= 1) return;
+    const keys: RankableCandidate[] = new Array(results.length);
+    for (let i = 0; i < results.length; i++) {
+      const item = results[i] as DocumentSearchResultItem<TDoc>;
+      const dIdx = this.idToDocIndex.get(item.id);
+      const fIdx = this.fieldNameToIndex.get(item.matchedField);
+      if (dIdx !== undefined && fIdx !== undefined) {
+        const rowIdx = this.docToRowIndices[dIdx]?.[fIdx];
+        const rowTok = rowIdx !== undefined ? this.rowTokens[rowIdx] : undefined;
+        const weight = this.sortedFields[fIdx]?.weight ?? 1.0;
+        keys[i] = {
+          score: item.score,
+          fieldWeight: weight,
+          isExactMatch: rowTok !== undefined ? isExactTokenMatch(rowTok, queryTokens) : false,
+          matchedLength: rowTok !== undefined ? rowTok.length : 0,
+          id: item.id,
+          docIndex: dIdx
+        };
+      } else {
+        // Defensive fallback (unreachable in normal flow: resort runs before
+        // postProcess, so IDs/fields resolve). Positional docIndex preserves
+        // the total-order guarantee via unique positions.
+        keys[i] = {
+          score: item.score,
+          fieldWeight: 1.0,
+          isExactMatch: false,
+          matchedLength: 0,
+          id: item.id,
+          docIndex: i
+        };
+      }
+    }
+    const order = results.map((_, i) => i);
+    order.sort((ia, ib) => compareRanked(keys[ia] as RankableCandidate, keys[ib] as RankableCandidate, tieBreakers));
+    const sorted = order.map((i) => results[i] as DocumentSearchResultItem<TDoc>);
+    for (let i = 0; i < results.length; i++) {
+      results[i] = sorted[i] as DocumentSearchResultItem<TDoc>;
+    }
+  }
+
   private enrichHighlights(
     results: DocumentSearchResultItem<TDoc>[],
     query: string,
     mode: SearchMode,
-    options: DocumentSearchOptions<TDoc>
+    options: DocumentSearchOptions<TDoc>,
+    customTokenTerms?: Uint32Array[]
   ): void {
     const shouldHighlight = options.highlightOptions?.highlight ?? options.highlight ?? true;
     if (!shouldHighlight) return;
@@ -1473,13 +1618,15 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const queryTokens = normalizeText(query, this.folded).tokens;
     // v0.4 M4: thread token/prefix/typo options so highlight ranges track
     // the serving scorer (score-highlight symmetry across all modes).
+    // v0.4 M6: custom tokenizer terms replace the default split when supplied.
     const alignOpts = {
       mode,
       folded: this.folded,
       queryTokens,
       tokenMatch: options.tokenMatch,
       prefixMatch: options.prefixMatch,
-      typoTolerance: options.typoTolerance
+      typoTolerance: options.typoTolerance,
+      ...(customTokenTerms !== undefined ? { tokenTermsOverride: customTokenTerms } : {})
     };
 
     for (let i = 0; i < results.length; i++) {
@@ -2104,6 +2251,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     return this.filterFieldDefinitions.slice();
   }
 
+  /**
+   * v0.4 M6: index-level extension hooks (shallow copy; function references
+   * are shared with the index).
+   */
+  getExtensions(): SearchExtensionHooks<TDoc> | undefined {
+    return this.indexExtensions === undefined ? undefined : { ...this.indexExtensions };
+  }
+
   serialize(options?: SerializeDocumentIndexOptions): ArrayBuffer {
     if (this.isDestroyed) {
       throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
@@ -2170,8 +2325,17 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       candidateCapacity: options?.options?.candidateCapacity ?? snapshot.schema.candidateCapacity,
       initialCapacity: options?.options?.initialCapacity ?? snapshot.schema.initialCapacity,
       growthFactor: options?.options?.growthFactor ?? snapshot.schema.growthFactor,
-      filterFields: options?.options?.filterFields ?? (snapshot.schema.filterFields as any)
+      filterFields: options?.options?.filterFields ?? (snapshot.schema.filterFields as any),
+      extensions: options?.options?.extensions
     };
+
+    // v0.4 M6: fail-closed hook restore guard. Snapshots recording hookIds
+    // require matching handlers via `options.options.extensions`; closures
+    // are never serialized, only declarative IDs.
+    assertHooksSatisfied(
+      snapshot.schema.hookIds,
+      normalizeSearchExtensionHooks(mergedOptions.extensions)
+    );
 
     const index = new DocumentIndex<TDoc>(mergedOptions);
     await index.applySnapshotData(snapshot, options);
@@ -2245,6 +2409,16 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     snapshot: RestoredDocumentSnapshot<TDoc>,
     options?: RestoreDocumentIndexOptions<TDoc>
   ): Promise<void> {
+    // v0.4 M6: fail-closed hook restore guard for instance `restore()`.
+    // Restore-supplied handlers (if any) replace the live index hooks;
+    // otherwise the live hooks must satisfy the snapshot.
+    const restoreHooks = normalizeSearchExtensionHooks(options?.options?.extensions);
+    if (restoreHooks !== undefined) {
+      this.indexExtensions = restoreHooks;
+      (this.options as { extensions?: SearchExtensionHooks<TDoc> }).extensions = restoreHooks;
+    }
+    assertHooksSatisfied(snapshot.schema.hookIds, this.indexExtensions);
+
     this.configureFromSchema(snapshot.schema, options);
 
     if (this.unsubscribeDeviceLost) {
