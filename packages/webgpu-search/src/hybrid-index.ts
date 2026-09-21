@@ -20,7 +20,19 @@ import {
 import {
   clampLimit,
   throwIfAborted,
+  nowMs,
 } from './runtime-guards';
+import {
+  normalizeCostBudgetOptions,
+  throwIfBudgetAborted,
+  assertTimeBudget,
+  assertCandidateBudget,
+  isBroadQueryHeuristic,
+  isBroadSelectivity,
+  broadQueryRouteWarning,
+  broadSelectivityWarning,
+  candidateOverflowWarning,
+} from './diagnostics';
 import {
   FORMAT_VERSION,
   QUERY_TOKENS_MAX,
@@ -37,6 +49,7 @@ import type {
   FallbackReason,
   IndexOptions,
   IndexStats,
+  QueryDiagnostics,
   SearchOptions,
   SearchResponse,
   SearchResultItem,
@@ -304,7 +317,57 @@ export class SearchIndex {
     // Shared clamp: finite + floor + 1..8192, NaN/non-number -> 50.
     const clampedLimit = clampLimit(requestedLimit);
 
+    // v0.4 M7: fail-closed cost-budget + diagnostics validation up front so
+    // malformed budgets throw identically on GPU/CPU paths and empty corpora.
+    const budget = normalizeCostBudgetOptions(options.budget);
+    if (options.diagnostics !== undefined && typeof options.diagnostics !== 'boolean') {
+      throw new TypeError('[webgpu-search] options.diagnostics must be a boolean.');
+    }
+    const wantsDiagnostics = options.diagnostics === true;
+    const queryStartMs = nowMs();
+    const diagWarnings: string[] = [];
+    /**
+     * v0.4 M7: assemble response diagnostics (undefined unless requested).
+     * The string index has no columnar filters, so `filterSelectivity` is
+     * always 1.0 and `filteringMs` is always 0; `highlightMs` is 0 (no
+     * highlight enrichment on this path).
+     */
+    const buildDiagnostics = (
+      routedEngine: EngineType,
+      scoringMs: number,
+      hasOverflow: boolean
+    ): QueryDiagnostics | undefined => {
+      if (!wantsDiagnostics) return undefined;
+      const scanned = this.items.length;
+      const diag: QueryDiagnostics = {
+        scannedCandidates: scanned,
+        filterSelectivity: 1.0,
+        routedEngine,
+        hasOverflow,
+        timings: {
+          filteringMs: 0,
+          scoringMs,
+          highlightMs: 0,
+          totalMs: nowMs() - queryStartMs
+        }
+      };
+      if (diagWarnings.length > 0) diag.warnings = [...diagWarnings];
+      return diag;
+    };
+    /** v0.4 M7: post-hoc broad-query + overflow warnings (non-fatal). */
+    const pushPostHocWarnings = (totalMatches: number, hasOverflow: boolean, capacity: number): void => {
+      const scanned = this.items.length;
+      const selectivity = scanned > 0 ? totalMatches / scanned : 0;
+      if (isBroadSelectivity(selectivity, scanned)) {
+        diagWarnings.push(broadSelectivityWarning(selectivity, scanned));
+      }
+      if (hasOverflow) {
+        diagWarnings.push(candidateOverflowWarning(totalMatches, capacity));
+      }
+    };
+
     throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
 
     // Hoisted prefixLength check: fail-closed even on empty queries/corpora
     // (scorePrefixTokens throws per-record, which empty scans would skip).
@@ -318,13 +381,21 @@ export class SearchIndex {
     // results with query:'' on both paths. Lone-mark / VS / ZWJ /
     // tatweel-only inputs survive NFC+C+F as single tokens (pinned §8b), so
     // they are NOT empty here — they search normally echoing the original.
-    const noHits = (q: string): SearchResponse => ({
-      results: [], totalMatches: 0, query: q, mode, engine: 'cpu',
-      candidateCount: 0, hasOverflow: false,
-      timings: { queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null, readbackMs: 0, totalMs: 0, gpuDispatchMs: 0 },
-      profileId: this.profileId, scoringVersion: SCORING_VERSION, cpuAlgorithm,
-      fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
-    });
+    const noHits = (q: string): SearchResponse => {
+      // M7: trivial exits still honor caller aborts and time budgets.
+      throwIfAborted(signal);
+      throwIfBudgetAborted(budget);
+      assertTimeBudget(queryStartMs, budget);
+      const diag = buildDiagnostics('cpu', 0, false);
+      return {
+        results: [], totalMatches: 0, query: q, mode, engine: 'cpu',
+        candidateCount: 0, hasOverflow: false,
+        timings: { queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null, readbackMs: 0, totalMs: 0, gpuDispatchMs: 0 },
+        profileId: this.profileId, scoringVersion: SCORING_VERSION, cpuAlgorithm,
+        fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
+        ...(diag ? { diagnostics: diag } : {})
+      };
+    };
     if (normalizedQuery.isEmpty) {
       return noHits('');
     }
@@ -333,6 +404,17 @@ export class SearchIndex {
     if (this.items.length === 0) {
       return noHits(query);
     }
+
+    // v0.4 M7: candidate ceiling + broad-query pre-dispatch guard. Short
+    // queries over massive corpora route to the CPU streaming scan to avoid
+    // GPU buffer saturation and driver timeouts (TDR).
+    assertCandidateBudget(this.items.length, budget);
+    let broadQueryCpuRoute = false;
+    if (isBroadQueryHeuristic(normalizedQuery.tokens.length, this.items.length)) {
+      broadQueryCpuRoute = true;
+      diagWarnings.push(broadQueryRouteWarning(this.items.length, normalizedQuery.tokens.length));
+    }
+    assertTimeBudget(queryStartMs, budget);
 
     // 1. WebGPU execution path (M3 parity): exact fuzzy/substring queries
     // (queryTokenCount <= 128, enforced above) route to WebGPU when
@@ -346,6 +428,7 @@ export class SearchIndex {
       (mode === 'fuzzy' || mode === 'substring') && !typo.enabled;
     const useGpu: boolean =
       !forceCpu &&
+      !broadQueryCpuRoute &&
       isGpuSupportedMode &&
       cpuAlgorithm !== 'ufuzzy' &&
       this.engineType === 'webgpu' &&
@@ -369,6 +452,12 @@ export class SearchIndex {
           text: this.items[item.index] ?? ''
         }));
 
+        // M7: deadline enforcement + post-hoc warnings before returning.
+        throwIfBudgetAborted(budget);
+        assertTimeBudget(queryStartMs, budget);
+        pushPostHocWarnings(gpuResult.totalMatches, gpuResult.hasOverflow, RESULT_LIMIT_MAX);
+        const gpuDiag = buildDiagnostics('webgpu', gpuResult.timings.totalMs, gpuResult.hasOverflow);
+
         return {
           query: gpuResult.query,
           mode: gpuResult.mode,
@@ -380,7 +469,8 @@ export class SearchIndex {
           timings: gpuResult.timings,
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
-          cpuAlgorithm
+          cpuAlgorithm,
+          ...(gpuDiag ? { diagnostics: gpuDiag } : {})
         };
       } catch (err: any) {
         if (err.name === 'AbortError') {
@@ -409,6 +499,8 @@ export class SearchIndex {
     // Default 'parity' serves the shared-pipeline reference scorer; GPU
     // failures also land here with identical parity semantics.
     throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
+    assertTimeBudget(queryStartMs, budget);
 
     if (cpuAlgorithm === 'ufuzzy') {
       let legacyResult: {
@@ -431,6 +523,12 @@ export class SearchIndex {
         totalMs: legacyResult.durationMs,
         gpuDispatchMs: 0
       };
+      // M7: deadline enforcement + post-hoc warnings before returning.
+      throwIfBudgetAborted(budget);
+      assertTimeBudget(queryStartMs, budget);
+      const legacyHasOverflow = legacyResult.totalMatches > RESULT_LIMIT_MAX;
+      pushPostHocWarnings(legacyResult.totalMatches, legacyHasOverflow, RESULT_LIMIT_MAX);
+      const legacyDiag = buildDiagnostics('cpu', legacyResult.durationMs, legacyHasOverflow);
       return {
         query: legacyResult.query,
         mode,
@@ -443,7 +541,8 @@ export class SearchIndex {
         profileId: this.profileId,
         scoringVersion: SCORING_VERSION,
         cpuAlgorithm,
-        fallbackReason: 'cpu-algorithm-requested'
+        fallbackReason: 'cpu-algorithm-requested',
+        ...(legacyDiag ? { diagnostics: legacyDiag } : {})
       };
     }
 
@@ -469,6 +568,8 @@ export class SearchIndex {
     );
 
     throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
+    assertTimeBudget(queryStartMs, budget);
 
     const timings: SearchTimings = {
       queryUploadMs: 0,
@@ -489,6 +590,14 @@ export class SearchIndex {
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
     }
+    // M7: broad-query CPU routing is a routing decision (like the parity
+    // note above for exhausted GPU), not a scorer request — surfaced in
+    // diagnostics.warnings instead of fallbackReason.
+
+    // M7: deadline enforcement + post-hoc warnings before returning.
+    const parityHasOverflow = parityResult.totalMatches > RESULT_LIMIT_MAX;
+    pushPostHocWarnings(parityResult.totalMatches, parityHasOverflow, RESULT_LIMIT_MAX);
+    const parityDiag = buildDiagnostics('cpu', parityResult.durationMs, parityHasOverflow);
 
     return {
       query,
@@ -502,7 +611,8 @@ export class SearchIndex {
       profileId: this.profileId,
       scoringVersion: SCORING_VERSION,
       cpuAlgorithm,
-      fallbackReason: effectiveFallbackReason
+      fallbackReason: effectiveFallbackReason,
+      ...(parityDiag ? { diagnostics: parityDiag } : {})
     };
   }
 

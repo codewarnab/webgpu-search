@@ -22,6 +22,7 @@
     "test:m8": "bun scripts/test-m8-proof-apps.ts",
     "test:filter": "bun scripts/test-m2-filter.ts",
     "test:facets": "bun scripts/test-m3-facets.ts",
+    "test:diagnostics": "bun test packages/webgpu-search/test/diagnostics.test.ts",
     "test:search-modes": "bun test packages/webgpu-search/test/search-modes.test.ts",
     "test:parity": "bun scripts/test-m4-parity.ts",
     "test:preprocess": "bun scripts/test-m2-preprocess.ts",

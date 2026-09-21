@@ -47,6 +47,17 @@ export interface SearchOptions {
    * are exact-only (see webgpu-engine.ts).
    */
   typoTolerance?: TypoToleranceOptions | boolean;
+  /**
+   * v0.4 M7: cost budget controls and deadlines. Validated fail-closed via
+   * `normalizeCostBudgetOptions`; over-budget execution throws
+   * `CostBudgetExceededError`. `abortSignal` aborts with `AbortError`.
+   */
+  budget?: CostBudgetOptions;
+  /**
+   * v0.4 M7: whether to populate detailed `diagnostics` on the response.
+   * Must be a boolean when provided; defaults to false (no telemetry).
+   */
+  diagnostics?: boolean;
 }
 
 export interface SearchResultItem {
@@ -77,6 +88,8 @@ export interface SearchResponse {
   scoringVersion: typeof SCORING_VERSION; // v0.2: scoring contract version
   cpuAlgorithm: CpuAlgorithm;     // v0.2: requested CPU scorer (M2 serves parity)
   fallbackReason?: FallbackReason; // Reason for CPU execution path if fallback occurred
+  /** v0.4 M7: detailed telemetry and diagnostic metrics (when requested via options.diagnostics) */
+  diagnostics?: QueryDiagnostics;
 }
 
 export interface IndexOptions {
