@@ -87,6 +87,25 @@ export {
   type NormalizedFacet,
 } from './facets/facet-engine';
 
+// v0.4 Deterministic ranking & autocomplete primitives (M5)
+export {
+  DEFAULT_TIE_BREAKERS,
+  compareIdsAsc,
+  compareRanked,
+  isExactTokenMatch,
+  normalizeTieBreakers,
+  sortRanked,
+  type RankableCandidate,
+} from './ranking';
+export {
+  SUGGEST_DEFAULT_LIMIT,
+  SUGGEST_DEFAULT_MODE,
+  SUGGEST_MAX_FUZZY_DISTANCE,
+  normalizeSuggestOptions,
+  type NormalizedSuggestOptions,
+  type SuggestCandidateKeys,
+} from './suggest';
+
 // v0.2 shared preprocessing + CPU reference (M2)
 export {
   normalizeText,
@@ -148,6 +167,7 @@ export {
   type MultiFieldHit,
   type MultiFieldMatch,
   type MultiFieldCpuReferenceOutput,
+  type MultiFieldRankingOptions,
   type FieldScoreDefinition,
 } from './cpu-reference';
 export {

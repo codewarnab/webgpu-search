@@ -1,5 +1,5 @@
 /**
- * M2/M3 bundle-size gate: delta <=30 KB gzip over baseline + 64 KB total.
+ * M2/M3 bundle-size gate: delta <=30 KB gzip over baseline + 72 KB total.
  *
  * Baseline (M3 re-baselined to post-M2 working tree, tsup minify:false):
  *   dist/index.js 70,455 B raw / 18,343 B gzip (deterministic gzip, level 6,
@@ -75,6 +75,16 @@
  * Total bumped 64 KB -> 68 KB with this documented rationale.
  * Budget: 68 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
+ * Issue #10 M5 (deterministic ranking + autocomplete) ranking/suggest expansion:
+ * Adds ranking.ts (five-tier tie-breaker comparator + validation) and
+ * suggest.ts (option normalization), deterministic rank keys on all three
+ * DocumentIndex paths (GPU readback, legacy ufuzzy, parity CPU via new
+ * rankingOptions/docIds params), the suggest() enumeration primitive, and
+ * inline search({ suggest }) enrichment (+~2 KB gzip, delta still within
+ * the 30 KB cap).
+ * Total bumped 68 KB -> 72 KB with this documented rationale.
+ * Budget: 72 KB gzip total per file (dist/index.js + dist/index.cjs).
+ *
  * Fail-closed: missing dist or dist older than src/fold-table.ts fails
  * (a size gate that passes when there is nothing to measure is decoration).
  *
@@ -87,7 +97,7 @@ import { stat, readFile } from 'node:fs/promises';
 const BASELINE_RAW = 234907;
 const BASELINE_GZIP = 49246;
 const DELTA_CAP_GZIP = 30 * 1024;
-const TOTAL_BUDGET_GZIP = 68 * 1024;
+const TOTAL_BUDGET_GZIP = 72 * 1024;
 
 
 function gzipDeterministic(buf: Uint8Array): number {
