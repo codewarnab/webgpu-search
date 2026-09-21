@@ -90,6 +90,9 @@ jobs:
       - name: Run M3 Facet Aggregation Tests
         run: bun run test:facets
 
+      - name: Run M4 Token/Prefix/Typo Search-Mode Tests
+        run: bun run test:search-modes
+
       - name: Setup Chrome (browser regression gate)
         id: setup-chrome
         uses: browser-actions/setup-chrome@v1

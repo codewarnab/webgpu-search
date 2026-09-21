@@ -200,12 +200,8 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   facets?: Record<string, FacetRequest> | FacetRequest[];
   /** Faceting mode: force exact CPU candidate evaluation even if GPU buffer overflowed. Ignored unless `facets` is requested. */
   faceting?: 'auto' | 'force-exact';
-  /** Typo tolerance configuration */
-  typoTolerance?: TypoToleranceOptions | boolean;
-  /** Token mode matching options */
-  tokenMatch?: TokenMatchOptions;
-  /** Prefix mode matching options */
-  prefixMatch?: PrefixSearchOptions;
+  // Note: tokenMatch/prefixMatch/typoTolerance are inherited from
+  // SearchOptions (single source of truth — do not redeclare; drift risk).
   /** Deterministic ranking and tie-breaking options */
   ranking?: DeterministicRankingOptions;
   /** Per-query search extension overrides */
@@ -556,11 +552,13 @@ export type FacetResult = TermsFacetResult | RangeFacetResult;
 
 // 3.3 Expanded Search Modes & Typo Tolerance
 export interface TypoToleranceOptions {
+  /** Default: false. Note: maxDistance alone does NOT enable — must set enabled:true. */
   enabled?: boolean;                // Default: false
   maxDistance?: 1 | 2;              // Default: 1
   minWordLengthForOneTypo?: number; // Default: 4
   minWordLengthForTwoTypos?: number;// Default: 8
-  prefixExactLength?: number;       // Default: 1 (first N chars must match exactly)
+  /** Default: 1 (first N chars must match exactly; leading transpositions never match). */
+  prefixExactLength?: number;
 }
 
 export interface TokenMatchOptions {
@@ -569,7 +567,18 @@ export interface TokenMatchOptions {
 }
 
 export interface PrefixSearchOptions {
+  /**
+   * Leading query code points used for matching (undefined = full query).
+   * Over-length (prefixLength > query.length) throws RangeError fail-closed
+   * on every path including empty corpora — autocomplete callers should
+   * clamp or catch and treat as no-match.
+   */
   prefixLength?: number;
+  /**
+   * Must agree with the query caseSensitive flag when explicitly set;
+   * when omitted the index derives polarity from caseSensitive (default
+   * follows the query flag).
+   */
   exactCase?: boolean;
 }
 

@@ -503,9 +503,9 @@ async function main(): Promise<void> {
     try {
       await eng.search('alpha', { mode: 'regex' as unknown as 'substring' });
     } catch (e) {
-      md = e instanceof TypeError;
+      md = e instanceof IncompatibleOptionError;
     }
-    ok('(j) invalid mode TypeError', md);
+    ok('(j) invalid mode IncompatibleOptionError', md);
     // Index-level mismatch still ProfileMismatchError.
     const idx = await SearchIndex.create(['alpha'], { preferGpu: false });
     let pm = false;

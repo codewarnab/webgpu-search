@@ -11,8 +11,14 @@
  * Integer scoring (i32 semantics, single-term reduction invariant):
  *   score = Σ(1000 - start_i·10) - (strLen - Σlen_i) - proximity·2 - typoPenalty
  * where proximity = max(0, maxEnd - minStart - Σlen_i) over matched terms
+ * (span ends use aligned typo span lengths, not raw query-term lengths)
  * and typoPenalty = Σ(distance_i · 100). A single exact term reduces to the
  * substring formula `1000 - start·10 - (strLen - termLen)`.
+ *
+ * Duplicate query terms (e.g. "hello hello") match the same span twice and
+ * double-count in the score while highlights merge to one range —
+ * score↔highlight cardinality differs by design; callers wanting set
+ * semantics should dedupe terms before scoring.
  *
  * Portable: no DOM refs. Operates on post-fold u32 token streams.
  */
@@ -170,7 +176,10 @@ export function scoreTokenTokens(
   for (let i = 0; i < terms.length; i++) {
     const term = terms[i];
     const termLen: number = term.length;
-    if (termLen === 0 || termLen > strLen + 2) continue;
+    // Upper-bound skip uses the configured max (not a hardcoded +2) so a
+    // future maxDistance bump cannot silently miss matches.
+    const maxAllowed: number = typo.enabled ? typo.maxDistance : 0;
+    if (termLen === 0 || termLen > strLen + maxAllowed) continue;
     const allowed: 0 | 1 | 2 = allowedDistanceForTerm(termLen, typo);
     if (allowed === 0) {
       const start: number = earliestSubstring(record, term);
@@ -202,10 +211,13 @@ export function scoreTokenTokens(
     const s: number = matchStarts[i] as number;
     if (s < 0) continue;
     const len: number = terms[i].length;
+    const alignedLen: number = matchLengths[i] as number;
     sumBase = (sumBase + 1000 - Math.imul(s, 10)) | 0;
     sumLens = (sumLens + len) | 0;
     typoPenalty = (typoPenalty + Math.imul(distances[i] as number, TYPO_DISTANCE_PENALTY)) | 0;
-    const end: number = (s + len) | 0;
+    // Proximity spans the aligned record windows (typo indel windows differ
+    // from raw term lengths by up to `allowed`), matching highlight spans.
+    const end: number = (s + (alignedLen > 0 ? alignedLen : len)) | 0;
     if (minStart < 0 || s < minStart) minStart = s;
     if (maxEnd < 0 || end > maxEnd) maxEnd = end;
   }

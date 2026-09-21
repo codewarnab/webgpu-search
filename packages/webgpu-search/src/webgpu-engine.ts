@@ -625,7 +625,14 @@ export class WebGPUEngine {
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
     const rawMode = options.mode ?? 'fuzzy';
     if (rawMode !== 'fuzzy' && rawMode !== 'substring' && rawMode !== 'token' && rawMode !== 'prefix') {
-      throw new TypeError(`[webgpu-search] search mode must be 'fuzzy'|'substring'|'token'|'prefix', got ${String(rawMode)}.`);
+      // Unified with hybrid/document/cpu-reference: unknown modes throw
+      // IncompatibleOptionError('mode'). Note: direct-engine callers that
+      // previously caught TypeError for mode:'token' now see
+      // IncompatibleOptionError (v0.4 breaking detail, documented).
+      throw new IncompatibleOptionError(
+        'mode',
+        `Unknown search mode '${String(rawMode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
+      );
     }
     // v0.4 M4: WGSL shaders are exact-only ('fuzzy'/'substring'). Token and
     // prefix modes route to the CPU reference engine — the hybrid/document

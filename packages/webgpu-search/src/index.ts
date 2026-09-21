@@ -108,6 +108,7 @@ export {
 // v0.4 Token & prefix search modes with bounded typo tolerance (M4)
 export {
   damerauLevenshteinBounded,
+  damerauLevenshteinBoundedRange,
   findBestTypoWindow,
   normalizeTypoTolerance,
   allowedDistanceForTerm,
@@ -129,6 +130,7 @@ export {
 } from './modes/token-search';
 export {
   normalizePrefixOptions,
+  assertPrefixLengthForQuery,
   scorePrefixTokens,
   type NormalizedPrefixOptions,
   type PrefixMatchResult,

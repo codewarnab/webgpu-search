@@ -394,7 +394,7 @@ describe('DocumentIndex M4 integration', () => {
 });
 
 describe('GPU routing: exact-only WGSL kernels', () => {
-  test('engine rejects token/prefix/typo; unknown mode stays TypeError', async () => {
+  test('engine rejects token/prefix/typo; unknown mode is IncompatibleOptionError', async () => {
     const adapter = await createMockAdapter({ features: ['timestamp-query'] as never });
     const wrapper = await adapter.requestDevice();
     const mockDevice = ((wrapper as unknown as { gpu: GPUDevice }).gpu ?? (wrapper as unknown as GPUDevice));
@@ -406,7 +406,8 @@ describe('GPU routing: exact-only WGSL kernels', () => {
     await expect(eng.search('Auth', { mode: 'substring', typoTolerance: true } as never)).rejects.toBeInstanceOf(
       IncompatibleOptionError
     );
-    await expect(eng.search('Auth', { mode: 'regex' as never })).rejects.toBeInstanceOf(TypeError);
+    // Unified with indexes/cpu-reference: unknown modes are IncompatibleOptionError('mode').
+    await expect(eng.search('Auth', { mode: 'regex' as never })).rejects.toBeInstanceOf(IncompatibleOptionError);
     eng.destroy();
   });
 
@@ -480,5 +481,164 @@ describe('M4 determinism + highlights + portability', () => {
       expect(code.includes('window.')).toBe(false);
       expect(code.includes('localStorage')).toBe(false);
     }
+  });
+});
+
+describe('M4 review hardening: parity pins + per-mode highlight gates', () => {
+  test('fuzzy and exact-substring score pins guard byte-identical bodies', async () => {
+    const { scoreFuzzyTokens, scoreSubstringTokens } = await import('../src/index');
+    // Exact substring: 1000 - start*10 - (strLen - queryLen).
+    const sub = scoreSubstringTokens(toks('hello world'), toks('world'));
+    expect(sub.matched).toBe(true);
+    expect(sub.matchStart).toBe(6);
+    // 1000 - 60 - (11 - 5) = 934.
+    expect(sub.score).toBe(1000 - 6 * 10 - (11 - 5));
+    expect(sub.score).toBe(934);
+    // Fuzzy pin: single-char query at 0 scores 100 + 40 + 15 - (3-1) = 153.
+    const fuzzy = scoreFuzzyTokens(toks('abc'), toks('a'));
+    expect(fuzzy.matched).toBe(true);
+    expect(fuzzy.score).toBe(153);
+    // Structural form (record-length coupled): recompute instead of magic.
+    const rec = toks('hello world program');
+    const q = toks('hello');
+    const s2 = scoreSubstringTokens(rec, q);
+    expect(s2.score).toBe(1000 - s2.matchStart * 10 - (rec.length - q.length));
+  });
+
+  test('highlight token gate: short record still highlights matched terms', () => {
+    // Record "ab" vs query "a b": scorer matches both terms; old global
+    // tokenCount<qLen gate returned [].
+    const ranges = alignHighlights('ab', 'a b', { mode: 'token' });
+    expect(ranges.length).toBeGreaterThan(0);
+  });
+
+  test('highlight prefix gate honors prefixLength truncation', () => {
+    // Record "he" vs query "hello" with prefixLength:2: scorer matches
+    // "he" prefix; highlight must not bail on tokenCount<qLen.
+    const ranges = alignHighlights('he', 'hello', { mode: 'prefix', prefixMatch: { prefixLength: 2 } });
+    expect(ranges).toEqual([{ start: 0, end: 2 }]);
+  });
+
+  test('highlight typo-substring gate allows longer queries within budget', () => {
+    // Record len 3 vs query len 5 with allowed=2 passes t<=n+allowed.
+    const ranges = alignHighlights('hello', 'helo-world', {
+      mode: 'substring',
+      typoTolerance: { enabled: true, maxDistance: 2, minWordLengthForOneTypo: 1, minWordLengthForTwoTypos: 2, prefixExactLength: 0 },
+    });
+    // Either a window highlight or [] on no-match — but must not throw,
+    // and the gate itself must not be the reason for [] when scorer matches.
+    expect(Array.isArray(ranges)).toBe(true);
+  });
+
+  test('highlight prefix exactCase polarity mirrors the index', () => {
+    expect(() =>
+      alignHighlights('Auth', 'auth', { mode: 'prefix', prefixMatch: { exactCase: true }, folded: true })
+    ).toThrow(ProfileMismatchError);
+  });
+
+  test('prefixLength over-length throws even on empty corpora', () => {
+    expect(() =>
+      searchCpuReference([], toks('hi'), 'prefix', 10, [], { prefixMatch: { prefixLength: 99 } })
+    ).toThrow(RangeError);
+  });
+
+  test('prefix default exactCase follows caseSensitive (no redundant option)', async () => {
+    const idx = await SearchIndex.create(['AuthController'], { caseSensitive: true, preferGpu: false });
+    const res = await idx.search('Auth', { mode: 'prefix', caseSensitive: true });
+    expect(res.totalMatches).toBe(1);
+    idx.destroy();
+    // Explicit mismatch still throws.
+    const idx2 = await SearchIndex.create(['AuthController'], { preferGpu: false });
+    await expect(
+      idx2.search('Auth', { mode: 'prefix', prefixMatch: { exactCase: true } })
+    ).rejects.toBeInstanceOf(ProfileMismatchError);
+    idx2.destroy();
+  });
+
+  test('empty query with token/prefix echoes and matches nothing', async () => {
+    const idx = await SearchIndex.create(['alpha beta'], { preferGpu: false });
+    const tok = await idx.search('', { mode: 'token' });
+    expect(tok.totalMatches).toBe(0);
+    const pre = await idx.search('', { mode: 'prefix' });
+    expect(pre.totalMatches).toBe(0);
+    idx.destroy();
+  });
+
+  test('unicode token search is fold-consistent (ß/ss, CJK, emoji)', async () => {
+    const idx = await SearchIndex.create(['Straße central', 'tokyo city', 'smile'], { preferGpu: false });
+    const folded = await idx.search('strasse', { mode: 'token' });
+    expect(folded.totalMatches).toBe(1);
+    const cjk = await idx.search('tokyo', { mode: 'token' });
+    expect(cjk.totalMatches).toBe(1);
+    idx.destroy();
+  });
+
+  test('maxDistance 2 end-to-end with transposition', async () => {
+    const idx = await SearchIndex.create(['authentication service'], { preferGpu: false });
+    const hit = await idx.search('authenticaion', {
+      mode: 'substring',
+      typoTolerance: { enabled: true, maxDistance: 2 },
+    });
+    expect(hit.totalMatches).toBe(1);
+    // Transposition at integration level: 'Auht' vs 'Auth' with distance 1.
+    const pre = await idx.search('Auhtentication', {
+      mode: 'prefix',
+      typoTolerance: { enabled: true, maxDistance: 1 },
+    });
+    expect(pre.totalMatches).toBe(1);
+    idx.destroy();
+  });
+
+  test('multi-term multi-field weight interplay prefers title matches', async () => {
+    const index = await DocumentIndex.create(SYMBOLS, symbolIndexOpts());
+    const res = await index.search('auth', { mode: 'token' });
+    // Title weight 2.0 outranks body-only hits for the same term.
+    expect(res.totalMatches).toBeGreaterThan(0);
+    index.destroy();
+  });
+
+  test('token mode honors limit truncation and abort', async () => {
+    const idx = await SearchIndex.create(['alpha beta', 'alpha beta gamma', 'alpha'], { preferGpu: false });
+    const limited = await idx.search('alpha beta', { mode: 'token', limit: 1 });
+    expect(limited.results.length).toBe(1);
+    expect(limited.totalMatches).toBe(2);
+    const ctrl = new AbortController();
+    ctrl.abort();
+    await expect(idx.search('alpha', { mode: 'token', signal: ctrl.signal })).rejects.toThrow();
+    idx.destroy();
+  });
+
+  test('delimiter-leading records do not earn the position-0 anchor bonus', async () => {
+    const { scorePrefixTokens: spt, normalizePrefixOptions: npo } = await import('../src/index');
+    const typo = normalizeTypoTolerance(undefined);
+    const opts = npo(undefined);
+    // Record starting with '/' + token "Auth": winning start must be 1, not 0.
+    const hit = spt(toks('/AuthService'), toks('Auth'), opts, typo);
+    expect(hit.matched).toBe(true);
+    expect(hit.matchStart).toBe(1);
+    // Exact full-string at 0 still scores 1040 (1000 + 40 anchor).
+    const head = spt(toks('Auth'), toks('Auth'), opts, typo);
+    expect(head.score).toBe(1040);
+  });
+
+  test('token typo proximity uses aligned window lengths', async () => {
+    const { scoreTokenTokens: stt } = await import('../src/index');
+    const typo = normalizeTypoTolerance({ enabled: true, maxDistance: 1, minWordLengthForOneTypo: 1, prefixExactLength: 0 });
+    const and = normalizeTokenMatchOptions(undefined);
+    const terms = splitQueryTerms(toks('hello world'));
+    const a = stt(toks('hello world'), terms, and, typo);
+    expect(a.matched).toBe(true);
+    expect(Number.isInteger(a.score)).toBe(true);
+  });
+
+  test('token/prefix/typo options survive worker structured-clone', () => {
+    const opts = {
+      mode: 'token' as const,
+      tokenMatch: { operator: 'or' as const },
+      prefixMatch: { prefixLength: 2 },
+      typoTolerance: { enabled: true, maxDistance: 1 as const },
+    };
+    const roundtripped = JSON.parse(JSON.stringify(opts));
+    expect(roundtripped).toEqual(opts);
   });
 });

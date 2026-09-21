@@ -19,7 +19,7 @@
 import type { PrefixSearchOptions } from '../types';
 import {
   allowedDistanceForTerm,
-  damerauLevenshteinBounded,
+  damerauLevenshteinBoundedRange,
   TYPO_DISTANCE_PENALTY,
   type NormalizedTypoOptions
 } from './typo-distance';
@@ -34,8 +34,12 @@ export interface NormalizedPrefixOptions {
 
 /**
  * Validate prefix options (fail-closed). `prefixLength` must be an integer
- * >= 1; the range-vs-query check happens per query. `exactCase` must be a
- * boolean; callers enforce index-polarity agreement (see cpu-reference.ts).
+ * >= 1; the range-vs-query check happens per query via
+ * `assertPrefixLengthForQuery` (fail-closed even on empty corpora).
+ * `exactCase` must be a boolean; callers enforce index-polarity agreement
+ * (see cpu-reference.ts). Note: a fixed `prefixLength` with a shorter
+ * autocomplete keystroke throws `RangeError` (fail-closed) — autocomplete
+ * callers should clamp or catch and treat as no-match.
  */
 export function normalizePrefixOptions(
   raw: PrefixSearchOptions | undefined
@@ -71,15 +75,41 @@ export interface PrefixMatchResult {
   windowLength: number;
 }
 
-/** Record offsets where tokens start (0 + after-delimiter positions). */
+/** Record offsets where tokens start (after-delimiter positions + 0 when non-delimiter). */
 function tokenStarts(record: Uint32Array | readonly number[]): number[] {
-  const starts: number[] = [0];
+  if (record.length === 0) return [];
+  const starts: number[] = [];
+  // Offset 0 is a token start only when the record does not lead with a
+  // delimiter; otherwise the first real start comes after the delimiters
+  // (prevents a delimiter alignment from earning the +40 anchor bonus).
+  if (!isTokenDelimiter(record[0] as number)) starts.push(0);
   for (let i = 1; i < record.length; i++) {
     if (isTokenDelimiter(record[i - 1] as number) && !isTokenDelimiter(record[i] as number)) {
-      starts[starts.length] = i;
+      starts.push(i);
     }
   }
   return starts;
+}
+
+/**
+ * Fail-closed `prefixLength` vs query check, hoisted before scan loops so
+ * empty corpora throw identically to non-empty ones. Direct
+ * `scorePrefixTokens` callers also hit the per-record check; index and
+ * CPU-reference paths must call this upfront (before early noHits exits).
+ */
+export function assertPrefixLengthForQuery(
+  prefixOpts: NormalizedPrefixOptions,
+  queryLen: number
+): number {
+  if (prefixOpts.prefixLength !== undefined) {
+    if ((prefixOpts.prefixLength as number) > queryLen) {
+      throw new RangeError(
+        `[webgpu-search] prefixMatch.prefixLength (${prefixOpts.prefixLength}) exceeds query length (${queryLen}).`
+      );
+    }
+    return prefixOpts.prefixLength as number;
+  }
+  return queryLen;
 }
 
 /**
@@ -97,15 +127,7 @@ export function scorePrefixTokens(
   const strLen: number = record.length;
   if (strLen === 0 || query.length === 0) return noMatch;
 
-  let effLen: number = query.length;
-  if (prefixOpts.prefixLength !== undefined) {
-    if ((prefixOpts.prefixLength as number) > query.length) {
-      throw new RangeError(
-        `[webgpu-search] prefixMatch.prefixLength (${prefixOpts.prefixLength}) exceeds query length (${query.length}).`
-      );
-    }
-    effLen = prefixOpts.prefixLength as number;
-  }
+  const effLen: number = assertPrefixLengthForQuery(prefixOpts, query.length);
 
   const allowed: 0 | 1 | 2 = allowedDistanceForTerm(effLen, typo);
   const starts: number[] = tokenStarts(record);
@@ -151,6 +173,8 @@ export function scorePrefixTokens(
       if (!gateOk) continue;
       for (let w = minWin; w <= maxWin; w++) {
         if (st + w > strLen) break;
+        // Windows shorter than the prefix-exact gate cannot satisfy it.
+        if (w < gateLen) continue;
         const dist: number = prefixWindowDistance(record, st, w, query, effLen, bestDist - 1);
         if (dist < bestDist) {
           bestDist = dist;
@@ -182,10 +206,6 @@ function prefixWindowDistance(
 ): number {
   const lenDiff: number = winLen > effLen ? winLen - effLen : effLen - winLen;
   if (lenDiff > maxDist) return maxDist + 1;
-  // Build tiny head views (effLen <= 128 by the query-length gate).
-  const a: number[] = new Array<number>(winLen);
-  for (let i = 0; i < winLen; i++) a[i] = record[st + i] as number;
-  const b: number[] = new Array<number>(effLen);
-  for (let j = 0; j < effLen; j++) b[j] = query[j] as number;
-  return damerauLevenshteinBounded(a, b, maxDist);
+  // Sliceless offset comparison via shared scratch (no per-span copies).
+  return damerauLevenshteinBoundedRange(record, st, winLen, query, 0, effLen, maxDist);
 }

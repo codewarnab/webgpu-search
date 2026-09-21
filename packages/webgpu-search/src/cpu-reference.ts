@@ -32,6 +32,7 @@ import {
 } from './modes/token-search';
 import {
   normalizePrefixOptions,
+  assertPrefixLengthForQuery,
   scorePrefixTokens,
   type NormalizedPrefixOptions
 } from './modes/prefix-search';
@@ -245,6 +246,13 @@ export function searchCpuReference(
   // Fail-closed option validation before scanning (invalid token/prefix/
   // typo shapes throw even when the corpus is empty).
   const opts: NormalizedModeOptions = normalizeModeOptions(modeOptions);
+  // Hoisted prefixLength-vs-query check so empty corpora throw identically
+  // to non-empty ones (scorePrefixTokens also throws per-record).
+  // Skipped for empty queries: the scorer returns noMatch before the range
+  // check, so empty queries echo noHits instead of throwing.
+  if (mode === 'prefix' && queryTokens.length > 0) {
+    assertPrefixLengthForQuery(opts.prefixOpts, queryTokens.length);
+  }
   // 'fuzzy' is inherently typo-tolerant via subsequence matching; typo
   // options are validated but do not alter fuzzy scoring (documented).
   const queryTerms: Uint32Array[] | null =
@@ -353,6 +361,9 @@ export function searchMultiFieldCpuReference(
     );
   }
   const opts: NormalizedModeOptions = normalizeModeOptions(modeOptions);
+  if (mode === 'prefix' && queryTokens.length > 0) {
+    assertPrefixLengthForQuery(opts.prefixOpts, queryTokens.length);
+  }
   const queryTerms: Uint32Array[] | null =
     mode === 'token' ? splitQueryTerms(queryTokens) : null;
   if (queryTokens.length === 0 || docCount === 0 || rowTokens.length === 0 ||

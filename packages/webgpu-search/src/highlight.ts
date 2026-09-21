@@ -2,10 +2,10 @@ import type { HighlightRange, PrefixSearchOptions, SearchMode, TokenMatchOptions
 import { toWellFormedSafe, normalizeText } from './unicode-preprocess';
 import { foldCodePoint } from './fold-table';
 import { scoreSubstringTokens, scoreSubstringTypoTokens } from './cpu-reference';
-import { normalizeTypoTolerance } from './modes/typo-distance';
+import { normalizeTypoTolerance, allowedDistanceForTerm } from './modes/typo-distance';
 import { normalizeTokenMatchOptions, splitQueryTerms, scoreTokenTokens } from './modes/token-search';
-import { normalizePrefixOptions, scorePrefixTokens } from './modes/prefix-search';
-import { IncompatibleOptionError } from './text-profile';
+import { normalizePrefixOptions, assertPrefixLengthForQuery, scorePrefixTokens } from './modes/prefix-search';
+import { IncompatibleOptionError, ProfileMismatchError } from './text-profile';
 
 export interface SourceMappedText {
   /** Post-fold NFC scalar stream (u32 code points). */
@@ -362,9 +362,42 @@ export function alignHighlights(
 
   const queryTokens = options.queryTokens ?? normalizeText(query, folded).tokens;
   const qLen = queryTokens.length;
-  if (qLen === 0 || sourceMap.tokenCount < qLen) return [];
+  if (qLen === 0) return [];
 
   const mode = options.mode ?? 'fuzzy';
+
+  // Per-mode length gates (score-highlight symmetry): the old global
+  // `tokenCount < qLen` gate broke token (multi-term), prefix
+  // (`prefixLength` truncation), and typo-substring
+  // (`qLen <= tokenCount + allowed`) queries.
+  if (mode === 'token') {
+    // No length gate: per-term checks in scoreTokenTokens suffice.
+  } else if (mode === 'prefix') {
+    const prefixOpts = normalizePrefixOptions(options.prefixMatch);
+    // Fail-closed parity with the scorer (throws on over-length).
+    const effLen: number = assertPrefixLengthForQuery(prefixOpts, qLen);
+    if (sourceMap.tokenCount < effLen) {
+      const typoEarly = normalizeTypoTolerance(options.typoTolerance);
+      const allowedEarly = allowedDistanceForTerm(effLen, typoEarly);
+      const minWin: number = effLen - allowedEarly >= 1 ? effLen - allowedEarly : 1;
+      if (sourceMap.tokenCount < minWin) return [];
+    }
+  } else if (mode === 'substring') {
+    const typoGate = normalizeTypoTolerance(options.typoTolerance);
+    if (typoGate.enabled) {
+      const allowedGate = allowedDistanceForTerm(qLen, typoGate);
+      if (allowedGate === 0) {
+        if (sourceMap.tokenCount < qLen) return [];
+      } else if (qLen > sourceMap.tokenCount + allowedGate) {
+        return [];
+      }
+    } else if (sourceMap.tokenCount < qLen) {
+      return [];
+    }
+  } else if (sourceMap.tokenCount < qLen) {
+    // Fuzzy (and unknown modes handled below): subsequence needs room.
+    return [];
+  }
 
   /** Map a post-fold token span to one UTF-16 range (cluster-guarded). */
   const spanToRange = (tokenStart: number, tokenLength: number): HighlightRange | null => {
@@ -395,6 +428,11 @@ export function alignHighlights(
   if (mode === 'prefix') {
     // Anchored prefix highlight: the winning token-start span.
     const prefixOpts = normalizePrefixOptions(options.prefixMatch);
+    // Mirror index polarity enforcement (document-index/hybrid-index):
+    // prefixMatch.exactCase must agree with the folded mode.
+    if (prefixOpts.exactCase !== !folded) {
+      throw new ProfileMismatchError(!folded, prefixOpts.exactCase, 'prefixMatch.exactCase');
+    }
     const typo = normalizeTypoTolerance(options.typoTolerance);
     const scored = scorePrefixTokens(sourceMap.tokens, queryTokens, prefixOpts, typo);
     if (!scored.matched) return [];

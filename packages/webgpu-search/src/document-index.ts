@@ -18,6 +18,7 @@ import {
 } from './modes/token-search';
 import {
   normalizePrefixOptions,
+  assertPrefixLengthForQuery,
   type NormalizedPrefixOptions
 } from './modes/prefix-search';
 import {
@@ -511,8 +512,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const tokenOpts: NormalizedTokenMatchOptions = normalizeTokenMatchOptions(options.tokenMatch);
     const prefixOpts: NormalizedPrefixOptions = normalizePrefixOptions(options.prefixMatch);
     const typo: NormalizedTypoOptions = normalizeTypoTolerance(options.typoTolerance);
-    if (mode === 'prefix' && prefixOpts.exactCase !== caseSensitive) {
-      throw new ProfileMismatchError(!this.folded, caseSensitive);
+    if (mode === 'prefix' && options.prefixMatch?.exactCase !== undefined && prefixOpts.exactCase !== caseSensitive) {
+      throw new ProfileMismatchError(caseSensitive, prefixOpts.exactCase, 'prefixMatch.exactCase');
     }
     // Legacy ufuzzy/native scorers only implement fuzzy/substring-exact.
     if (cpuAlgorithm === 'ufuzzy' && (mode === 'token' || mode === 'prefix' || typo.enabled)) {
@@ -569,6 +570,12 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     const clampedLimit = clampLimit(options.limit ?? options.maxResults ?? 50);
     throwIfAborted(signal);
+
+    // Hoisted prefixLength check: fail-closed even on empty queries/corpora.
+    // Skipped for empty queries to match the scorer's early noMatch.
+    if (mode === 'prefix' && normalizedQuery.tokens.length > 0) {
+      assertPrefixLengthForQuery(prefixOpts, normalizedQuery.tokens.length);
+    }
 
     // M3 (Issue #10): validate facet contracts fail-fast, before early exits.
     // An empty facet list is equivalent to not requesting facets (absent key).
@@ -837,12 +844,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         if (err.name === 'AbortError') {
           throw err;
         }
-        console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
-        this.engineType = 'cpu';
-        this.fallbackReason = 'gpu-execution-error';
-        if (this.gpuEngine) {
-          try { this.gpuEngine.destroy(); } catch {}
-          this.gpuEngine = null;
+        // Mirror hybrid-index: mode-routed rejections (token/prefix/typo via
+        // direct or raced calls) are not engine failures — keep a healthy GPU
+        // up and fall through to parity CPU.
+        const modeRouted: boolean =
+          err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
+        if (!modeRouted) {
+          console.warn('[webgpu-search] GPU document search failed, falling back to CPU:', err);
+          this.engineType = 'cpu';
+          this.fallbackReason = 'gpu-execution-error';
+          if (this.gpuEngine) {
+            try { this.gpuEngine.destroy(); } catch {}
+            this.gpuEngine = null;
+          }
         }
       }
     }
@@ -1090,9 +1104,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       effectiveFallbackReason = 'unsupported-mode';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
-    } else if (isFieldRestricted && !effectiveFallbackReason) {
-      effectiveFallbackReason = 'cpu-algorithm-requested';
     }
+    // Note: field-restricted routing (isFieldRestricted) intentionally leaves
+    // fallbackReason as-is — it is a routing decision, not a scorer request,
+    // so reusing 'cpu-algorithm-requested' would mislead telemetry.
 
     return {
       query,

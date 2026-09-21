@@ -39,6 +39,10 @@ export const TYPO_DISTANCE_PENALTY = 100 as const;
  * Accepts `true` (defaults, enabled), `false`/`undefined` (disabled),
  * or a partial options object (`enabled` defaults to false per contract).
  * Throws TypeError/RangeError on malformed values (fail-closed).
+ *
+ * Note: `maxDistance` alone does NOT enable tolerance — `enabled: true`
+ * is required. `{ maxDistance: 2 }` without `enabled` validates fine but
+ * stays disabled (contract-consistent, sharp edge for callers).
  */
 export function normalizeTypoTolerance(
   raw: TypoToleranceOptions | boolean | undefined
@@ -124,11 +128,93 @@ export function allowedDistanceForTerm(
   return opts.maxDistance;
 }
 
+// Module-level DP scratch rows shared across bounded-DL calls.
+// JS is single-threaded and every DP call is synchronous, so reuse is safe
+// (no awaits inside the inner loops). `ensureSharedCapacity` grows the
+// buffers; rotation swaps roles without allocating.
+let sharedPrev2: number[] = [];
+let sharedPrev: number[] = [];
+let sharedCur: number[] = [];
+function ensureSharedCapacity(m: number): void {
+  const need: number = m + 1;
+  if (sharedPrev.length < need) {
+    sharedPrev2 = new Array<number>(need);
+    sharedPrev = new Array<number>(need);
+    sharedCur = new Array<number>(need);
+  }
+}
+
+/**
+ * Bounded DL between `record[recordStart..recordStart+recordLen)` and
+ * `query[queryStart..queryStart+queryLen)` without slicing or copying.
+ * Shared by typo substring spans and prefix anchored spans so neither
+ * path allocates per-candidate spans. Returns `maxDist + 1` past the bound.
+ */
+export function damerauLevenshteinBoundedRange(
+  record: Uint32Array | readonly number[],
+  recordStart: number,
+  recordLen: number,
+  query: Uint32Array | readonly number[],
+  queryStart: number,
+  queryLen: number,
+  maxDist: number
+): number {
+  const lenDiff: number = recordLen > queryLen ? recordLen - queryLen : queryLen - recordLen;
+  if (lenDiff > maxDist) return maxDist + 1;
+  if (recordLen === 0) return queryLen <= maxDist ? queryLen : maxDist + 1;
+  if (queryLen === 0) return recordLen <= maxDist ? recordLen : maxDist + 1;
+
+  ensureSharedCapacity(queryLen);
+  let prev2: number[] = sharedPrev2;
+  let prev: number[] = sharedPrev;
+  let cur: number[] = sharedCur;
+  for (let j = 0; j <= queryLen; j++) prev[j] = j;
+
+  for (let i = 1; i <= recordLen; i++) {
+    cur[0] = i;
+    let rowMin: number = cur[0];
+    const ai: number = record[recordStart + i - 1] as number;
+    for (let j = 1; j <= queryLen; j++) {
+      const bj: number = query[queryStart + j - 1] as number;
+      const cost: number = ai === bj ? 0 : 1;
+      let v: number = prev[j] + 1;
+      const ins: number = cur[j - 1] + 1;
+      if (ins < v) v = ins;
+      const sub: number = prev[j - 1] + cost;
+      if (sub < v) v = sub;
+      if (
+        i > 1 &&
+        j > 1 &&
+        ai === (query[queryStart + j - 2] as number) &&
+        (record[recordStart + i - 2] as number) === bj
+      ) {
+        const transp: number = prev2[j - 2] + 1;
+        if (transp < v) v = transp;
+      }
+      if (v > maxDist + 1) v = maxDist + 1;
+      cur[j] = v;
+      if (v < rowMin) rowMin = v;
+    }
+    if (rowMin > maxDist) return maxDist + 1;
+    const tmp: number[] = prev2;
+    prev2 = prev;
+    prev = cur;
+    cur = tmp;
+  }
+  const dist: number = prev[queryLen] as number;
+  return dist <= maxDist ? dist : maxDist + 1;
+}
+
 /**
  * Bounded Damerau-Levenshtein distance (optimal-string-alignment: one
  * adjacent transposition counts as a single edit) between two token
  * streams. Returns `maxDist + 1` when the true distance exceeds the bound
  * (early exit keeps long-record scans cheap). i32-safe integer arithmetic.
+ *
+ * Reuses module-level scratch rows (see `ensureSharedCapacity`) instead of
+ * allocating 3×(m+1) arrays per call — `findBestTypoWindow` invokes this
+ * up to n×(2·allowed+1) times per record, so per-call allocation is a
+ * GC DoS on long repetitive corpora.
  */
 export function damerauLevenshteinBounded(
   a: Uint32Array | readonly number[],
@@ -143,10 +229,11 @@ export function damerauLevenshteinBounded(
   if (n === 0) return m <= maxDist ? m : maxDist + 1;
   if (m === 0) return n <= maxDist ? n : maxDist + 1;
 
+  ensureSharedCapacity(m);
   // Three-row OSA DP: prev2 (i-2), prev (i-1), cur (i).
-  let prev2: number[] = new Array<number>(m + 1);
-  let prev: number[] = new Array<number>(m + 1);
-  let cur: number[] = new Array<number>(m + 1);
+  let prev2: number[] = sharedPrev2;
+  let prev: number[] = sharedPrev;
+  let cur: number[] = sharedCur;
   for (let j = 0; j <= m; j++) prev[j] = j;
 
   for (let i = 1; i <= n; i++) {
@@ -236,7 +323,8 @@ export function findBestTypoWindow(
 
   const maxStart: number = n - minWin;
   for (let start = 0; start <= maxStart; start++) {
-    // Prefix-exact gate before any DP work.
+    // Prefix-exact gate before any DP work. Clamped per span below so the
+    // gate never reads past the candidate span end.
     let gateOk = true;
     for (let k = 0; k < gateLen; k++) {
       if (start + k >= n || (record[start + k] as number) !== (term[k] as number)) {
@@ -247,7 +335,10 @@ export function findBestTypoWindow(
     if (!gateOk) continue;
     for (let w = minWin; w <= maxWin; w++) {
       if (start + w > n) break;
-      // Compare via index accessors instead of slice allocation.
+      // Per-span gate clamp: a span shorter than the gate cannot satisfy
+      // the prefix-exact contract, so skip it instead of reading past w.
+      if (w < gateLen) continue;
+      // Compare via shared scratch without slice allocation.
       const dist: number = damerauWindow(record, start, w, term, bestDist - 1);
       if (dist < bestDist) {
         bestDist = dist;
@@ -273,43 +364,5 @@ function damerauWindow(
   term: Uint32Array | readonly number[],
   maxDist: number
 ): number {
-  const m: number = term.length;
-  const lenDiff: number = winLen > m ? winLen - m : m - winLen;
-  if (lenDiff > maxDist) return maxDist + 1;
-  if (winLen === 0) return m <= maxDist ? m : maxDist + 1;
-  if (m === 0) return winLen <= maxDist ? winLen : maxDist + 1;
-
-  let prev2: number[] = new Array<number>(m + 1);
-  let prev: number[] = new Array<number>(m + 1);
-  let cur: number[] = new Array<number>(m + 1);
-  for (let j = 0; j <= m; j++) prev[j] = j;
-
-  for (let i = 1; i <= winLen; i++) {
-    cur[0] = i;
-    let rowMin: number = cur[0];
-    const ai: number = record[start + i - 1] as number;
-    for (let j = 1; j <= m; j++) {
-      const bj: number = term[j - 1] as number;
-      const cost: number = ai === bj ? 0 : 1;
-      let v: number = prev[j] + 1;
-      const ins: number = cur[j - 1] + 1;
-      if (ins < v) v = ins;
-      const sub: number = prev[j - 1] + cost;
-      if (sub < v) v = sub;
-      if (i > 1 && j > 1 && ai === (term[j - 2] as number) && (record[start + i - 2] as number) === bj) {
-        const transp: number = prev2[j - 2] + 1;
-        if (transp < v) v = transp;
-      }
-      if (v > maxDist + 1) v = maxDist + 1;
-      cur[j] = v;
-      if (v < rowMin) rowMin = v;
-    }
-    if (rowMin > maxDist) return maxDist + 1;
-    const tmp: number[] = prev2;
-    prev2 = prev;
-    prev = cur;
-    cur = tmp;
-  }
-  const dist: number = prev[m] as number;
-  return dist <= maxDist ? dist : maxDist + 1;
+  return damerauLevenshteinBoundedRange(record, start, winLen, term, 0, term.length, maxDist);
 }

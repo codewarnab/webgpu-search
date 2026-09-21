@@ -14,6 +14,7 @@ import {
 } from './modes/token-search';
 import {
   normalizePrefixOptions,
+  assertPrefixLengthForQuery,
   type NormalizedPrefixOptions
 } from './modes/prefix-search';
 import {
@@ -231,8 +232,12 @@ export class SearchIndex {
     const tokenOpts: NormalizedTokenMatchOptions = normalizeTokenMatchOptions(options.tokenMatch);
     const prefixOpts: NormalizedPrefixOptions = normalizePrefixOptions(options.prefixMatch);
     const typo: NormalizedTypoOptions = normalizeTypoTolerance(options.typoTolerance);
-    if (mode === 'prefix' && prefixOpts.exactCase !== caseSensitive) {
-      throw new ProfileMismatchError(!this.folded, caseSensitive);
+    // Prefix polarity: only enforce when the caller explicitly set exactCase.
+    // The default (prefixMatch undefined) follows the query caseSensitive flag
+    // so `create({caseSensitive:true}).search(q,{mode:'prefix',caseSensitive:true})`
+    // works without redundant `prefixMatch:{exactCase:true}`.
+    if (mode === 'prefix' && options.prefixMatch?.exactCase !== undefined && prefixOpts.exactCase !== caseSensitive) {
+      throw new ProfileMismatchError(caseSensitive, prefixOpts.exactCase, 'prefixMatch.exactCase');
     }
     // Legacy ufuzzy/native scorers only implement fuzzy/substring-exact.
     if (cpuAlgorithm === 'ufuzzy' && (mode === 'token' || mode === 'prefix' || typo.enabled)) {
@@ -300,6 +305,13 @@ export class SearchIndex {
     const clampedLimit = clampLimit(requestedLimit);
 
     throwIfAborted(signal);
+
+    // Hoisted prefixLength check: fail-closed even on empty queries/corpora
+    // (scorePrefixTokens throws per-record, which empty scans would skip).
+    // Skipped for empty queries to match the scorer's early noMatch.
+    if (mode === 'prefix' && normalizedQuery.tokens.length > 0) {
+      assertPrefixLengthForQuery(prefixOpts, normalizedQuery.tokens.length);
+    }
 
     // Degenerate post-processing queries that normalize to zero post-fold
     // tokens (whitespace-only, U+3000-only, empty) return unified empty
