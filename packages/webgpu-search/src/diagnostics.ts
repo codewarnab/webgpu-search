@@ -13,8 +13,20 @@
  *   corpora emits a non-fatal warning.
  * - `computeFilterSelectivity`: filter narrowing ratio in `[0, 1]`.
  *
- * Telemetry overhead is two `nowMs()` reads per phase boundary (< 10µs per
- * query by design); phase timing itself lives in `document-index.ts` and
+ * Timing granularity: budget enforcement is best-effort at phase boundaries
+ * (post-filter, post-score, post-highlight, post-facet). Long synchronous
+ * scans run to completion and then throw — work is discarded, never returned
+ * as stale partials. There is no intra-scan preemption. Callers needing hard
+ * deadlines must also use `abortSignal` for cooperative cancellation.
+ *
+ * Token semantics: `queryTokenCount` throughout M7 is post-fold Unicode code
+ * points (including spaces), not whitespace words — e.g. `"auth"` is 4
+ * tokens. The <=2-token pre-dispatch gate therefore fires only on 1–2
+ * character queries, which are near-universally broad under fuzzy/substring.
+ *
+ * Telemetry overhead is sub-microsecond when disabled: clocks and warning
+ * strings are gated on `diagnostics:true` (or an active time budget for the
+ * entry clock). Phase timing itself lives in `document-index.ts` and
  * `hybrid-index.ts` so this module never touches engine internals.
  *
  * Portable: no DOM refs (`window`, `document`, `navigator`). Wall-clock reads
@@ -64,16 +76,22 @@ export interface NormalizedCostBudget {
  * - `maxExecutionTimeMs` must be a finite number > 0 when provided
  *   (fractional milliseconds allowed); `0`, negatives, `NaN`, and `Infinity`
  *   throw `RangeError`. Note: a deadline alone never enables anything — it
- *   only constrains; tiny deadlines fail the query fail-closed.
+ *   only constrains; tiny deadlines fail the query fail-closed. Deadlines are
+ *   enforced at phase boundaries only (best-effort, post-scan discard — see
+ *   `assertTimeBudget`); they do not preempt in-flight scans.
  * - `maxCandidates` must be an integer >= 1 when provided; fractions,
- *   `0`/negatives, and non-finite values throw `RangeError`.
+ *   `0`/negatives, and non-finite values throw `RangeError`. Structured
+ *   filters are enforced pre-scan on the exact post-filter population;
+ *   function-predicate filters report selectivity `1.0` and enforce the
+ *   ceiling on the pre-predicate population (conservative fail-closed —
+ *   the true post-predicate count is unknowable without scanning).
  * - `abortSignal` passes through untouched when provided (worker transport
  *   strips it pre-clone; see `worker-client.ts`); non-object values throw
  *   `TypeError`. Forged `{ aborted: true }` objects are honored via
  *   `throwIfAborted` at enforcement points.
- * - Unknown keys are ignored (forward-compatible; typo'd limits fail open to
- *   no-limit rather than silently constraining — callers should use the
- *   documented keys).
+ * - Unknown `max*` keys throw `TypeError` fail-closed (typo'd limits such as
+ *   `{ maxCandidate: 5 }` must not silently disable the ceiling). Other
+ *   unknown keys are ignored forward-compatibly.
  */
 export function normalizeCostBudgetOptions(
   raw: CostBudgetOptions | undefined
@@ -83,7 +101,14 @@ export function normalizeCostBudgetOptions(
     throw new TypeError('[webgpu-search] budget must be an object.');
   }
   const record = raw as Record<string, unknown>;
-  // Unknown keys are ignored (forward-compatible; see doc comment above).
+  const KNOWN_BUDGET_KEYS = new Set(['maxExecutionTimeMs', 'maxCandidates', 'abortSignal']);
+  for (const key of Object.keys(record)) {
+    if (!KNOWN_BUDGET_KEYS.has(key) && /^max/i.test(key)) {
+      throw new TypeError(
+        `[webgpu-search] Unknown budget key "${key}". Did you mean "maxExecutionTimeMs" or "maxCandidates"?`
+      );
+    }
+  }
   const out: NormalizedCostBudget = {};
 
   if (record.maxExecutionTimeMs !== undefined) {
@@ -141,11 +166,15 @@ export function throwIfBudgetAborted(budget: NormalizedCostBudget | undefined): 
 }
 
 /**
- * Fail-closed deadline enforcement. Throws `CostBudgetExceededError`
- * (`budgetType: 'time'`) when wall-clock elapsed since `startMs` exceeds the
- * configured `maxExecutionTimeMs`. No-op without a time budget. Call at every
- * phase boundary (post-filter, post-score, post-highlight, post-facet) so
- * over-budget queries abort instead of returning stale partial work.
+ * Fail-closed deadline enforcement (best-effort, phase-boundary granularity).
+ * Throws `CostBudgetExceededError` (`budgetType: 'time'`) when wall-clock
+ * elapsed since `startMs` exceeds the configured `maxExecutionTimeMs`.
+ * No-op without a time budget. Call at every phase boundary (post-filter,
+ * post-score, post-highlight, post-facet) so over-budget queries abort
+ * instead of returning stale partial work.
+ *
+ * This does NOT preempt in-flight synchronous scans: a long CPU scan runs to
+ * completion and then throws (fail-closed discard, never partial results).
  */
 export function assertTimeBudget(
   startMs: number,
@@ -165,6 +194,8 @@ export function assertTimeBudget(
  * post-filter candidate count to score exceeds `maxCandidates`. Call once
  * pre-scoring (nothing is scored on throw) and never on no-hit early exits
  * (empty query / corpus / empty filter score zero candidates by design).
+ * With function-predicate filters the pre-predicate population is checked
+ * (conservative; the true post-predicate count is unknowable pre-scan).
  */
 export function assertCandidateBudget(
   candidatesToScore: number,
@@ -180,7 +211,8 @@ export function assertCandidateBudget(
 /**
  * Filter narrowing ratio in `[0, 1]`: `matched / total`.
  * - No filter (`matched === total` by convention, including empty corpora)
- *   yields `1.0` (no narrowing).
+ *   yields `1.0` (no narrowing). Function-predicate filters also report
+ *   `1.0` with `filteringMs ≈ 0`; their evaluation cost lands in `scoringMs`.
  * - Empty corpus with a structured filter yields `0` (nothing can match).
  * - Result is clamped to `[0, 1]` defensively (popcount can never exceed the
  *   active count, but forged inputs must not leak `NaN`/`Infinity`).
@@ -199,10 +231,14 @@ export function computeFilterSelectivity(matched: number, total: number): number
 /**
  * Pre-dispatch broad-query heuristic: true when the corpus is massive
  * (`docCount >= BROAD_QUERY_MIN_DOCS`) and the query is short
- * (`queryTokenCount <= BROAD_QUERY_SHORT_QUERY_TOKENS`). Short queries
- * (single characters, symbol prefixes) match a large fraction of any sizable
- * corpus, so routing them to the CPU streaming scan pre-dispatch avoids GPU
- * buffer saturation and driver timeouts (TDR). Deterministic and O(1).
+ * (`queryTokenCount <= BROAD_QUERY_SHORT_QUERY_TOKENS`). `queryTokenCount`
+ * is post-fold Unicode code points (including spaces), not whitespace words.
+ * Short queries (single characters, symbol prefixes) match a large fraction
+ * of any sizable corpus, so routing them to the CPU streaming scan
+ * pre-dispatch avoids GPU buffer saturation and driver timeouts (TDR).
+ * Deterministic and O(1). Callers suppress the route warning when the query
+ * is already CPU-by-design (token/prefix/typo modes, explicit ufuzzy) since
+ * the stated GPU-avoidance cause would misattribute.
  */
 export function isBroadQueryHeuristic(queryTokenCount: number, docCount: number): boolean {
   if (!Number.isFinite(queryTokenCount) || !Number.isFinite(docCount)) return false;
@@ -242,10 +278,42 @@ export function broadSelectivityWarning(selectivity: number, docCount: number): 
   );
 }
 
-/** Non-fatal warning recorded when matches overflow the candidate pool (facets approximate). */
-export function candidateOverflowWarning(totalMatches: number, candidateCapacity: number): string {
-  return (
-    `[webgpu-search] candidate overflow: ${String(totalMatches)} matches exceed ` +
-    `candidate pool capacity ${String(candidateCapacity)}; facets (if requested) are approximate.`
-  );
+export interface CandidateOverflowWarningOptions {
+  /** Whether facets were requested (default true for backward compat). */
+  facetsRequested?: boolean;
+  /** True when facets were recomputed exactly (force-exact rescan). */
+  facetsExact?: boolean;
+  /** Raw pre-filter match count when it differs from the post-filter count. */
+  rawTotalMatches?: number;
+}
+
+/**
+ * Non-fatal warning recorded when matches overflow the candidate pool.
+ * Tells callers the remediation knob (`candidateCapacity`) instead of only
+ * stating the overflow. The facets clause is included only when facets were
+ * requested and remain approximate; `force-exact` rescans set `facetsExact`
+ * to suppress the stale "approximate" claim. When `rawTotalMatches` differs
+ * (GPU raw pool vs post-filter hits), both counts are reported so the
+ * sentence stays factually accurate.
+ */
+export function candidateOverflowWarning(
+  totalMatches: number,
+  candidateCapacity: number,
+  opts?: CandidateOverflowWarningOptions
+): string {
+  const facetsRequested = opts?.facetsRequested ?? true;
+  const facetsExact = opts?.facetsExact ?? false;
+  const raw = opts?.rawTotalMatches;
+  const countClause =
+    raw !== undefined && raw !== totalMatches
+      ? `${String(raw)} raw matches (${String(totalMatches)} post-filter) exceed `
+      : `${String(totalMatches)} matches exceed `;
+  let msg =
+    `[webgpu-search] candidate overflow: ${countClause}` +
+    `candidate pool capacity ${String(candidateCapacity)}; raise candidateCapacity ` +
+    `or narrow the query / add filters.`;
+  if (facetsRequested && !facetsExact) {
+    msg += ' facets (if requested) are approximate.';
+  }
+  return msg;
 }

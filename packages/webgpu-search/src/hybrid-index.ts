@@ -278,6 +278,18 @@ export class SearchIndex {
         "cpuAlgorithm:'ufuzzy' is CPU-only; use preferGpu:false or cpuAlgorithm:'parity'."
       );
     }
+    // v0.4 M7: fail-closed cost-budget + diagnostics validation first so
+    // malformed budgets throw identically on GPU/CPU paths, empty corpora,
+    // and overlong queries (same precedence as DocumentIndex: budget before
+    // the query-too-long gate and before expensive NFC+fold work).
+    const budget = normalizeCostBudgetOptions(options.budget);
+    if (options.diagnostics !== undefined && typeof options.diagnostics !== 'boolean') {
+      throw new TypeError('[webgpu-search] options.diagnostics must be a boolean.');
+    }
+    const wantsDiagnostics = options.diagnostics === true;
+    const needsClock = wantsDiagnostics || budget?.maxExecutionTimeMs !== undefined;
+    const queryStartMs = needsClock ? nowMs() : 0;
+    const diagWarnings: string[] = [];
     // Cheap pre-gate before the expensive NFC+fold pipeline: fold expands
     // at most 1->3, so raw code points beyond 3x the cap are definitely over.
     // Gigantic queries (>1M UTF-16 units) throw on the upper-bound estimate
@@ -317,20 +329,12 @@ export class SearchIndex {
     // Shared clamp: finite + floor + 1..8192, NaN/non-number -> 50.
     const clampedLimit = clampLimit(requestedLimit);
 
-    // v0.4 M7: fail-closed cost-budget + diagnostics validation up front so
-    // malformed budgets throw identically on GPU/CPU paths and empty corpora.
-    const budget = normalizeCostBudgetOptions(options.budget);
-    if (options.diagnostics !== undefined && typeof options.diagnostics !== 'boolean') {
-      throw new TypeError('[webgpu-search] options.diagnostics must be a boolean.');
-    }
-    const wantsDiagnostics = options.diagnostics === true;
-    const queryStartMs = nowMs();
-    const diagWarnings: string[] = [];
     /**
      * v0.4 M7: assemble response diagnostics (undefined unless requested).
      * The string index has no columnar filters, so `filterSelectivity` is
      * always 1.0 and `filteringMs` is always 0; `highlightMs` is 0 (no
-     * highlight enrichment on this path).
+     * highlight enrichment on this path); `facetingMs` is never emitted
+     * (string index has no facets — intentional key absence).
      */
     const buildDiagnostics = (
       routedEngine: EngineType,
@@ -354,15 +358,23 @@ export class SearchIndex {
       if (diagWarnings.length > 0) diag.warnings = [...diagWarnings];
       return diag;
     };
-    /** v0.4 M7: post-hoc broad-query + overflow warnings (non-fatal). */
+    /**
+     * v0.4 M7: post-hoc broad-query + overflow warnings (non-fatal, gated on
+     * `diagnostics:true`). The string index has no facets, so the overflow
+     * facets clause is suppressed (`facetsRequested:false`); the message
+     * names the `RESULT_LIMIT_MAX` pool and remediation.
+     */
     const pushPostHocWarnings = (totalMatches: number, hasOverflow: boolean, capacity: number): void => {
+      if (!wantsDiagnostics) return;
       const scanned = this.items.length;
       const selectivity = scanned > 0 ? totalMatches / scanned : 0;
       if (isBroadSelectivity(selectivity, scanned)) {
         diagWarnings.push(broadSelectivityWarning(selectivity, scanned));
       }
       if (hasOverflow) {
-        diagWarnings.push(candidateOverflowWarning(totalMatches, capacity));
+        diagWarnings.push(
+          candidateOverflowWarning(totalMatches, capacity, { facetsRequested: false })
+        );
       }
     };
 
@@ -387,6 +399,8 @@ export class SearchIndex {
       throwIfBudgetAborted(budget);
       assertTimeBudget(queryStartMs, budget);
       const diag = buildDiagnostics('cpu', 0, false);
+      // Public totalMs is scorer wall-clock (0 on no-hit); diagnostics
+      // carries the wall-clock including validation.
       return {
         results: [], totalMatches: 0, query: q, mode, engine: 'cpu',
         candidateCount: 0, hasOverflow: false,
@@ -407,12 +421,22 @@ export class SearchIndex {
 
     // v0.4 M7: candidate ceiling + broad-query pre-dispatch guard. Short
     // queries over massive corpora route to the CPU streaming scan to avoid
-    // GPU buffer saturation and driver timeouts (TDR).
+    // GPU buffer saturation and driver timeouts (TDR). The string index has
+    // a fixed RESULT_LIMIT_MAX=8192 pool while DocumentIndex scales
+    // min(32768, max(8192, …)) — same corpus can overflow here but not there.
     assertCandidateBudget(this.items.length, budget);
+    // GPU-eligibility is needed for the warning-suppression decision below,
+    // so compute it before the pre-dispatch guard (routing itself stays below).
+    const isGpuSupportedMode: boolean =
+      (mode === 'fuzzy' || mode === 'substring') && !typo.enabled;
     let broadQueryCpuRoute = false;
     if (isBroadQueryHeuristic(normalizedQuery.tokens.length, this.items.length)) {
       broadQueryCpuRoute = true;
-      diagWarnings.push(broadQueryRouteWarning(this.items.length, normalizedQuery.tokens.length));
+      const cpuByDesign =
+        !isGpuSupportedMode || cpuAlgorithm === 'ufuzzy' || forceCpu;
+      if (wantsDiagnostics && !cpuByDesign) {
+        diagWarnings.push(broadQueryRouteWarning(this.items.length, normalizedQuery.tokens.length));
+      }
     }
     assertTimeBudget(queryStartMs, budget);
 
@@ -424,8 +448,6 @@ export class SearchIndex {
     // cpu-fallback force CPU. Failures fall through to the parity CPU
     // scorer below.
     const gpuHandle = this.gpuEngine;
-    const isGpuSupportedMode: boolean =
-      (mode === 'fuzzy' || mode === 'substring') && !typo.enabled;
     const useGpu: boolean =
       !forceCpu &&
       !broadQueryCpuRoute &&

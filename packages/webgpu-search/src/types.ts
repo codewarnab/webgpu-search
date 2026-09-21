@@ -71,7 +71,12 @@ export interface SearchTimings {
   encodeSubmitMs: number;         // Command recording & submit latency
   gpuExecutionMs: number | null;  // Hardware timestamp query (null if unsupported)
   readbackMs: number;             // mapAsync() & CPU candidate slice latency
-  totalMs: number;                // Total wall-clock query duration
+  /**
+   * Scorer wall-clock: scan + highlight + post-match hooks + facets.
+   * Excludes inline `suggest` work (see `QueryDiagnostics.timings.totalMs`
+   * for end-to-end including suggest, and `suggestMs` for the suggest slice).
+   */
+  totalMs: number;                // Scorer wall-clock query duration (excludes inline suggest)
   gpuDispatchMs?: number;         // Backwards compatibility alias for encodeSubmitMs
 }
 
@@ -215,14 +220,11 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   faceting?: 'auto' | 'force-exact';
   // Note: tokenMatch/prefixMatch/typoTolerance are inherited from
   // SearchOptions (single source of truth — do not redeclare; drift risk).
+  // Note: budget/diagnostics are likewise inherited from SearchOptions.
   /** Deterministic ranking and tie-breaking options */
   ranking?: DeterministicRankingOptions;
   /** Per-query search extension overrides */
   extensions?: SearchExtensionHooks<TDoc>;
-  /** Cost budget controls and deadlines */
-  budget?: CostBudgetOptions;
-  /** Whether to populate detailed diagnostics on the response */
-  diagnostics?: boolean;
   /** Autocomplete / did-you-mean suggestion configuration if requested alongside search.
    * `true` uses defaults; an object customizes; `false`/omitted disables.
    * Inline suggestions cost a second O(docs x fields) scan (~2x query cost)
@@ -733,24 +735,48 @@ export interface SearchExtensionHooks<TDoc = any> {
 
 // 3.7 Cost Budgets & Query Diagnostics
 export interface CostBudgetOptions {
+  /**
+   * Maximum execution wall-clock time in milliseconds. Enforced best-effort
+   * at phase boundaries (post-filter/score/highlight/facet): over-budget
+   * scans run to completion and then throw `CostBudgetExceededError`
+   * (fail-closed discard, never partials). No intra-scan preemption.
+   */
   maxExecutionTimeMs?: number;      // Maximum execution wall-clock time in milliseconds
+  /**
+   * Ceiling on candidates scored. Structured filters enforce pre-scan on the
+   * exact post-filter population; function predicates enforce on the
+   * pre-predicate population (conservative — post-predicate unknowable).
+   */
   maxCandidates?: number;           // Ceiling on candidates scored
   abortSignal?: AbortSignal;        // Caller abort signal
 }
 
 export interface QueryDiagnosticsTimings {
+  /**
+   * Time spent evaluating columnar bitsets. Function-predicate filters cost
+   * ~0 here; their evaluation is deferred into the scoring loop (`scoringMs`).
+   */
   filteringMs: number;            // Time spent evaluating columnar bitsets
+  /** Time spent in compute kernel or CPU reference, including post-match scoring hooks. */
   scoringMs: number;              // Time spent in compute kernel or CPU reference
   highlightMs: number;            // Time spent extracting Unicode highlight ranges
-  facetingMs?: number;            // Time spent aggregating facet buckets
+  facetingMs?: number;            // Time spent aggregating facet buckets (absent when facets unrequested; string index never emits)
+  /** Time spent in inline suggest scan (absent when suggest unrequested). */
+  suggestMs?: number;
+  /** End-to-end query latency (filtering + scoring + highlight + faceting + suggest). */
   totalMs: number;                // End-to-end query latency
 }
 
 export interface QueryDiagnostics {
-  scannedCandidates: number;        // Total candidate rows evaluated
+  /** Total active documents evaluated (docs, not rows; rows = docs x fields). */
+  scannedCandidates: number;        // Total active documents evaluated
+  /**
+   * Ratio of candidates matching the structured filter (0.0 - 1.0).
+   * Function-predicate filters report 1.0 (narrowing invisible to telemetry).
+   */
   filterSelectivity: number;        // Ratio of candidates matching filter (0.0 - 1.0)
   routedEngine: EngineType;         // Engine that processed the query
-  hasOverflow: boolean;             // Whether GPU candidate capacity was exceeded
+  hasOverflow: boolean;             // Whether candidate pool capacity was exceeded
   timings: QueryDiagnosticsTimings;
   warnings?: string[];              // Non-fatal advisory notices (e.g. broad-query fallback)
 }

@@ -122,6 +122,7 @@ export {
   broadSelectivityWarning,
   candidateOverflowWarning,
   type NormalizedCostBudget,
+  type CandidateOverflowWarningOptions,
 } from './diagnostics';
 
 // v0.4 Extensibility pipeline & safe hook architecture (M6)

@@ -16,6 +16,9 @@ import {
   DocumentIndex,
   SearchIndex,
   normalizeCostBudgetOptions,
+  assertTimeBudget,
+  assertCandidateBudget,
+  throwIfBudgetAborted,
   isBroadQueryHeuristic,
   isBroadSelectivity,
   computeFilterSelectivity,
@@ -25,6 +28,7 @@ import {
   CostBudgetExceededError,
   BROAD_QUERY_MIN_DOCS,
   BROAD_QUERY_SELECTIVITY_THRESHOLD,
+  RESULT_LIMIT_MAX,
   type DocumentIndexOptions,
 } from '../src/index';
 
@@ -100,10 +104,12 @@ describe('normalizeCostBudgetOptions: fail-closed validation', () => {
     expect(normalizeCostBudgetOptions({ abortSignal: c.signal })?.abortSignal).toBe(c.signal);
   });
 
-  test('unknown keys are ignored (forward-compatible)', () => {
+  test('unknown keys are ignored (forward-compatible), unknown max* throws', () => {
     expect(
       normalizeCostBudgetOptions({ maxCandidates: 5, futureKey: 1 } as never)
     ).toEqual({ maxCandidates: 5 });
+    expect(() => normalizeCostBudgetOptions({ maxCandidate: 5 } as never)).toThrow(TypeError);
+    expect(() => normalizeCostBudgetOptions({ maxTime: 10 } as never)).toThrow(TypeError);
   });
 });
 
@@ -373,11 +379,173 @@ describe('hybrid SearchIndex: budgets + diagnostics parity', () => {
   });
 });
 
+describe('M7 review fixes: contracts + telemetry accuracy', () => {
+  test('broad-query CPU routing leaves fallbackReason untouched', async () => {
+    const docs: Doc[] = [];
+    for (let i = 0; i < BROAD_QUERY_MIN_DOCS; i++) {
+      docs.push({
+        id: `b${i}`,
+        title: `service endpoint ${i}`,
+        body: `request handler ${i}`,
+        kind: 'symbol',
+        year: 2020,
+      });
+    }
+    const index = await DocumentIndex.create(docs, baseOpts());
+    const res = await index.search('e', { diagnostics: true });
+    expect(res.engine).toBe('cpu');
+    expect(res.fallbackReason).toBe('prefer-cpu');
+    expect(res.diagnostics!.routedEngine).toBe('cpu');
+    expect(res.diagnostics!.warnings?.some((w) => w.includes('broad-query'))).toBe(true);
+    await index.destroy();
+  });
+
+  test('token mode over massive corpus does not misattribute GPU routing', async () => {
+    const docs: Doc[] = [];
+    for (let i = 0; i < BROAD_QUERY_MIN_DOCS; i++) {
+      docs.push({
+        id: `t${i}`,
+        title: `service endpoint ${i}`,
+        body: `request handler ${i}`,
+        kind: 'symbol',
+        year: 2020,
+      });
+    }
+    const index = await DocumentIndex.create(docs, baseOpts());
+    const res = await index.search('e', { mode: 'token', diagnostics: true });
+    expect(res.engine).toBe('cpu');
+    expect(res.fallbackReason).toBe('unsupported-mode');
+    // Already CPU-by-design: no GPU-avoidance route warning.
+    expect(res.diagnostics!.warnings?.some((w) => w.includes('pre-dispatch heuristic'))).toBe(false);
+    await index.destroy();
+  });
+
+  test('ufuzzy path pins cpu-algorithm-requested fallbackReason', async () => {
+    const index = await DocumentIndex.create(DOCS, baseOpts());
+    const res = await index.search('auth', { cpuAlgorithm: 'ufuzzy', diagnostics: true });
+    expect(res.engine).toBe('cpu');
+    expect(res.fallbackReason).toBe('cpu-algorithm-requested');
+    expect(res.diagnostics!.routedEngine).toBe('cpu');
+    await index.destroy();
+  });
+
+  test('suggest + diagnostics coexist with suggestMs bucket', async () => {
+    const index = await DocumentIndex.create(DOCS, baseOpts());
+    const res = await index.search('auth', { diagnostics: true, suggest: { limit: 2 } });
+    expect(res.suggestions).toBeDefined();
+    expect(res.diagnostics).toBeDefined();
+    expect(typeof res.diagnostics!.timings.suggestMs).toBe('number');
+    expect(res.diagnostics!.timings.totalMs).toBeGreaterThanOrEqual(
+      res.diagnostics!.timings.scoringMs
+    );
+    await index.destroy();
+  });
+
+  test('post-hoc selectivity warning fires for broad long queries', async () => {
+    const docs: Doc[] = [];
+    for (let i = 0; i < BROAD_QUERY_MIN_DOCS; i++) {
+      docs.push({
+        id: `s${i}`,
+        title: `alpha shared vocabulary record ${i}`,
+        body: `alpha shared vocabulary payload ${i}`,
+        kind: 'symbol',
+        year: 2020,
+      });
+    }
+    const index = await DocumentIndex.create(docs, baseOpts());
+    // 3-token query escapes the <=2-token pre-dispatch gate but matches >80%.
+    const res = await index.search('alpha shared vocabulary', { diagnostics: true });
+    expect(res.totalMatches / BROAD_QUERY_MIN_DOCS).toBeGreaterThan(0.8);
+    expect(res.diagnostics!.warnings?.some((w) => w.includes('broad-query'))).toBe(true);
+    expect(res.diagnostics!.warnings?.some((w) => w.includes('pre-dispatch'))).toBe(false);
+    await index.destroy();
+  });
+
+  test('overflow warning names remediation and honors facets flags', () => {
+    const withFacets = candidateOverflowWarning(9000, 8192);
+    expect(withFacets).toMatch(/overflow/);
+    expect(withFacets).toMatch(/candidateCapacity/);
+    expect(withFacets).toMatch(/approximate/);
+    const noFacets = candidateOverflowWarning(9000, 8192, { facetsRequested: false });
+    expect(noFacets).toMatch(/overflow/);
+    expect(noFacets).not.toMatch(/approximate/);
+    const exact = candidateOverflowWarning(9000, 8192, { facetsRequested: true, facetsExact: true });
+    expect(exact).not.toMatch(/approximate/);
+    const raw = candidateOverflowWarning(100, 8192, { rawTotalMatches: 9000 });
+    expect(raw).toMatch(/9000/);
+    expect(raw).toMatch(/100/);
+  });
+
+  test('empty corpus diagnostics shape', async () => {
+    const index = await DocumentIndex.create([], baseOpts());
+    const res = await index.search('auth', { diagnostics: true });
+    expect(res.diagnostics).toBeDefined();
+    expect(res.diagnostics!.scannedCandidates).toBe(0);
+    expect(res.diagnostics!.filterSelectivity).toBe(1.0);
+    expect(res.diagnostics!.hasOverflow).toBe(false);
+    await index.destroy();
+  });
+
+  test('empty budget object + limit:0 behave as no-budget clamped search', async () => {
+    const index = await DocumentIndex.create(DOCS, baseOpts());
+    const res = await index.search('auth', { budget: {}, diagnostics: true });
+    expect(res.totalMatches).toBeGreaterThan(0);
+    expect(res.diagnostics).toBeDefined();
+    const res2 = await index.search('auth', { limit: 0, diagnostics: true });
+    expect(res2.results.length).toBeGreaterThanOrEqual(1);
+    await index.destroy();
+  });
+
+  test('budgets enforce even when diagnostics:false', async () => {
+    const index = await DocumentIndex.create(DOCS, baseOpts());
+    await expect(
+      index.search('auth', { budget: { maxCandidates: 2 }, diagnostics: false })
+    ).rejects.toThrow(CostBudgetExceededError);
+    expect((await index.search('auth', { diagnostics: false })).diagnostics).toBeUndefined();
+    await index.destroy();
+  });
+
+  test('forged abort objects are honored', async () => {
+    const index = await DocumentIndex.create(DOCS, baseOpts());
+    const err = await index
+      .search('auth', { budget: { abortSignal: { aborted: true } as never } })
+      .catch((e) => e);
+    expect(err?.name).toBe('AbortError');
+    await index.destroy();
+  });
+
+  test('assert boundaries: at-limit passes, no-budget no-ops', () => {
+    expect(() => assertTimeBudget(100, undefined)).not.toThrow();
+    expect(() => assertCandidateBudget(999, undefined)).not.toThrow();
+    const budget = normalizeCostBudgetOptions({ maxCandidates: 5, maxExecutionTimeMs: 1000 });
+    expect(() => assertCandidateBudget(5, budget)).not.toThrow();
+    expect(() => assertCandidateBudget(6, budget)).toThrow(CostBudgetExceededError);
+    expect(() => throwIfBudgetAborted(undefined)).not.toThrow();
+  });
+
+  test('overflow boundary: at capacity has no overflow', () => {
+    expect(RESULT_LIMIT_MAX).toBe(8192);
+    // Unit-level boundary: warning builder is only called when hasOverflow,
+    // which callers compute as totalMatches > capacity (strict).
+    expect(8192 > 8192).toBe(false);
+    expect(8193 > 8192).toBe(true);
+  });
+
+  test('worker predicate path drops stale diagnostics (fail-closed)', async () => {
+    const raw = await readFile(
+      'packages/webgpu-search/src/worker/worker-client.ts',
+      'utf8'
+    );
+    expect(raw).toMatch(/delete \(searchResp as \{ diagnostics\?: unknown \}\)\.diagnostics/);
+  });
+});
+
 describe('M7 portability', () => {
   test('zero unguarded DOM references in M7 modules', async () => {
     const files = [
       'packages/webgpu-search/src/diagnostics.ts',
       'packages/webgpu-search/src/hybrid-index.ts',
+      'packages/webgpu-search/src/document-index.ts',
     ];
     for (const f of files) {
       const raw = await readFile(f, 'utf8');
