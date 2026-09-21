@@ -49,6 +49,18 @@ import {
   nowMs
 } from './runtime-guards';
 import {
+  normalizeCostBudgetOptions,
+  throwIfBudgetAborted,
+  assertTimeBudget,
+  assertCandidateBudget,
+  computeFilterSelectivity,
+  isBroadQueryHeuristic,
+  isBroadSelectivity,
+  broadQueryRouteWarning,
+  broadSelectivityWarning,
+  candidateOverflowWarning
+} from './diagnostics';
+import {
   DOC_FORMAT_VERSION,
   QUERY_TOKENS_MAX,
   SCORING_VERSION,
@@ -102,7 +114,9 @@ import type {
   FacetResult,
   FilterExpression,
   FilterFieldDefinition,
-  FilterFieldType
+  FilterFieldType,
+  QueryDiagnostics,
+  QueryDiagnosticsTimings
 } from './types';
 
 export interface InternalField<TDoc> extends FieldScoreDefinition {
@@ -569,6 +583,91 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         prefixExactLength: typo.prefixExactLength
       }
     };
+    // v0.4 M7: fail-closed cost-budget + diagnostics validation up front so
+    // malformed budgets throw identically on GPU and CPU paths and on empty
+    // corpora/queries (before early exits). Enforcement is independent of the
+    // diagnostics flag: budgets constrain even when telemetry is off.
+    const budget = normalizeCostBudgetOptions(options.budget);
+    if (options.diagnostics !== undefined && typeof options.diagnostics !== 'boolean') {
+      throw new TypeError('[webgpu-search] options.diagnostics must be a boolean.');
+    }
+    const wantsDiagnostics = options.diagnostics === true;
+    const needsClock = wantsDiagnostics || budget?.maxExecutionTimeMs !== undefined;
+    const queryStartMs = needsClock ? nowMs() : 0;
+    const diagWarnings: string[] = [];
+    let filteringMs = 0;
+    // M7 filter-state declarations hoisted above noHits/buildDiagnostics so
+    // early exits report selectivity over the compiled bitset.
+    let filterBitset: DocumentBitset | undefined = undefined;
+    let filterPredicate: ((doc: TDoc) => boolean) | undefined = undefined;
+    let structuredFilter: FilterExpression | undefined = undefined;
+    /**
+     * v0.4 M7: assemble response diagnostics (undefined unless requested).
+     * `filteringMs` is read at call time so early exits after compilation
+     * report measured filter cost; `totalMs` is wall-clock from query entry
+     * (end-to-end including inline suggest; see `suggestMs` for the slice).
+     * Scoring includes post-match scoring-hook time on all paths.
+     */
+    const buildDiagnostics = (
+      routedEngine: EngineType,
+      scoringMs: number,
+      highlightMs: number,
+      facetingMs: number | undefined,
+      hasOverflow: boolean,
+      suggestMs?: number
+    ): QueryDiagnostics | undefined => {
+      if (!wantsDiagnostics) return undefined;
+      const scanned = this.idToDocIndex.size;
+      const selectivity = filterBitset !== undefined
+        ? computeFilterSelectivity(filterBitset.popcount(), scanned)
+        : 1.0;
+      const totalMs = nowMs() - queryStartMs;
+      const timings: QueryDiagnosticsTimings = {
+        filteringMs,
+        scoringMs,
+        highlightMs,
+        ...(facetingMs !== undefined ? { facetingMs } : {}),
+        ...(suggestMs !== undefined ? { suggestMs } : {}),
+        totalMs
+      };
+      const diag: QueryDiagnostics = {
+        scannedCandidates: scanned,
+        filterSelectivity: selectivity,
+        routedEngine,
+        hasOverflow,
+        timings
+      };
+      if (diagWarnings.length > 0) diag.warnings = [...diagWarnings];
+      return diag;
+    };
+    /**
+     * v0.4 M7: post-hoc broad-query + overflow warnings (non-fatal, gated on
+     * `diagnostics:true` — routing decisions stay ungated for safety).
+     * `rawTotalMatches` carries the pre-filter pool count on the GPU path so
+     * the overflow sentence stays accurate; `facetsExact` suppresses the
+     * stale "approximate" claim after a force-exact rescan.
+     */
+    const pushPostHocWarnings = (
+      totalMatches: number,
+      hasOverflow: boolean,
+      opts?: { rawTotalMatches?: number; facetsRequested?: boolean; facetsExact?: boolean }
+    ): void => {
+      if (!wantsDiagnostics) return;
+      const scanned = this.idToDocIndex.size;
+      const selectivity = scanned > 0 ? totalMatches / scanned : 0;
+      if (isBroadSelectivity(selectivity, scanned)) {
+        diagWarnings.push(broadSelectivityWarning(selectivity, scanned));
+      }
+      if (hasOverflow) {
+        diagWarnings.push(
+          candidateOverflowWarning(totalMatches, this.candidateCapacity, {
+            facetsRequested: opts?.facetsRequested ?? false,
+            facetsExact: opts?.facetsExact ?? false,
+            rawTotalMatches: opts?.rawTotalMatches,
+          })
+        );
+      }
+    };
     // v0.4 M4: token/prefix modes and typo-tolerant queries are CPU-only
     // (exact-only WGSL kernels) and skip GPU dispatch with fallbackReason
     // 'unsupported-mode' (Issue #10 parity boundary).
@@ -603,6 +702,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     const clampedLimit = clampLimit(options.limit ?? options.maxResults ?? 50);
     throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
 
     // Hoisted prefixLength check: fail-closed even on empty queries/corpora.
     // Skipped for empty queries to match the scorer's early noMatch.
@@ -696,35 +796,42 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
     const hasEmptyFieldList = searchFields !== undefined && searchFields.length === 0;
 
-    const noHits = (q: string): DocumentSearchResponse<TDoc> => ({
-      query: q,
-      mode,
-      engine: 'cpu',
-      totalMatches: 0,
-      candidateCount: 0,
-      hasOverflow: false,
-      results: [],
-      timings: {
-        queryUploadMs: 0,
-        encodeSubmitMs: 0,
-        gpuExecutionMs: null,
-        readbackMs: 0,
-        totalMs: 0,
-        gpuDispatchMs: 0
-      },
-      profileId: this.profileId,
-      scoringVersion: SCORING_VERSION,
-      cpuAlgorithm,
-      fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
-      ...(wantsFacets && facetEngine && facetSpec
-        ? { facets: facetEngine.emptyResults(facetSpec) }
-        : {})
-    });
+    const noHits = (q: string): DocumentSearchResponse<TDoc> => {
+      // M7: even trivial exits honor caller aborts and time budgets.
+      throwIfAborted(signal);
+      throwIfBudgetAborted(budget);
+      assertTimeBudget(queryStartMs, budget);
+      const diag = buildDiagnostics('cpu', 0, 0, wantsFacets ? 0 : undefined, false);
+      // Public totalMs is scorer wall-clock (0 on no-hit: nothing scored);
+      // diagnostics.totalMs carries the wall-clock including validation.
+      return {
+        query: q,
+        mode,
+        engine: 'cpu',
+        totalMatches: 0,
+        candidateCount: 0,
+        hasOverflow: false,
+        results: [],
+        timings: {
+          queryUploadMs: 0,
+          encodeSubmitMs: 0,
+          gpuExecutionMs: null,
+          readbackMs: 0,
+          totalMs: 0,
+          gpuDispatchMs: 0
+        },
+        profileId: this.profileId,
+        scoringVersion: SCORING_VERSION,
+        cpuAlgorithm,
+        fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
+        ...(wantsFacets && facetEngine && facetSpec
+          ? { facets: facetEngine.emptyResults(facetSpec) }
+          : {}),
+        ...(diag ? { diagnostics: diag } : {})
+      };
+    };
 
-    let filterBitset: DocumentBitset | undefined = undefined;
-    let filterPredicate: ((doc: TDoc) => boolean) | undefined = undefined;
-    let structuredFilter: FilterExpression | undefined = undefined;
-
+    const tFilter0 = wantsDiagnostics ? nowMs() : 0;
     if (filter !== undefined) {
       if (typeof filter === 'function') {
         filterPredicate = filter;
@@ -738,6 +845,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
       }
     }
+    if (wantsDiagnostics) filteringMs = nowMs() - tFilter0;
+    throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
+    assertTimeBudget(queryStartMs, budget);
 
     // v0.4 M6: extension filter predicates compose conjunctively (AND) with
     // `options.filter` functions. Index-level vs per-query hooks already
@@ -767,6 +878,31 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       return noHits(query);
     }
 
+    // v0.4 M7: broad-query pre-dispatch guard + candidate ceiling.
+    // `filteredCandidateCount` is the exact post-filter population to score;
+    // exceeding `maxCandidates` throws before any scoring work. Short queries
+    // over massive corpora route to the CPU streaming scan to avoid GPU
+    // buffer saturation and driver timeouts (TDR). With function-predicate
+    // filters the pre-predicate population is checked (conservative — the
+    // true post-predicate count is unknowable pre-scan).
+    const activeDocCount = this.idToDocIndex.size;
+    const filteredCandidateCount = filterBitset !== undefined
+      ? filterBitset.popcount()
+      : activeDocCount;
+    assertCandidateBudget(filteredCandidateCount, budget);
+    let broadQueryCpuRoute = false;
+    if (isBroadQueryHeuristic(normalizedQuery.tokens.length, activeDocCount)) {
+      broadQueryCpuRoute = true;
+      // Suppress the GPU-avoidance warning when already CPU-by-design
+      // (token/prefix/typo modes, explicit ufuzzy, query-too-long fallback):
+      // routing outcome is correct but the stated cause would misattribute.
+      const cpuByDesign = !isGpuSupportedMode || cpuAlgorithm === 'ufuzzy' || forceCpu;
+      if (wantsDiagnostics && !cpuByDesign) {
+        diagWarnings.push(broadQueryRouteWarning(activeDocCount, normalizedQuery.tokens.length));
+      }
+    }
+    assertTimeBudget(queryStartMs, budget);
+
     // When field-restricted, route to CPU to prevent unselected high-priority
     // fields from saturating GPU candidate buffer before low-priority allowed fields.
     const isFieldRestricted = allowedFieldIndices !== undefined && allowedFieldIndices.size < this.sortedFields.length;
@@ -776,6 +912,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const gpuHandle = this.gpuEngine;
     const useGpu = !forceCpu &&
       !isFieldRestricted &&
+      !broadQueryCpuRoute &&
       isGpuSupportedMode &&
       cpuAlgorithm !== 'ufuzzy' &&
       this.engineType === 'webgpu' &&
@@ -801,6 +938,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           throw abortError();
         }
         throwIfAborted(signal);
+        // M7: GPU dispatch is async wall-clock work — enforce the caller
+        // deadline and budget abort before touching the readback.
+        throwIfBudgetAborted(budget);
+        assertTimeBudget(queryStartMs, budget);
       } catch (err: any) {
         if (err.name === 'AbortError') {
           throw err;
@@ -930,11 +1071,15 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         const totalMatches = hits.length;
         const candidateCount = Math.min(totalMatches, this.candidateCapacity);
         let results = hits.slice(0, clampedLimit).map((h) => h.item);
-        this.enrichHighlights(results, query, mode, options, customTokenTerms);
+        const tGpuHl0 = wantsDiagnostics ? nowMs() : 0;
+        this.enrichHighlights(results, query, mode, options, customTokenTerms, normalizedQuery.tokens);
+        const gpuHighlightMs = wantsDiagnostics ? nowMs() - tGpuHl0 : 0;
 
         // v0.4 M6: post-match extension pipeline (Top-K only). Scoring boosts
         // apply identically on GPU and CPU paths (parity preserved), followed
         // by a deterministic re-sort; postProcess is the final transform.
+        // M7: hook time joins the scoring bucket on all paths for comparability.
+        const tGpuHook0 = wantsDiagnostics ? nowMs() : 0;
         if (effectiveHooks?.scoringHook !== undefined) {
           applyScoringHook(results, effectiveHooks.scoringHook, query);
           this.resortResultsAfterScoring(results, normalizedQuery.tokens, tieBreakers);
@@ -942,10 +1087,13 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         if (effectiveHooks?.postProcess !== undefined) {
           results = applyPostProcess(results, effectiveHooks.postProcess);
         }
+        const gpuHookMs = wantsDiagnostics ? nowMs() - tGpuHook0 : 0;
 
         // M3: facet aggregation. Exact when the GPU pool covered all matches;
         // approximate over the top pool on overflow unless force-exact rescan.
         let gpuFacets: Record<string, FacetResult> | undefined = undefined;
+        let gpuFacetMs: number | undefined = undefined;
+        let gpuFacetExact = true;
         if (wantsFacets && facetEngine && facetSpec && queryMatchedAll !== null) {
           const facetT0 = nowMs();
           let facetCandidates: Iterable<number> = queryMatchedAll;
@@ -974,8 +1122,37 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, facetIsApproximate
           );
           const facetMs = nowMs() - facetT0;
-          gpuResultOk.timings.totalMs += facetMs;
+          gpuFacetMs = facetMs;
+          gpuFacetExact = !facetIsApproximate;
         }
+
+        // M7: deadline + post-hoc warnings before returning GPU results.
+        // Inline suggest runs before the diagnostics snapshot so
+        // diagnostics.totalMs covers end-to-end latency (suggestMs bucket).
+        const tGpuSuggest0 = wantsDiagnostics && suggestSpec ? nowMs() : 0;
+        const gpuSuggestions = suggestSpec
+          ? this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices)
+          : undefined;
+        const gpuSuggestMs = wantsDiagnostics && suggestSpec ? nowMs() - tGpuSuggest0 : undefined;
+        throwIfAborted(signal);
+        throwIfBudgetAborted(budget);
+        assertTimeBudget(queryStartMs, budget);
+        pushPostHocWarnings(totalMatches, gpuResultOk.hasOverflow, {
+          rawTotalMatches: gpuResultOk.totalMatches,
+          facetsRequested: wantsFacets,
+          facetsExact: gpuFacetExact,
+        });
+        // Scoring = engine scan + post-match hooks (facet time excluded —
+        // no double-counting, no mutation of the engine timings object).
+        const gpuEngineTotal = gpuResultOk.timings.totalMs;
+        const gpuDiag = buildDiagnostics(
+          'webgpu',
+          gpuEngineTotal + gpuHookMs,
+          gpuHighlightMs,
+          gpuFacetMs,
+          gpuResultOk.hasOverflow,
+          gpuSuggestMs
+        );
 
         return {
           query: gpuResultOk.query,
@@ -985,14 +1162,16 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           candidateCount,
           hasOverflow: gpuResultOk.hasOverflow,
           results,
-          timings: gpuResultOk.timings,
+          timings: {
+            ...gpuResultOk.timings,
+            totalMs: gpuEngineTotal + (gpuFacetMs ?? 0) + gpuHighlightMs + gpuHookMs,
+          },
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
           cpuAlgorithm,
           ...(gpuFacets ? { facets: gpuFacets } : {}),
-          ...(suggestSpec
-            ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
-            : {})
+          ...(gpuDiag ? { diagnostics: gpuDiag } : {}),
+          ...(gpuSuggestions ? { suggestions: gpuSuggestions } : {})
         };
       }
     }
@@ -1002,6 +1181,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       throw abortError();
     }
     throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
+    assertTimeBudget(queryStartMs, budget);
     const t0 = nowMs();
 
     if (cpuAlgorithm === 'ufuzzy') {
@@ -1110,7 +1291,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       const totalMatches = hits.length;
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
       let results = hits.slice(0, clampedLimit).map((h) => h.item);
-      this.enrichHighlights(results, query, mode, options, customTokenTerms);
+      const tLegacyHl0 = wantsDiagnostics ? nowMs() : 0;
+      this.enrichHighlights(results, query, mode, options, customTokenTerms, normalizedQuery.tokens);
+      const legacyHighlightMs = wantsDiagnostics ? nowMs() - tLegacyHl0 : 0;
 
       // v0.4 M6: post-match extension pipeline (Top-K only).
       if (effectiveHooks?.scoringHook !== undefined) {
@@ -1121,6 +1304,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         results = applyPostProcess(results, effectiveHooks.postProcess);
       }
       const preFacetMs = nowMs() - t0;
+      // M7: scoring bucket covers scan + ranking + post-match hooks;
+      // highlight enrichment is metered separately above.
+      const legacyScoringMs = Math.max(0, preFacetMs - legacyHighlightMs);
 
       // M3: CPU evaluates the full match set, so legacy facets are exact
       // w.r.t. the serving (ufuzzy/native) match set; see types for caveat.
@@ -1133,6 +1319,29 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         );
         legacyFacetMs = nowMs() - fT0;
       }
+
+      // M7: inline suggest precedes the diagnostics snapshot so
+      // diagnostics.totalMs covers end-to-end latency (suggestMs bucket).
+      const tLegacySuggest0 = wantsDiagnostics && suggestSpec ? nowMs() : 0;
+      const legacySuggestions = suggestSpec
+        ? this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices)
+        : undefined;
+      const legacySuggestMs = wantsDiagnostics && suggestSpec ? nowMs() - tLegacySuggest0 : undefined;
+      throwIfAborted(signal);
+      throwIfBudgetAborted(budget);
+      assertTimeBudget(queryStartMs, budget);
+      pushPostHocWarnings(totalMatches, totalMatches > this.candidateCapacity, {
+        facetsRequested: wantsFacets,
+        facetsExact: true,
+      });
+      const legacyDiag = buildDiagnostics(
+        'cpu',
+        legacyScoringMs,
+        legacyHighlightMs,
+        wantsFacets ? legacyFacetMs : undefined,
+        totalMatches > this.candidateCapacity,
+        legacySuggestMs
+      );
 
       return {
         query,
@@ -1155,9 +1364,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         cpuAlgorithm,
         fallbackReason: 'cpu-algorithm-requested',
         ...(legacyFacets ? { facets: legacyFacets } : {}),
-        ...(suggestSpec
-          ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
-          : {})
+        ...(legacyDiag ? { diagnostics: legacyDiag } : {}),
+        ...(legacySuggestions ? { suggestions: legacySuggestions } : {})
       };
     }
 
@@ -1193,6 +1401,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       throw abortError();
     }
     throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
+    assertTimeBudget(queryStartMs, budget);
 
     const idProp = typeof this.options.idField === 'string' ? this.options.idField : 'id';
     let enrichedResults: DocumentSearchResultItem<TDoc>[] = [];
@@ -1209,11 +1419,15 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         matches: hit.matches
       });
     }
-    this.enrichHighlights(enrichedResults, query, mode, options, customTokenTerms);
+    const tParityHl0 = wantsDiagnostics ? nowMs() : 0;
+    this.enrichHighlights(enrichedResults, query, mode, options, customTokenTerms, normalizedQuery.tokens);
+    const parityHighlightMs = wantsDiagnostics ? nowMs() - tParityHl0 : 0;
 
     // v0.4 M6: post-match extension pipeline (Top-K only). Scoring boosts run
     // after highlight enrichment (highlights travel with items), followed by
     // a deterministic re-sort; postProcess is the final transform.
+    // M7: hook time joins the scoring bucket for parity with the legacy path.
+    const tParityHook0 = wantsDiagnostics ? nowMs() : 0;
     if (effectiveHooks?.scoringHook !== undefined) {
       applyScoringHook(enrichedResults, effectiveHooks.scoringHook, query);
       this.resortResultsAfterScoring(enrichedResults, normalizedQuery.tokens, tieBreakers);
@@ -1221,6 +1435,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     if (effectiveHooks?.postProcess !== undefined) {
       enrichedResults = applyPostProcess(enrichedResults, effectiveHooks.postProcess);
     }
+    const parityHookMs = wantsDiagnostics ? nowMs() - tParityHook0 : 0;
+    const parityScoringMs = parityResult.durationMs + parityHookMs;
 
     // M3: exact facet aggregation. Disjunctive facets need the unfiltered
     // query match set, so a structured filter triggers one extra unfiltered
@@ -1258,14 +1474,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         facetEngine, facetSpec, facetCandidates, structuredFilter, filterPredicate, false
       );
     }
-    const facetMs = wantsFacets ? (nowMs() - facetT0 - facetScanMs) : 0;
+    const facetMs = wantsFacets ? Math.max(0, nowMs() - facetT0 - facetScanMs) : 0;
+    // M7: the disjunctive unfiltered rescan serves facets, so it joins the
+    // faceting bucket (scoring stays scan + post-match hooks).
+    const parityFacetingMs = wantsFacets ? facetScanMs + facetMs : undefined;
 
+    // Public totalMs is scorer wall-clock: scan + hooks + highlight + facets
+    // (excludes inline suggest; diagnostics.totalMs is end-to-end).
     const timings: SearchTimings = {
       queryUploadMs: 0,
       encodeSubmitMs: 0,
       gpuExecutionMs: null,
       readbackMs: 0,
-      totalMs: parityResult.durationMs + facetScanMs + facetMs,
+      totalMs: parityScoringMs + parityHighlightMs + facetScanMs + facetMs,
       gpuDispatchMs: 0
     };
 
@@ -1278,10 +1499,37 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       effectiveFallbackReason = 'unsupported-mode';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
+    } else if (broadQueryCpuRoute) {
+      // v0.4 M7: broad-query CPU routing is a routing decision (like
+      // field-restriction below), not a scorer request — leave the reason
+      // as-is and surface the decision in diagnostics.warnings instead.
     }
     // Note: field-restricted routing (isFieldRestricted) intentionally leaves
     // fallbackReason as-is — it is a routing decision, not a scorer request,
     // so reusing 'cpu-algorithm-requested' would mislead telemetry.
+
+    // M7: inline suggest precedes the diagnostics snapshot so
+    // diagnostics.totalMs covers end-to-end latency (suggestMs bucket).
+    const tParitySuggest0 = wantsDiagnostics && suggestSpec ? nowMs() : 0;
+    const paritySuggestions = suggestSpec
+      ? this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices)
+      : undefined;
+    const paritySuggestMs = wantsDiagnostics && suggestSpec ? nowMs() - tParitySuggest0 : undefined;
+    throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
+    assertTimeBudget(queryStartMs, budget);
+    pushPostHocWarnings(parityResult.totalMatches, parityResult.hasOverflow, {
+      facetsRequested: wantsFacets,
+      facetsExact: true,
+    });
+    const parityDiag = buildDiagnostics(
+      'cpu',
+      parityScoringMs,
+      parityHighlightMs,
+      parityFacetingMs,
+      parityResult.hasOverflow,
+      paritySuggestMs
+    );
 
     return {
       query,
@@ -1297,9 +1545,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       cpuAlgorithm,
       fallbackReason: effectiveFallbackReason,
       ...(parityFacets ? { facets: parityFacets } : {}),
-      ...(suggestSpec
-        ? { suggestions: this.computeSuggestions(query, normalizedQuery.tokens, suggestSpec, allowedFieldIndices) }
-        : {})
+      ...(parityDiag ? { diagnostics: parityDiag } : {}),
+      ...(paritySuggestions ? { suggestions: paritySuggestions } : {})
     };
   }
 
@@ -1595,7 +1842,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     query: string,
     mode: SearchMode,
     options: DocumentSearchOptions<TDoc>,
-    customTokenTerms?: Uint32Array[]
+    customTokenTerms?: Uint32Array[],
+    precomputedTokens?: Uint32Array
   ): void {
     const shouldHighlight = options.highlightOptions?.highlight ?? options.highlight ?? true;
     if (!shouldHighlight) return;
@@ -1615,7 +1863,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       );
     }
 
-    const queryTokens = normalizeText(query, this.folded).tokens;
+    const queryTokens = precomputedTokens ?? normalizeText(query, this.folded).tokens;
     // v0.4 M4: thread token/prefix/typo options so highlight ranges track
     // the serving scorer (score-highlight symmetry across all modes).
     // v0.4 M6: custom tokenizer terms replace the default split when supplied.

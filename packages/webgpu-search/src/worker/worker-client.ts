@@ -178,7 +178,11 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
               // Apply predicate filter if configured as a function.
               // Facets computed worker-side are over the unfiltered set and
               // would go stale, so drop them fail-closed (local path applies
-              // the predicate conjunctively in buildFacetResults).
+              // the predicate conjunctively in buildFacetResults). Diagnostics
+              // (scannedCandidates / filterSelectivity / hasOverflow / timings)
+              // are likewise worker-computed pre-predicate and would go stale,
+              // so drop them too — mirroring the facets path. Callers needing
+              // predicate + diagnostics should run the local DocumentIndex.
               // Suggestions stay index-wide by design (filters never narrow
               // suggestions), so they are kept as returned.
               if (typeof pendingQuery.filter === 'function') {
@@ -190,6 +194,9 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
                 searchResp.totalMatches = searchResp.results.length;
                 if ('facets' in searchResp) {
                   delete (searchResp as { facets?: unknown }).facets;
+                }
+                if ('diagnostics' in searchResp) {
+                  delete (searchResp as { diagnostics?: unknown }).diagnostics;
                 }
               }
             }

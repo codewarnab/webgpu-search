@@ -94,6 +94,16 @@
  * Total bumped 72 KB -> 78 KB with this documented rationale.
  * Budget: 78 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
+ * Issue #10 M7 (query diagnostics, cost budgets & broad-query safeguards):
+ * Adds diagnostics.ts (budget validation, phase-boundary enforcement,
+ * selectivity + broad-query heuristics, warning builders), per-phase timing
+ * + suggestMs telemetry in DocumentIndex/HybridIndex, worker predicate
+ * diagnostics drop, and fail-closed unknown max* keys (+~1.6 KB gzip;
+ * delta +31,011 B exceeds the 30 KB cap, total 80,257 B exceeds 78 KB).
+ * Total bumped 78 KB -> 82 KB and delta cap 30 KB -> 32 KB with this
+ * documented rationale.
+ * Budget: 82 KB gzip total per file (dist/index.js + dist/index.cjs).
+ *
  * Fail-closed: missing dist or dist older than src/fold-table.ts fails
  * (a size gate that passes when there is nothing to measure is decoration).
  *
@@ -105,8 +115,8 @@ import { stat, readFile } from 'node:fs/promises';
 
 const BASELINE_RAW = 234907;
 const BASELINE_GZIP = 49246;
-const DELTA_CAP_GZIP = 30 * 1024;
-const TOTAL_BUDGET_GZIP = 78 * 1024;
+const DELTA_CAP_GZIP = 32 * 1024;
+const TOTAL_BUDGET_GZIP = 82 * 1024;
 
 
 function gzipDeterministic(buf: Uint8Array): number {

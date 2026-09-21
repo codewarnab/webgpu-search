@@ -106,6 +106,25 @@ export {
   type SuggestCandidateKeys,
 } from './suggest';
 
+// v0.4 Query diagnostics, cost budgets & broad-query safeguards (M7)
+export {
+  BROAD_QUERY_SELECTIVITY_THRESHOLD,
+  BROAD_QUERY_MIN_DOCS,
+  BROAD_QUERY_SHORT_QUERY_TOKENS,
+  normalizeCostBudgetOptions,
+  throwIfBudgetAborted,
+  assertTimeBudget,
+  assertCandidateBudget,
+  computeFilterSelectivity,
+  isBroadQueryHeuristic,
+  isBroadSelectivity,
+  broadQueryRouteWarning,
+  broadSelectivityWarning,
+  candidateOverflowWarning,
+  type NormalizedCostBudget,
+  type CandidateOverflowWarningOptions,
+} from './diagnostics';
+
 // v0.4 Extensibility pipeline & safe hook architecture (M6)
 export {
   defaultTokenizer,
