@@ -31,6 +31,10 @@ import {
   type RankableCandidate
 } from './ranking';
 import {
+  aggregateDocMatches as aggregateDocMatchesPure,
+  accumulateDocMatch,
+} from './document-aggregate';
+import {
   normalizeAutocompleteOptions,
   type NormalizedAutocompleteOptions
 } from './autocomplete';
@@ -930,65 +934,25 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   }
 
   /**
-   * Aggregate per-row matches into per-document best-field hits (extracted).
-   * Shared by the WebGPU readback and legacy ufuzzy/native CPU paths which
-   * previously duplicated this ranking block. Deterministic sort via
-   * `compareRanked` + `tieBreakers`. No behavior change.
+   * Aggregate per-row matches into per-document best-field hits (thin
+   * delegator over the pure `document-aggregate` helper so GPU/CPU paths
+   * share one ranking implementation; unit-tested without a device).
+   * No behavior change.
    */
   private aggregateDocMatches(
     docMatches: Map<number, { bestScore: number; bestFieldIdx: number; fieldScores: Map<number, number> }>,
     normalizedQueryTokens: Uint32Array,
     tieBreakers: TieBreakerCriterion[]
   ) {
-    interface RankedDocCandidate {
-      dIdx: number;
-      item: DocumentSearchResultItem<TDoc>;
-      rank: RankableCandidate;
-    }
-    const hits: RankedDocCandidate[] = [];
-    for (const [dIdx, entry] of docMatches.entries()) {
-      const primaryField = this.sortedFields[entry.bestFieldIdx];
-      const auxMatches: Array<{ field: string; score: number }> = [];
-      for (const [fIdx, score] of entry.fieldScores.entries()) {
-        if (fIdx !== entry.bestFieldIdx) {
-          auxMatches.push({ field: this.sortedFields[fIdx].name, score });
-        }
-      }
-      if (auxMatches.length > 1) {
-        auxMatches.sort((a, b) => {
-          if (b.score !== a.score) return b.score > a.score ? 1 : -1;
-          return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
-        });
-      }
-
-      const bestRowIdx = this.docToRowIndices[dIdx]?.[entry.bestFieldIdx];
-      const bestRowTokens = bestRowIdx !== undefined ? this.rowTokens[bestRowIdx] : undefined;
-      hits.push({
-        dIdx,
-        item: {
-          id: this.docIds[dIdx],
-          doc: this.records[dIdx],
-          score: entry.bestScore,
-          matchedField: primaryField.name,
-          matches: auxMatches.length > 0 ? auxMatches : undefined
-        },
-        rank: {
-          score: entry.bestScore,
-          fieldWeight: primaryField.weight,
-          isExactMatch: bestRowTokens !== undefined
-            ? isExactTokenMatch(bestRowTokens, normalizedQueryTokens)
-            : false,
-          matchedLength: bestRowTokens !== undefined ? bestRowTokens.length : 0,
-          id: this.docIds[dIdx],
-          docIndex: dIdx
-        }
-      });
-    }
-
-    // deterministic ranking: score DESC, weight DESC, exact DESC,
-    // length ASC, id ASC (docIndex ASC implicit fallback).
-    hits.sort((a, b) => compareRanked(a.rank, b.rank, tieBreakers));
-    return hits;
+    return aggregateDocMatchesPure<TDoc>(docMatches, {
+      sortedFields: this.sortedFields,
+      docToRowIndices: this.docToRowIndices,
+      rowTokens: this.rowTokens,
+      docIds: this.docIds,
+      records: this.records,
+      normalizedQueryTokens,
+      tieBreakers
+    });
   }
 
   /**
@@ -1292,25 +1256,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           const fDef = this.sortedFields[fIdx];
           const weightedScore = Math.round(rawScore * fDef.weight);
 
-          let entry = docMatches.get(dIdx);
-          if (!entry) {
-            entry = {
-              bestScore: weightedScore,
-              bestFieldIdx: fIdx,
-              fieldScores: new Map<number, number>()
-            };
-            entry.fieldScores.set(fIdx, weightedScore);
-            docMatches.set(dIdx, entry);
-          } else {
-            entry.fieldScores.set(fIdx, weightedScore);
-            if (
-              weightedScore > entry.bestScore ||
-              (weightedScore === entry.bestScore && fIdx < entry.bestFieldIdx)
-            ) {
-              entry.bestScore = weightedScore;
-              entry.bestFieldIdx = fIdx;
-            }
-          }
+          accumulateDocMatch(docMatches, dIdx, fIdx, weightedScore);
         }
 
         const hits = this.aggregateDocMatches(docMatches, normalizedQuery.tokens, tieBreakers);
@@ -1451,25 +1397,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           if (!doc) continue;
           if (filterPredicate && !filterPredicate(doc)) continue;
           const weightedScore = Math.round(hit.score * fDef.weight);
-          let entry = docMatches.get(dIdx);
-          if (!entry) {
-            entry = {
-              bestScore: weightedScore,
-              bestFieldIdx: fIdx,
-              fieldScores: new Map<number, number>()
-            };
-            entry.fieldScores.set(fIdx, weightedScore);
-            docMatches.set(dIdx, entry);
-          } else {
-            entry.fieldScores.set(fIdx, weightedScore);
-            if (
-              weightedScore > entry.bestScore ||
-              (weightedScore === entry.bestScore && fIdx < entry.bestFieldIdx)
-            ) {
-              entry.bestScore = weightedScore;
-              entry.bestFieldIdx = fIdx;
-            }
-          }
+          accumulateDocMatch(docMatches, dIdx, fIdx, weightedScore);
         }
       }
 

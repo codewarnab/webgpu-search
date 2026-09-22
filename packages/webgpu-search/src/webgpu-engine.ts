@@ -633,6 +633,107 @@ export class WebGPUEngine {
     return this.queued(() => this.searchInternal(query, options));
   }
 
+  /**
+   * Zero the atomic counter fallback for Safari without `clearBuffer`.
+   * 8-byte zero write (count + _pad0), queue-ordered before dispatch.
+   * Never skip the reset (stale count corruption). No scoring change.
+   */
+  private writeZeroCounterFallback(): void {
+    this.device!.queue.writeBuffer(this.outputBuffer!, 0, new Uint8Array(8));
+  }
+
+  /**
+   * Single-pass dispatch (extracted). Fast path — keeps timestamps.
+   * Encodes counter reset + compute pass + timestamp resolve + readback
+   * copy in one command buffer. No scoring change.
+   */
+  private dispatchSinglePass(
+    pipeline: GPUComputePipeline,
+    bg: GPUBindGroup,
+    totalWorkgroups: number
+  ): void {
+    const passDesc: GPUComputePassDescriptor = {
+      label: 'search-pass'
+    };
+    if (this.querySet) {
+      (passDesc as any).timestampWrites = {
+        querySet: this.querySet,
+        beginningOfPassWriteIndex: 0,
+        endOfPassWriteIndex: 1
+      };
+    }
+    const enc = this.device!.createCommandEncoder({ label: 'search' });
+
+    if (typeof (enc as any).clearBuffer === 'function') {
+      enc.clearBuffer(this.outputBuffer!, 0, this.outputByteLength);
+    } else {
+      // No clearBuffer: encode the zero via copy path — submit the
+      // queue write before the compute submit (serial ordering).
+      this.writeZeroCounterFallback();
+    }
+
+    const pass = enc.beginComputePass(passDesc);
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bg);
+    pass.dispatchWorkgroups(totalWorkgroups);
+    pass.end();
+
+    if (this.querySet && this.queryResolveBuffer && this.queryStagingBuffer) {
+      enc.resolveQuerySet(this.querySet, 0, 2, this.queryResolveBuffer, 0);
+      enc.copyBufferToBuffer(this.queryResolveBuffer, 0, this.queryStagingBuffer, 0, 16);
+    }
+
+    enc.copyBufferToBuffer(this.outputBuffer!, 0, this.stagingBuffer!, 0, this.outputByteLength);
+    this.device!.queue.submit([enc.finish()]);
+  }
+
+  /**
+   * Chunked dispatch (extracted). When ceil(rows/128) exceeds the device
+   * dimension limit, each chunk re-writes the uniform (_pad.x = base row)
+   * and submits its own pass; the shared atomic counter accumulates.
+   * Queue-ordering dependency: WebGPU guarantees serial queue execution,
+   * so each dispatch samples only prior uniform writes (chunk counts are
+   * tiny in practice: step ≈ 8.4M rows/chunk). Timestamps skipped (null).
+   * No scoring change.
+   */
+  private dispatchChunked(
+    pipeline: GPUComputePipeline,
+    bg: GPUBindGroup,
+    udata: ArrayBuffer,
+    U32: Uint32Array,
+    maxDim: number,
+    workgroupSize: number
+  ): void {
+    const step = maxDim * workgroupSize;
+    const clr = this.device!.createCommandEncoder({ label: 'clear' });
+    if (typeof (clr as any).clearBuffer === 'function') {
+      (clr as any).clearBuffer(this.outputBuffer!, 0, this.outputByteLength);
+      this.device!.queue.submit([clr.finish()]);
+    } else {
+      this.writeZeroCounterFallback();
+    }
+    let base = 0;
+    let left = this.currentDatasetSize;
+    while (left > 0) {
+      const n = left > step ? step : left;
+      const wgs = Math.ceil(n / workgroupSize);
+      U32[4] = base;
+      this.device!.queue.writeBuffer(this.uniformBuffer!, 0, udata);
+      const chunkEnc = this.device!.createCommandEncoder({ label: 'chunk' });
+      const chunkPass = chunkEnc.beginComputePass({ label: 'chunk-pass' });
+      chunkPass.setPipeline(pipeline);
+      chunkPass.setBindGroup(0, bg);
+      chunkPass.dispatchWorkgroups(wgs);
+      chunkPass.end();
+      this.device!.queue.submit([chunkEnc.finish()]);
+      base += n;
+      left -= n;
+    }
+    const cp = this.device!.createCommandEncoder({ label: 'copy' });
+    cp.copyBufferToBuffer(this.outputBuffer!, 0, this.stagingBuffer!, 0, this.outputByteLength);
+    this.device!.queue.submit([cp.finish()]);
+  }
+
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
     const rawMode = options.mode ?? 'fuzzy';
     // Unified with hybrid/document/exact-scorer: unknown modes throw
@@ -734,7 +835,6 @@ export class WebGPUEngine {
     throwIfAborted(options.signal);
 
     const tDispatchStart = nowMs();
-    let skipTimestamps = false;
 
     const bg = this.device.createBindGroup({
       label: 'search-bg',
@@ -759,77 +859,13 @@ export class WebGPUEngine {
     const workgroupSize = 128;
     const totalWorkgroups = Math.ceil(this.currentDatasetSize / workgroupSize);
 
-    // Zero the atomic counter. clearBuffer may not exist on older Safari —
-    // fall back to an 8-byte zero write (count + _pad0), queue-ordered
-    // before the dispatch. Never skip the reset (stale count corruption).
-    const zeroCounterFallback = () => {
-      this.device!.queue.writeBuffer(this.outputBuffer!, 0, new Uint8Array(8));
-    };
-
+    // searchInternal only routes; single vs chunked lives above.
+    // Chunked corpora exceed any latency budget; timestamps skipped (null).
+    let skipTimestamps = false;
     if (totalWorkgroups <= maxDim) {
-      const passDesc: GPUComputePassDescriptor = {
-        label: 'search-pass'
-      };
-      if (this.querySet) {
-        (passDesc as any).timestampWrites = {
-          querySet: this.querySet,
-          beginningOfPassWriteIndex: 0,
-          endOfPassWriteIndex: 1
-        };
-      }
-      const enc = this.device.createCommandEncoder({ label: 'search' });
-
-      if (typeof (enc as any).clearBuffer === 'function') {
-        enc.clearBuffer(this.outputBuffer, 0, this.outputByteLength);
-      } else {
-        // No clearBuffer: encode the zero via copy path — submit the
-        // queue write before the compute submit (serial ordering).
-        zeroCounterFallback();
-      }
-
-      const pass = enc.beginComputePass(passDesc);
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, bg);
-      pass.dispatchWorkgroups(totalWorkgroups);
-      pass.end();
-
-      if (this.querySet && this.queryResolveBuffer && this.queryStagingBuffer) {
-        enc.resolveQuerySet(this.querySet, 0, 2, this.queryResolveBuffer, 0);
-        enc.copyBufferToBuffer(this.queryResolveBuffer, 0, this.queryStagingBuffer, 0, 16);
-      }
-
-      enc.copyBufferToBuffer(this.outputBuffer, 0, this.stagingBuffer, 0, this.outputByteLength);
-      this.device.queue.submit([enc.finish()]);
+      this.dispatchSinglePass(pipeline, bg, totalWorkgroups);
     } else {
-      const step = maxDim * workgroupSize;
-      const clr = this.device.createCommandEncoder({ label: 'clear' });
-      if (typeof (clr as any).clearBuffer === 'function') {
-        (clr as any).clearBuffer(this.outputBuffer, 0, this.outputByteLength);
-        this.device.queue.submit([clr.finish()]);
-      } else {
-        zeroCounterFallback();
-      }
-      let base = 0;
-      let left = this.currentDatasetSize;
-      while (left > 0) {
-        const n = left > step ? step : left;
-        const wgs = Math.ceil(n / workgroupSize);
-        U32[4] = base;
-        this.device.queue.writeBuffer(this.uniformBuffer, 0, udata);
-        const chunkEnc = this.device.createCommandEncoder({ label: 'chunk' });
-        const chunkPass = chunkEnc.beginComputePass({ label: 'chunk-pass' });
-        chunkPass.setPipeline(pipeline);
-        chunkPass.setBindGroup(0, bg);
-        chunkPass.dispatchWorkgroups(wgs);
-        chunkPass.end();
-        this.device.queue.submit([chunkEnc.finish()]);
-        base += n;
-        left -= n;
-      }
-      const cp = this.device.createCommandEncoder({ label: 'copy' });
-      cp.copyBufferToBuffer(this.outputBuffer, 0, this.stagingBuffer, 0, this.outputByteLength);
-      this.device.queue.submit([cp.finish()]);
-      // Chunked corpora exceed any latency budget; timestamps skipped (null).
+      this.dispatchChunked(pipeline, bg, udata, U32, maxDim, workgroupSize);
       skipTimestamps = true;
     }
     const encodeSubmitMs = nowMs() - tDispatchStart;

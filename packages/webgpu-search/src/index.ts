@@ -115,6 +115,14 @@ export {
   type RankableCandidate,
 } from './ranking';
 export {
+  aggregateDocMatches,
+  accumulateDocMatch,
+  type DocMatchEntry,
+  type AggregateField,
+  type RankedDocCandidate,
+  type AggregateDocMatchesContext,
+} from './document-aggregate';
+export {
   AUTOCOMPLETE_DEFAULT_LIMIT,
   AUTOCOMPLETE_DEFAULT_MODE,
   AUTOCOMPLETE_MAX_FUZZY_DISTANCE,
