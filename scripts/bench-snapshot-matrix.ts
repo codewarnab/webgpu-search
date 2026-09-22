@@ -1,5 +1,5 @@
 /**
- * headless benchmark matrix.
+ * headless benchmark matrix (Issue #11 Phase 5 frozen baseline).
  *
  * Covers the benchmark invariant without requiring a browser/GPU:
  * - IDE symbols (monaco-palette records): prefix search, type-filtered
@@ -8,19 +8,34 @@
  * structured level/service/latency filtering, and facet aggregation.
  * - snapshot persistence: serialize/restore wall-clock, snapshot bytes, and
  * columnar segment overhead.
+ * - Index build: wall-clock build + `getStats()` buildTimeMs + memory
+ * (`vramBytes` / `ramBytes`); headless CPU reports `uploadMs: 0`,
+ * `vramBytes: 0` (no GPU upload off-thread).
+ *
+ * Frozen fixtures live in `scripts/benchmark-fixtures.ts`
+ * (`BENCHMARK_FIXTURE_VERSION`, corpora, sizes, queries, modes, filters,
+ * facets). Normative doc: `docs/benchmarks.md`. Checked-in baseline:
+ * `benchmark_snapshot_matrix.json` + `benchmark_snapshot_matrix.md`.
  *
  * Environment: headless CPU only (`preferGpu: false`) for determinism.
  * Numbers are NOT comparable to browser/WebGPU runs. The JSON report records
- * `environment` (runtime, cpu, headless) alongside `generatedAt` + rows.
+ * `fixturesVersion` + `fixtures` alongside `environment` (runtime, cpu,
+ * headless) + `generatedAt` + rows.
  *
  * Run: `bun scripts/bench-snapshot-matrix.ts [--out <path>]`
  * `--out` is constrained to the repo working directory (basename sanitized)
  * to avoid arbitrary file writes; absolute paths under cwd or /tmp are allowed.
+ * A markdown summary is written next to any `.json` out path.
  * All engines run CPU (`preferGpu: false`) for headless determinism.
  */
 import { DocumentIndex } from '../packages/webgpu-search/src/index';
 import { generateMonacoRecords } from '../apps/monaco-palette/src/sample-data';
 import { generateStructuredLogs } from '../apps/log-viewer/src/log-generator';
+import {
+  BENCHMARK_FIXTURE_VERSION,
+  BENCHMARK_LOG_BASE_TIME_MS,
+  BENCHMARK_FIXTURES,
+} from './benchmark-fixtures';
 
 interface Timed {
   medianMs: number;
@@ -83,6 +98,32 @@ function resolveOutPath(raw: string | undefined): string {
   return safe;
 }
 
+function formatMatrixMarkdown(
+  rows: MatrixRow[],
+  environment: Record<string, string | boolean>,
+  generatedAt: string
+): string {
+  const lines: string[] = [];
+  lines.push('# Benchmark Snapshot Matrix (headless CPU baseline)');
+  lines.push('');
+  lines.push(`- Fixtures: \`${BENCHMARK_FIXTURE_VERSION}\` (see \`scripts/benchmark-fixtures.ts\`, \`docs/benchmarks.md\` §1)`);
+  lines.push(`- Generated: ${generatedAt}`);
+  lines.push(`- Environment: engine=${environment.engine}, preferGpu=${environment.preferGpu}, headless=${environment.headless}, runtime=${environment.runtime}, platform=${environment.platform}`);
+  lines.push('');
+  lines.push('> Headless CPU numbers are NOT comparable to browser/WebGPU runs.');
+  lines.push('> Browser/WebGPU reports stay separate (`docs/benchmarks.md` §2, `bun run test:benchmark`).');
+  lines.push('');
+  lines.push('| Scenario | Docs | Operation | Median (ms) | p95 (ms) | Extra |');
+  lines.push('|---|---|---|---:|---:|---|');
+  for (const r of rows) {
+    lines.push(
+      `| ${r.scenario} | ${r.docs.toLocaleString()} | ${r.operation} | ${r.medianMs} | ${r.p95Ms} | ${r.extra ? JSON.stringify(r.extra) : ''} |`
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 async function main(): Promise<void> {
   const rows: MatrixRow[] = [];
   const outIdx = process.argv.indexOf('--out');
@@ -93,6 +134,7 @@ async function main(): Promise<void> {
   // ------------------------------------------------------------------
   {
     const records = generateMonacoRecords(5000);
+    const tBuild0 = performance.now();
     const index = await DocumentIndex.create(records, {
       idField: 'id',
       fields: [
@@ -104,16 +146,26 @@ async function main(): Promise<void> {
       filterFields: [{ name: 'type' }, { name: 'language' }],
       preferGpu: false
     });
+    const buildMs = Number((performance.now() - tBuild0).toFixed(3));
+    const buildStats = index.getStats();
+    const mem = { vramBytes: buildStats.memory.vramBytes, ramBytes: buildStats.memory.ramBytes };
+    rows.push({
+      scenario: 'ide-symbols-5k', docs: 5000, operation: 'index-build',
+      medianMs: buildMs, p95Ms: buildMs, samples: [buildMs],
+      extra: { buildMs, buildTimeMs: buildStats.buildTimeMs, uploadMs: 0, ...mem },
+    });
+
+    const withMem = (extra?: Record<string, number | string | boolean>) => ({ buildMs, uploadMs: 0, ...mem, ...extra });
 
     const prefix = await timeSamples(() =>
       index.search('compute', { mode: 'prefix', limit: 20 }).then(() => {})
     );
-    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search', medianMs: prefix.medianMs, p95Ms: prefix.p95Ms, samples: prefix.samples });
+    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search', medianMs: prefix.medianMs, p95Ms: prefix.p95Ms, samples: prefix.samples, extra: withMem() });
 
     const filtered = await timeSamples(() =>
       index.search('compute', { mode: 'prefix', limit: 20, filter: { type: 'shader' } }).then(() => {})
     );
-    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search+type-filter', medianMs: filtered.medianMs, p95Ms: filtered.p95Ms, samples: filtered.samples });
+    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search+type-filter', medianMs: filtered.medianMs, p95Ms: filtered.p95Ms, samples: filtered.samples, extra: withMem() });
 
     const autocomplete = await timeSamples(() =>
       index.autocomplete('comp', { mode: 'prefix', limit: 5 }).then(() => {})
@@ -122,7 +174,7 @@ async function main(): Promise<void> {
     rows.push({
       scenario: 'ide-symbols-5k', docs: 5000, operation: 'autocomplete',
       medianMs: autocomplete.medianMs, p95Ms: autocomplete.p95Ms, samples: autocomplete.samples,
-      extra: { suggestionCount: autocompleteRes.suggestions.length }
+      extra: withMem({ suggestionCount: autocompleteRes.suggestions.length })
     });
 
     const facets = await timeSamples(() =>
@@ -131,7 +183,7 @@ async function main(): Promise<void> {
         facets: { byType: { type: 'terms', field: 'type', limit: 10 } }
       }).then(() => {})
     );
-    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'fuzzy-search+type-facets', medianMs: facets.medianMs, p95Ms: facets.p95Ms, samples: facets.samples });
+    rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'fuzzy-search+type-facets', medianMs: facets.medianMs, p95Ms: facets.p95Ms, samples: facets.samples, extra: withMem() });
 
     index.destroy();
   }
@@ -140,7 +192,8 @@ async function main(): Promise<void> {
   // 2. Data-grid rows (structured logs at 10k / 50k / 100k)
   // ------------------------------------------------------------------
   for (const count of [10_000, 50_000, 100_000]) {
-    const logs = generateStructuredLogs(count);
+    const logs = generateStructuredLogs(count, 1, BENCHMARK_LOG_BASE_TIME_MS);
+    const tBuild0 = performance.now();
     const index = await DocumentIndex.create(logs as any, {
       idField: 'id',
       fields: [
@@ -152,11 +205,21 @@ async function main(): Promise<void> {
       filterFields: [{ name: 'level' }, { name: 'service' }, { name: 'timestamp' }, { name: 'latencyMs', type: 'number' }],
       preferGpu: false
     });
+    const buildMs = Number((performance.now() - tBuild0).toFixed(3));
+    const buildStats = index.getStats();
+    const mem = { vramBytes: buildStats.memory.vramBytes, ramBytes: buildStats.memory.ramBytes };
+    const scenario = `log-grid-${count / 1000}k`;
+    rows.push({
+      scenario, docs: count, operation: 'index-build',
+      medianMs: buildMs, p95Ms: buildMs, samples: [buildMs],
+      extra: { buildMs, buildTimeMs: buildStats.buildTimeMs, uploadMs: 0, ...mem },
+    });
+    const withMem = (extra?: Record<string, number | string | boolean>) => ({ buildMs, uploadMs: 0, ...mem, ...extra });
 
     const fuzzy = await timeSamples(() =>
       index.search('timeout', { mode: 'fuzzy', limit: 50 }).then(() => {})
     );
-    rows.push({ scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search', medianMs: fuzzy.medianMs, p95Ms: fuzzy.p95Ms, samples: fuzzy.samples });
+    rows.push({ scenario, docs: count, operation: 'fuzzy-search', medianMs: fuzzy.medianMs, p95Ms: fuzzy.p95Ms, samples: fuzzy.samples, extra: withMem() });
 
     const filtered = await timeSamples(() =>
       index.search('timeout', {
@@ -169,9 +232,9 @@ async function main(): Promise<void> {
       filter: { level: 'ERROR', latencyMs: { gte: 300 } }
     });
     rows.push({
-      scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search+level+latency-filter',
+      scenario, docs: count, operation: 'fuzzy-search+level+latency-filter',
       medianMs: filtered.medianMs, p95Ms: filtered.p95Ms, samples: filtered.samples,
-      extra: { totalMatches: filteredRes.totalMatches }
+      extra: withMem({ totalMatches: filteredRes.totalMatches })
     });
 
     const faceted = await timeSamples(() =>
@@ -190,7 +253,7 @@ async function main(): Promise<void> {
         }
       }).then(() => {})
     );
-    rows.push({ scenario: `log-grid-${count / 1000}k`, docs: count, operation: 'fuzzy-search+facets', medianMs: faceted.medianMs, p95Ms: faceted.p95Ms, samples: faceted.samples });
+    rows.push({ scenario, docs: count, operation: 'fuzzy-search+facets', medianMs: faceted.medianMs, p95Ms: faceted.p95Ms, samples: faceted.samples, extra: withMem() });
 
     // snapshot persistence profile only on the 10k grid to bound runtime.
     // Sampled 10× with warmup like every other row (previously n=1).
@@ -218,12 +281,12 @@ async function main(): Promise<void> {
       rows.push({
         scenario: 'log-grid-10k', docs: count, operation: 'snapshot-serialize',
         medianMs: serSamples.medianMs, p95Ms: serSamples.p95Ms, samples: serSamples.samples,
-        extra: { snapshotBytes: snapshot.byteLength, schemaBytes: schemaLen, columnarBytes: columnarLen, docsBytes: docsLen }
+        extra: withMem({ snapshotBytes: snapshot.byteLength, schemaBytes: schemaLen, columnarBytes: columnarLen, docsBytes: docsLen })
       });
       rows.push({
         scenario: 'log-grid-10k', docs: count, operation: 'snapshot-restore',
         medianMs: resSamples.medianMs, p95Ms: resSamples.p95Ms, samples: resSamples.samples,
-        extra: { restoredMatches: probe.totalMatches }
+        extra: withMem({ snapshotBytes: snapshot.byteLength, restoredMatches: probe.totalMatches, restoreTimeMs: restored.getStats().restoreTimeMs ?? -1 })
       });
       restored.destroy();
     }
@@ -246,6 +309,7 @@ async function main(): Promise<void> {
 
   if (outPath) {
     const { writeFileSync } = await import('node:fs');
+    const generatedAt = new Date().toISOString();
     const environment = {
       engine: 'cpu',
       preferGpu: false,
@@ -254,8 +318,19 @@ async function main(): Promise<void> {
       platform: `${process.platform}-${process.arch}`,
       note: 'Headless CPU numbers; not comparable to browser/WebGPU runs.'
     };
-    writeFileSync(outPath!, JSON.stringify({ generatedAt: new Date().toISOString(), environment, rows }, null, 2));
+    writeFileSync(outPath!, JSON.stringify({
+      fixturesVersion: BENCHMARK_FIXTURE_VERSION,
+      generatedAt,
+      fixtures: BENCHMARK_FIXTURES,
+      environment,
+      rows
+    }, null, 2));
     console.log(`Matrix written to ${outPath}`);
+    if (outPath.endsWith('.json')) {
+      const mdPath = outPath.slice(0, -'.json'.length) + '.md';
+      writeFileSync(mdPath, formatMatrixMarkdown(rows, environment as Record<string, string | boolean>, generatedAt));
+      console.log(`Summary written to ${mdPath}`);
+    }
   }
 }
 

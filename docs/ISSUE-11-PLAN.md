@@ -2,7 +2,7 @@
 
 > **Issue Reference**: [GitHub Issue #11: 1.0: lock compatibility, reliability, and the embedding ecosystem](https://github.com/codewarnab/webgpu-fuzzy-search/issues/11)
 > **Target Milestone**: `1.0.0`
-> **Status**: Phases 0–4 and 6 complete; Phase 5 open
+> **Status**: Phases 0–6 complete
 > **Predecessors**: v0.1.1 (#8), v0.2 (#7), v0.3 (#9), v0.4 (#10)
 > **Roadmap**: Issue #12 (embeddable search infrastructure through 1.0)
 
@@ -25,7 +25,7 @@ Success means a host can build or restore an index off the main thread, update i
 - [x] Prove device-loss rebuild, resource cleanup, concurrent-query isolation, and deterministic fallback. (Done: `rebuildGpu()` on both index types, `docs/reliability.md`, `scripts/test-reliability.ts` 58 checks, parity Part 7, contracts §13, wired into `test:compatibility` + `test:all`.)
 - [x] Define index-format compatibility and migration support across supported releases. (Done: `docs/snapshot-format.md` §§1–9 migration table + reject taxonomy, `snapshot-codec` schema/header agreement guard, `DocumentIndex` ctor/`fromSnapshotData`/`applySnapshotData` `ProfileMismatchError` guards, `scripts/test-snapshot.ts` §§14–17 hookIds/worker-version/all-caps/profile+live-format pins.)
 - [x] Maintain integration examples for web IDE search, local logs/data grids, and offline docs. (Done: `apps/monaco-palette`, `apps/log-viewer`, `apps/docs-search`, `scripts/test-proof-apps.ts` §§1–12 incl. teardown + public-API-only + recipe + DOM-free audits.)
-- [ ] Publish reproducible benchmark fixtures, environments, median/p95 results, memory, build/upload, and restore costs.
+- [x] Publish reproducible benchmark fixtures, environments, median/p95 results, memory, build/upload, and restore costs. (Done: `docs/benchmarks.md` frozen fixtures `1.0.0`, `scripts/benchmark-fixtures.ts` versioned corpora/queries spec, `bench-snapshot-matrix.ts` per-scenario median/p95 + `vramBytes`/`ramBytes` + build/upload + serialize/restore bytes/time with headless-non-comparable label, checked-in `benchmark_snapshot_matrix.json` + `.md` baselines, `scripts/test-benchmarks.ts` 82-check pin wired into `test:compatibility` + `test:all`.)
 - [x] Provide package-size budgets, tree-shaking guidance, CSP/worker setup, SSR-safe imports, and accessibility guidance for example UIs. (Done: per-entry gzip budgets — 90 KB index / 76 KB worker — in `scripts/check-bundle-size.ts`, `"sideEffects": false`, `docs/packaging.md`.)
 - [x] Document diagnostics, issue-report data, security/privacy boundaries, and unsupported configurations. (Done: `docs/diagnostics.md`, `.github/ISSUE_TEMPLATE/webgpu-search-issue.md`, `docs/security-privacy.md`, unsupported list in `docs/support-matrix.md` §6.)
 
@@ -130,16 +130,18 @@ Tasks (all complete):
 
 Exit: three proof apps pass using only public APIs.
 
-### Phase 5 — Reproducible Benchmarks
+### Phase 5 — Reproducible Benchmarks ✅ DONE
 
 Scope: `scripts/bench-snapshot-matrix.ts`, `scripts/run-all-benchmarks.ts`, `scripts/run-fuzzy-benchmark.ts`, `apps/benchmark`.
 
-Tasks:
+Shipped: `scripts/benchmark-fixtures.ts` (`BENCHMARK_FIXTURE_VERSION 1.0.0`, frozen monaco-5k / logs-10k/50k/100k corpora, queries/modes/filters/facets, 19 expected rows, deterministic `BENCHMARK_LOG_BASE_TIME_MS` anchor threaded through a backwards-compatible `generateStructuredLogs(count, startId?, baseTimeMs?)` param), `bench-snapshot-matrix.ts` per-scenario `index-build` rows + `vramBytes`/`ramBytes`/`buildMs`/`uploadMs` on every row + snapshot bytes (`snapshotBytes`/`schemaBytes`/`columnarBytes`/`docsBytes`) and restore costs (`restoredMatches`/`restoreTimeMs`) + `fixturesVersion`/`fixtures` in JSON + sibling markdown summary with the headless-non-comparable label, checked-in `benchmark_snapshot_matrix.json` + `benchmark_snapshot_matrix.md` baselines (`.gitignore` exception), `docs/benchmarks.md` (§§1–5 fixtures/env-table/per-scenario table/repro/re-baseline rule), `scripts/test-benchmarks.ts` 82-check pin wired into `test:compatibility` + `test:all` and `docs/support-matrix.md` §5. Gates: `bench:snapshot-matrix`, `test:benchmarks`, `check:shaders`, `typecheck`, `build`, `test:mock`, `check:public-api`, `check:bundle-size`, `test:proof-apps` all green.
 
-1. Freeze fixtures: version `generateMonacoRecords` and `generateStructuredLogs` corpora; record sizes, queries, modes, filters, facets.
-2. Publish per-scenario table: environment (browser / GPU / driver / runtime), median/p95 with samples, memory (`vramBytes` / `ramBytes`), build/upload, serialize/restore bytes + time.
-3. Keep headless-CPU and browser-WebGPU reports separate; label headless numbers non-comparable to GPU runs.
-4. Check in `benchmark_snapshot_matrix.json` baselines + markdown summary.
+Tasks (all complete):
+
+1. [x] Freeze fixtures: version `generateMonacoRecords` and `generateStructuredLogs` corpora; record sizes, queries, modes, filters, facets.
+2. [x] Publish per-scenario table: environment (browser / GPU / driver / runtime), median/p95 with samples, memory (`vramBytes` / `ramBytes`), build/upload, serialize/restore bytes + time.
+3. [x] Keep headless-CPU and browser-WebGPU reports separate; label headless numbers non-comparable to GPU runs.
+4. [x] Check in `benchmark_snapshot_matrix.json` baselines + markdown summary.
 
 Exit: performance claims trace to named fixtures and environments.
 

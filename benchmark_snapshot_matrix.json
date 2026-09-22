@@ -1,0 +1,646 @@
+{
+  "fixturesVersion": "1.0.0",
+  "generatedAt": "2026-09-22T13:35:10.488Z",
+  "fixtures": [
+    {
+      "scenario": "ide-symbols-5k",
+      "corpus": "monaco",
+      "docs": 5000,
+      "idField": "id",
+      "fields": [
+        {
+          "name": "filename",
+          "weight": 3
+        },
+        {
+          "name": "symbols",
+          "weight": 2
+        },
+        {
+          "name": "path",
+          "weight": 1
+        },
+        {
+          "name": "description",
+          "weight": 0.5
+        }
+      ],
+      "filterFields": [
+        {
+          "name": "type"
+        },
+        {
+          "name": "language"
+        }
+      ],
+      "operations": [
+        "index-build",
+        "prefix-search",
+        "prefix-search+type-filter",
+        "autocomplete",
+        "fuzzy-search+type-facets"
+      ]
+    },
+    {
+      "scenario": "log-grid-10k",
+      "corpus": "logs",
+      "docs": 10000,
+      "idField": "id",
+      "fields": [
+        {
+          "name": "message",
+          "weight": 2
+        },
+        {
+          "name": "service",
+          "weight": 1.5
+        },
+        {
+          "name": "level",
+          "weight": 1
+        },
+        {
+          "name": "traceId",
+          "weight": 1.2
+        }
+      ],
+      "filterFields": [
+        {
+          "name": "level"
+        },
+        {
+          "name": "service"
+        },
+        {
+          "name": "timestamp"
+        },
+        {
+          "name": "latencyMs",
+          "type": "number"
+        }
+      ],
+      "operations": [
+        "index-build",
+        "fuzzy-search",
+        "fuzzy-search+level+latency-filter",
+        "fuzzy-search+facets",
+        "snapshot-serialize",
+        "snapshot-restore"
+      ]
+    },
+    {
+      "scenario": "log-grid-50k",
+      "corpus": "logs",
+      "docs": 50000,
+      "idField": "id",
+      "fields": [
+        {
+          "name": "message",
+          "weight": 2
+        },
+        {
+          "name": "service",
+          "weight": 1.5
+        },
+        {
+          "name": "level",
+          "weight": 1
+        },
+        {
+          "name": "traceId",
+          "weight": 1.2
+        }
+      ],
+      "filterFields": [
+        {
+          "name": "level"
+        },
+        {
+          "name": "service"
+        },
+        {
+          "name": "timestamp"
+        },
+        {
+          "name": "latencyMs",
+          "type": "number"
+        }
+      ],
+      "operations": [
+        "index-build",
+        "fuzzy-search",
+        "fuzzy-search+level+latency-filter",
+        "fuzzy-search+facets"
+      ]
+    },
+    {
+      "scenario": "log-grid-100k",
+      "corpus": "logs",
+      "docs": 100000,
+      "idField": "id",
+      "fields": [
+        {
+          "name": "message",
+          "weight": 2
+        },
+        {
+          "name": "service",
+          "weight": 1.5
+        },
+        {
+          "name": "level",
+          "weight": 1
+        },
+        {
+          "name": "traceId",
+          "weight": 1.2
+        }
+      ],
+      "filterFields": [
+        {
+          "name": "level"
+        },
+        {
+          "name": "service"
+        },
+        {
+          "name": "timestamp"
+        },
+        {
+          "name": "latencyMs",
+          "type": "number"
+        }
+      ],
+      "operations": [
+        "index-build",
+        "fuzzy-search",
+        "fuzzy-search+level+latency-filter",
+        "fuzzy-search+facets"
+      ]
+    }
+  ],
+  "environment": {
+    "engine": "cpu",
+    "preferGpu": false,
+    "headless": true,
+    "runtime": "bun/1.4.2",
+    "platform": "linux-arm64",
+    "note": "Headless CPU numbers; not comparable to browser/WebGPU runs."
+  },
+  "rows": [
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "index-build",
+      "medianMs": 35.032,
+      "p95Ms": 35.032,
+      "samples": [
+        35.032
+      ],
+      "extra": {
+        "buildMs": 35.032,
+        "buildTimeMs": 33.248981,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 4184264
+      }
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "prefix-search",
+      "medianMs": 12.299,
+      "p95Ms": 15.115,
+      "samples": [
+        10.564,
+        10.741,
+        10.745,
+        10.977,
+        12.042,
+        12.555,
+        12.581,
+        12.863,
+        13.431,
+        16.492
+      ],
+      "extra": {
+        "buildMs": 35.032,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 4184264
+      }
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "prefix-search+type-filter",
+      "medianMs": 5.99,
+      "p95Ms": 9.892,
+      "samples": [
+        5.222,
+        5.252,
+        5.253,
+        5.472,
+        5.502,
+        6.478,
+        7.235,
+        7.759,
+        8.499,
+        11.032
+      ],
+      "extra": {
+        "buildMs": 35.032,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 4184264
+      }
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "autocomplete",
+      "medianMs": 14.48,
+      "p95Ms": 16.25,
+      "samples": [
+        13.886,
+        13.935,
+        13.984,
+        14.139,
+        14.407,
+        14.553,
+        14.578,
+        15.608,
+        15.799,
+        16.619
+      ],
+      "extra": {
+        "buildMs": 35.032,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 4184264,
+        "suggestionCount": 5
+      }
+    },
+    {
+      "scenario": "ide-symbols-5k",
+      "docs": 5000,
+      "operation": "fuzzy-search+type-facets",
+      "medianMs": 7.502,
+      "p95Ms": 10.716,
+      "samples": [
+        7.316,
+        7.391,
+        7.438,
+        7.458,
+        7.496,
+        7.507,
+        7.984,
+        8.026,
+        10.1,
+        11.221
+      ],
+      "extra": {
+        "buildMs": 35.032,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 4184264
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "index-build",
+      "medianMs": 41.457,
+      "p95Ms": 41.457,
+      "samples": [
+        41.457
+      ],
+      "extra": {
+        "buildMs": 41.457,
+        "buildTimeMs": 41.19228499999997,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 3815780
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search",
+      "medianMs": 4.854,
+      "p95Ms": 7.697,
+      "samples": [
+        4.296,
+        4.606,
+        4.662,
+        4.685,
+        4.854,
+        4.854,
+        4.902,
+        5.081,
+        7.227,
+        8.082
+      ],
+      "extra": {
+        "buildMs": 41.457,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 3815780
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 2.537,
+      "p95Ms": 3.499,
+      "samples": [
+        2.278,
+        2.284,
+        2.38,
+        2.405,
+        2.468,
+        2.607,
+        2.638,
+        3.075,
+        3.466,
+        3.526
+      ],
+      "extra": {
+        "buildMs": 41.457,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 3815780,
+        "totalMatches": 150
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 4.724,
+      "p95Ms": 6.021,
+      "samples": [
+        4.449,
+        4.567,
+        4.605,
+        4.679,
+        4.699,
+        4.748,
+        4.816,
+        4.87,
+        5.086,
+        6.785
+      ],
+      "extra": {
+        "buildMs": 41.457,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 3815780
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "snapshot-serialize",
+      "medianMs": 40.318,
+      "p95Ms": 49.358,
+      "samples": [
+        34.94,
+        35.799,
+        38.145,
+        38.396,
+        39.586,
+        41.049,
+        44.646,
+        45.383,
+        48.499,
+        50.061
+      ],
+      "extra": {
+        "buildMs": 41.457,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 3815780,
+        "snapshotBytes": 6671531,
+        "schemaBytes": 140329,
+        "columnarBytes": 548521,
+        "docsBytes": 2166845
+      }
+    },
+    {
+      "scenario": "log-grid-10k",
+      "docs": 10000,
+      "operation": "snapshot-restore",
+      "medianMs": 48.96,
+      "p95Ms": 66.213,
+      "samples": [
+        43.622,
+        44.905,
+        47.083,
+        47.449,
+        48.906,
+        49.013,
+        51.023,
+        51.432,
+        58.57,
+        72.467
+      ],
+      "extra": {
+        "buildMs": 41.457,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 3815780,
+        "snapshotBytes": 6671531,
+        "restoredMatches": 150,
+        "restoreTimeMs": 14.314923999999792
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "index-build",
+      "medianMs": 368.329,
+      "p95Ms": 368.329,
+      "samples": [
+        368.329
+      ],
+      "extra": {
+        "buildMs": 368.329,
+        "buildTimeMs": 368.1782439999997,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 19078864
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search",
+      "medianMs": 19.24,
+      "p95Ms": 21.693,
+      "samples": [
+        18.61,
+        18.982,
+        19.055,
+        19.062,
+        19.176,
+        19.305,
+        19.672,
+        19.734,
+        19.815,
+        23.229
+      ],
+      "extra": {
+        "buildMs": 368.329,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 19078864
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 9.351,
+      "p95Ms": 12.793,
+      "samples": [
+        5.308,
+        5.916,
+        9.213,
+        9.249,
+        9.277,
+        9.425,
+        9.477,
+        9.985,
+        10.516,
+        14.656
+      ],
+      "extra": {
+        "buildMs": 368.329,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 19078864,
+        "totalMatches": 750
+      }
+    },
+    {
+      "scenario": "log-grid-50k",
+      "docs": 50000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 25.014,
+      "p95Ms": 27.154,
+      "samples": [
+        24.554,
+        24.657,
+        24.724,
+        24.862,
+        24.878,
+        25.149,
+        25.334,
+        25.359,
+        27.001,
+        27.279
+      ],
+      "extra": {
+        "buildMs": 368.329,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 19078864
+      }
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "index-build",
+      "medianMs": 729.359,
+      "p95Ms": 729.359,
+      "samples": [
+        729.359
+      ],
+      "extra": {
+        "buildMs": 729.359,
+        "buildTimeMs": 729.2449860000002,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 38157812
+      }
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search",
+      "medianMs": 35.882,
+      "p95Ms": 43.723,
+      "samples": [
+        35.299,
+        35.352,
+        35.417,
+        35.593,
+        35.654,
+        36.11,
+        36.382,
+        37.101,
+        37.347,
+        48.939
+      ],
+      "extra": {
+        "buildMs": 729.359,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 38157812
+      }
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search+level+latency-filter",
+      "medianMs": 16.461,
+      "p95Ms": 17.223,
+      "samples": [
+        15.429,
+        15.836,
+        15.99,
+        16.332,
+        16.43,
+        16.491,
+        16.744,
+        17.007,
+        17.103,
+        17.321
+      ],
+      "extra": {
+        "buildMs": 729.359,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 38157812,
+        "totalMatches": 1500
+      }
+    },
+    {
+      "scenario": "log-grid-100k",
+      "docs": 100000,
+      "operation": "fuzzy-search+facets",
+      "medianMs": 34.188,
+      "p95Ms": 35.185,
+      "samples": [
+        33.374,
+        33.475,
+        33.527,
+        34.006,
+        34.149,
+        34.228,
+        34.255,
+        34.308,
+        35.161,
+        35.204
+      ],
+      "extra": {
+        "buildMs": 729.359,
+        "uploadMs": 0,
+        "vramBytes": 0,
+        "ramBytes": 38157812
+      }
+    }
+  ]
+}

@@ -148,8 +148,9 @@ The browser suite is the executing-hardware release gate.
 | Search modes | `bun run test:search-modes` (`packages/webgpu-search/test/search-modes.test.ts`) | Bounded typo tolerance, token AND/OR/quorum + proximity, prefix anchor + `prefixLength` / `exactCase` gates, 4-mode CPU wiring, `DocumentIndex` integration (filters/facets/highlights), GPU routing (token/prefix/typo rejected to CPU, WGSL exact-only), determinism, portability (no unguarded DOM) | CPU reference on all runtimes; GPU routing via mock device |
 | CPU baseline pin | `bun run test:cpu-baseline` (`scripts/test-cpu-baseline.ts`) | Section 1 reproducibility without a GPU (default-equals-explicit `exact`, integer descending scores, 4-mode coverage, `prefer-cpu` vs `unsupported-mode` reasons, ufuzzy opt-in + conflicts, `DocumentIndex` echoes, SSR guard) | Node/Bun/SSR, no GPU required |
 | Reliability proofs | `bun run test:reliability` (`scripts/test-reliability.ts`) | Device-loss rebuild (`rebuildGpu` identical semantics), multi-index create/destroy leak gate + worker `DESTROY`, direct + worker concurrent-query isolation under rapid typing, GPU-unavailable/lost deterministic fallback vs the CPU contract; see `docs/reliability.md` | Node/Bun/SSR headless (mock device); browser subset stays the hardware gate |
+| Benchmark fixtures pin | `bun run test:benchmarks` (`scripts/test-benchmarks.ts`) | Frozen fixtures `1.0.0` (`scripts/benchmark-fixtures.ts`): generator determinism, frozen queries serve live on smoke indexes, checked-in `benchmark_snapshot_matrix.json` covers every (scenario, operation) pair with median/p95/samples + memory/build/snapshot costs, headless label pinned; see `docs/benchmarks.md` | Node/Bun headless, no GPU required |
 | Browser regression (hardware gate) | `bun run test:browser` (`scripts/test-regression.ts`) | Timings separation, broad-query top-K, overflow detection, unicode packing, **ordered `(index, score, text)` CPU/GPU parity on executing hardware** (Bun oracle vs Chrome subject, same-host) | Chrome/Chromium + benchmark dev server (`apps/benchmark`); requires a Chrome binary (`CHROME_BIN`) |
-| Aggregator | `bun run test:compatibility` | Runs the headless compatibility set in one command: `test:mock` + `test:contracts` + `test:parity` + `test:search-modes` + `test:cpu-baseline` + `test:reliability`. The browser gate stays separate (`test:browser`) because it needs Chrome + WebGPU | CI + local |
+| Aggregator | `bun run test:compatibility` | Runs the headless compatibility set in one command: `test:mock` + `test:contracts` + `test:parity` + `test:search-modes` + `test:cpu-baseline` + `test:reliability` + `test:benchmarks`. The browser gate stays separate (`test:browser`) because it needs Chrome + WebGPU | CI + local |
 
 Run:
 
@@ -191,5 +192,6 @@ browser regression gate on stable Chrome.
 
 Migration tables, the third proof app, and packaging guides are earlier
 phases in `docs/ISSUE-11-PLAN.md` and are not claimed by
-this matrix. Frozen benchmark fixtures remain Phase 5. Reliability proofs (rebuild, leak/concurrency gates) live in
+this matrix. Frozen benchmark fixtures live in `docs/benchmarks.md`
+(Phase 5). Reliability proofs (rebuild, leak/concurrency gates) live in
 `docs/reliability.md`.

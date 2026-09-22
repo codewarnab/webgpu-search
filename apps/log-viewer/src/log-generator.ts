@@ -62,9 +62,12 @@ function generateHex(len: number, seed: number): string {
   return hex;
 }
 
-export function generateStructuredLogs(count: number, startId: number = 1): StructuredLogRecord[] {
+export function generateStructuredLogs(count: number, startId: number = 1, baseTimeMs?: number): StructuredLogRecord[] {
   const records = new Array<StructuredLogRecord>(count);
-  const now = Date.now();
+  // Frozen-benchmark anchor: callers (bench-snapshot-matrix) pass
+  // BENCHMARK_LOG_BASE_TIME_MS so snapshot bytes are reproducible run-to-run.
+  // Default preserves the legacy wall-clock behavior.
+  const now = baseTimeMs ?? Date.now();
 
   for (let i = 0; i < count; i++) {
     const idNum = startId + i;
