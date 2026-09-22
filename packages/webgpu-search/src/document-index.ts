@@ -542,21 +542,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     this.buildTimeMs = nowMs() - t0;
   }
 
-  async search(
-    query: string,
-    options: DocumentSearchOptions<TDoc> = {}
-  ): Promise<DocumentSearchResponse<TDoc>> {
-    if (this.isDestroyed) {
-      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
-    }
-    throwIfAborted(options.signal);
-    await this.searchMutex;
-    if (this.isDestroyed) {
-      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
-    }
-    throwIfAborted(options.signal);
-    const gen = this.generation;
-
+  /**
+   * Validate search options fail-closed (extracted from `search`).
+   * Covers query shape, mode/scorer/profile checks, token/prefix/typo
+   * normalization, hooks, budget/diagnostics, query-length gates, facet,
+   * ranking/autocomplete, field scoping, and tokenizer expansion.
+   * No behavior change: code moved verbatim from `search`.
+   */
+  private validateSearchOptions(query: string, options: DocumentSearchOptions<TDoc>) {
     if (typeof query !== 'string') {
       throw new TypeError(`[webgpu-search] search expects query: string, got ${typeof query}.`);
     }
@@ -569,7 +562,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       cpuScorer: cpuScorerOpt,
       onQueryTooLong = 'throw',
       fields: searchFields,
-      filter,
       facets,
       faceting
     } = options;
@@ -638,84 +630,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const needsClock = wantsDiagnostics || budget?.maxExecutionTimeMs !== undefined;
     const queryStartMs = needsClock ? nowMs() : 0;
     const diagWarnings: string[] = [];
-    let filteringMs = 0;
-    // filter-state declarations hoisted above noHits/buildDiagnostics so
-    // early exits report selectivity over the compiled bitset.
-    let filterBitset: DocumentBitset | undefined = undefined;
-    let filterPredicate: ((doc: TDoc) => boolean) | undefined = undefined;
-    let structuredFilter: FilterExpression | undefined = undefined;
-    /**
-     * assemble response diagnostics (undefined unless requested).
-     * `filteringMs` is read at call time so early exits after compilation
-     * report measured filter cost; `totalMs` is wall-clock from query entry
-     * (end-to-end including inline autocomplete; see `autocompleteMs` for the slice).
-     * Scoring includes post-match scoring-hook time on all paths.
-     */
-    const buildDiagnostics = (
-      routedEngine: EngineType,
-      scoringMs: number,
-      highlightMs: number,
-      facetingMs: number | undefined,
-      hasOverflow: boolean,
-      suggestMs?: number
-    ): QueryDiagnostics | undefined => {
-      if (!wantsDiagnostics) return undefined;
-      const scanned = this.idToDocIndex.size;
-      const selectivity = filterBitset !== undefined
-        ? computeFilterSelectivity(filterBitset.popcount(), scanned)
-        : 1.0;
-      const totalMs = nowMs() - queryStartMs;
-      const timings: QueryDiagnosticsTimings = {
-        filteringMs,
-        scoringMs,
-        highlightMs,
-        ...(facetingMs !== undefined ? { facetingMs } : {}),
-        ...(suggestMs !== undefined ? { autocompleteMs: suggestMs, suggestMs } : {}),
-        totalMs
-      };
-      const diag: QueryDiagnostics = {
-        scannedCandidates: scanned,
-        filterSelectivity: selectivity,
-        routedEngine,
-        hasOverflow,
-        timings
-      };
-      if (diagWarnings.length > 0) diag.warnings = [...diagWarnings];
-      return diag;
-    };
-    /**
-     * post-hoc broad-query + overflow warnings (non-fatal, gated on
-     * `diagnostics:true` — routing decisions stay ungated for safety).
-     * `rawTotalMatches` carries the pre-filter pool count on the GPU path so
-     * the overflow sentence stays accurate; `facetsExact` suppresses the
-     * stale "approximate" claim after a force-exact rescan.
-     */
-    const pushPostHocWarnings = (
-      totalMatches: number,
-      hasOverflow: boolean,
-      opts?: { rawTotalMatches?: number; facetsRequested?: boolean; facetsExact?: boolean }
-    ): void => {
-      if (!wantsDiagnostics) return;
-      const scanned = this.idToDocIndex.size;
-      const selectivity = scanned > 0 ? totalMatches / scanned : 0;
-      if (isBroadSelectivity(selectivity, scanned)) {
-        diagWarnings.push(broadSelectivityWarning(selectivity, scanned));
-      }
-      if (hasOverflow) {
-        diagWarnings.push(
-          candidateOverflowWarning(totalMatches, this.candidateCapacity, {
-            facetsRequested: opts?.facetsRequested ?? false,
-            facetsExact: opts?.facetsExact ?? false,
-            rawTotalMatches: opts?.rawTotalMatches,
-          })
-        );
-      }
-    };
-    // token/prefix modes and typo-tolerant queries are CPU-only
-    // (exact-only WGSL kernels) and skip GPU dispatch with fallbackReason
-    // 'unsupported-mode' (parity boundary).
-    const isGpuSupportedMode: boolean =
-      (mode === 'fuzzy' || mode === 'substring') && !typo.enabled;
 
     const rawTrimmed = query.trim();
     let forceCpu = false;
@@ -840,6 +754,405 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
     const hasEmptyFieldList = searchFields !== undefined && searchFields.length === 0;
 
+    return {
+      mode,
+      caseSensitive,
+      signal,
+      cpuScorer,
+      cpuAlgorithm,
+      tokenOpts,
+      prefixOpts,
+      typo,
+      effectiveHooks,
+      cpuModeOptions,
+      budget,
+      wantsDiagnostics,
+      queryStartMs,
+      diagWarnings,
+      normalizedQuery,
+      clampedLimit,
+      forceCpu,
+      facetSpec,
+      wantsFacets,
+      facetingMode,
+      facetEngine,
+      tieBreakers,
+      suggestSpec,
+      allowedFieldIndices,
+      hasEmptyFieldList,
+      customTokenTerms
+    };
+  }
+
+  /**
+   * Compile structured/predicate filters (extracted from `search`).
+   * Compiles `FilterExpression` to a bitset, measures `filteringMs`,
+   * enforces abort/budget gates, and composes extension predicates.
+   * Empty bitsets return early with `filteringMs: 0` so callers can take
+   * the `noHits` path with identical telemetry. No behavior change.
+   */
+  private compileFilterPhase(
+    filter: DocumentSearchOptions<TDoc>['filter'],
+    effectiveHooks: SearchHooks<TDoc> | undefined,
+    wantsDiagnostics: boolean,
+    signal: AbortSignal | undefined,
+    budget: ReturnType<typeof normalizeCostBudgetOptions>,
+    queryStartMs: number
+  ) {
+    let filterBitset: DocumentBitset | undefined = undefined;
+    let filterPredicate: ((doc: TDoc) => boolean) | undefined = undefined;
+    let structuredFilter: FilterExpression | undefined = undefined;
+    let filteringMs = 0;
+
+    const tFilter0 = wantsDiagnostics ? nowMs() : 0;
+    if (filter !== undefined) {
+      if (typeof filter === 'function') {
+        filterPredicate = filter;
+      } else if (typeof filter === 'object' && filter !== null) {
+        structuredFilter = filter as FilterExpression;
+        filterBitset = compileFilter(structuredFilter, this.columnarStore);
+        if (filterBitset.isEmpty()) {
+          return { filterBitset, filterPredicate, structuredFilter, filteringMs };
+        }
+      } else {
+        throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
+      }
+    }
+    if (wantsDiagnostics) filteringMs = nowMs() - tFilter0;
+    throwIfAborted(signal);
+    throwIfBudgetAborted(budget);
+    assertTimeBudget(queryStartMs, budget);
+
+    // extension filter predicates compose conjunctively (AND) with
+    // `options.filter` functions. Index-level vs per-query hooks already
+    // merged via `resolveEffectiveHooks` (per-query wins per key).
+    const extensionPredicate = effectiveHooks?.filterPredicate;
+    if (extensionPredicate !== undefined) {
+      const basePredicate = filterPredicate;
+      if (basePredicate === undefined) {
+        filterPredicate = extensionPredicate;
+      } else {
+        const optFn = basePredicate;
+        const extFn = extensionPredicate;
+        filterPredicate = (doc: TDoc) => {
+          const d = doc as TDoc;
+          return optFn(d) && extFn(d);
+        };
+      }
+    }
+
+    return { filterBitset, filterPredicate, structuredFilter, filteringMs };
+  }
+
+  /**
+   * Route to WebGPU vs CPU (extracted from `search`).
+   * Applies candidate-budget enforcement, broad-query CPU routing, and
+   * field-restriction routing. Mutates `diagWarnings` for the broad-query
+   * warning exactly as before. No behavior change.
+   */
+  private routeEngine(params: {
+    mode: SearchMode;
+    typoEnabled: boolean;
+    cpuScorer: string;
+    forceCpu: boolean;
+    allowedFieldIndices: Set<number> | undefined;
+    normalizedQueryTokenCount: number;
+    filterBitset: DocumentBitset | undefined;
+    budget: ReturnType<typeof normalizeCostBudgetOptions>;
+    queryStartMs: number;
+    wantsDiagnostics: boolean;
+    diagWarnings: string[];
+  }) {
+    const {
+      mode,
+      typoEnabled,
+      cpuScorer,
+      forceCpu,
+      allowedFieldIndices,
+      normalizedQueryTokenCount,
+      filterBitset,
+      budget,
+      queryStartMs,
+      wantsDiagnostics,
+      diagWarnings
+    } = params;
+    // token/prefix modes and typo-tolerant queries are CPU-only
+    // (exact-only WGSL kernels) and skip GPU dispatch with fallbackReason
+    // 'unsupported-mode' (parity boundary).
+    const isGpuSupportedMode: boolean =
+      (mode === 'fuzzy' || mode === 'substring') && !typoEnabled;
+
+    // broad-query pre-dispatch guard + candidate ceiling.
+    // `filteredCandidateCount` is the exact post-filter population to score;
+    // exceeding `maxCandidates` throws before any scoring work. Short queries
+    // over massive corpora route to the CPU streaming scan to avoid GPU
+    // buffer saturation and driver timeouts (TDR). With function-predicate
+    // filters the pre-predicate population is checked (conservative — the
+    // true post-predicate count is unknowable pre-scan).
+    const activeDocCount = this.idToDocIndex.size;
+    const filteredCandidateCount = filterBitset !== undefined
+      ? filterBitset.popcount()
+      : activeDocCount;
+    assertCandidateBudget(filteredCandidateCount, budget);
+    let broadQueryCpuRoute = false;
+    if (isBroadQueryHeuristic(normalizedQueryTokenCount, activeDocCount)) {
+      broadQueryCpuRoute = true;
+      // Suppress the GPU-avoidance warning when already CPU-by-design
+      // (token/prefix/typo modes, explicit ufuzzy, query-too-long fallback):
+      // routing outcome is correct but the stated cause would misattribute.
+      const cpuByDesign = !isGpuSupportedMode || cpuScorer === 'ufuzzy' || forceCpu;
+      if (wantsDiagnostics && !cpuByDesign) {
+        diagWarnings.push(broadQueryRouteWarning(activeDocCount, normalizedQueryTokenCount));
+      }
+    }
+    assertTimeBudget(queryStartMs, budget);
+
+    // When field-restricted, route to CPU to prevent unselected high-priority
+    // fields from saturating GPU candidate buffer before low-priority allowed fields.
+    const isFieldRestricted = allowedFieldIndices !== undefined && allowedFieldIndices.size < this.sortedFields.length;
+
+    // 1. WebGPU execution path (exact fuzzy/substring only; token/prefix
+    // and typo queries skip dispatch via isGpuSupportedMode above).
+    const gpuHandle = this.gpuEngine;
+    const useGpu = !forceCpu &&
+      !isFieldRestricted &&
+      !broadQueryCpuRoute &&
+      isGpuSupportedMode &&
+      cpuScorer !== 'ufuzzy' &&
+      this.engineType === 'webgpu' &&
+      gpuHandle !== null &&
+      gpuHandle.isReady;
+
+    return {
+      isGpuSupportedMode,
+      broadQueryCpuRoute,
+      isFieldRestricted,
+      filteredCandidateCount,
+      useGpu,
+      gpuHandle
+    };
+  }
+
+  /**
+   * Aggregate per-row matches into per-document best-field hits (extracted).
+   * Shared by the WebGPU readback and legacy ufuzzy/native CPU paths which
+   * previously duplicated this ranking block. Deterministic sort via
+   * `compareRanked` + `tieBreakers`. No behavior change.
+   */
+  private aggregateDocMatches(
+    docMatches: Map<number, { bestScore: number; bestFieldIdx: number; fieldScores: Map<number, number> }>,
+    normalizedQueryTokens: Uint32Array,
+    tieBreakers: TieBreakerCriterion[]
+  ) {
+    interface RankedDocCandidate {
+      dIdx: number;
+      item: DocumentSearchResultItem<TDoc>;
+      rank: RankableCandidate;
+    }
+    const hits: RankedDocCandidate[] = [];
+    for (const [dIdx, entry] of docMatches.entries()) {
+      const primaryField = this.sortedFields[entry.bestFieldIdx];
+      const auxMatches: Array<{ field: string; score: number }> = [];
+      for (const [fIdx, score] of entry.fieldScores.entries()) {
+        if (fIdx !== entry.bestFieldIdx) {
+          auxMatches.push({ field: this.sortedFields[fIdx].name, score });
+        }
+      }
+      if (auxMatches.length > 1) {
+        auxMatches.sort((a, b) => {
+          if (b.score !== a.score) return b.score > a.score ? 1 : -1;
+          return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
+        });
+      }
+
+      const bestRowIdx = this.docToRowIndices[dIdx]?.[entry.bestFieldIdx];
+      const bestRowTokens = bestRowIdx !== undefined ? this.rowTokens[bestRowIdx] : undefined;
+      hits.push({
+        dIdx,
+        item: {
+          id: this.docIds[dIdx],
+          doc: this.records[dIdx],
+          score: entry.bestScore,
+          matchedField: primaryField.name,
+          matches: auxMatches.length > 0 ? auxMatches : undefined
+        },
+        rank: {
+          score: entry.bestScore,
+          fieldWeight: primaryField.weight,
+          isExactMatch: bestRowTokens !== undefined
+            ? isExactTokenMatch(bestRowTokens, normalizedQueryTokens)
+            : false,
+          matchedLength: bestRowTokens !== undefined ? bestRowTokens.length : 0,
+          id: this.docIds[dIdx],
+          docIndex: dIdx
+        }
+      });
+    }
+
+    // deterministic ranking: score DESC, weight DESC, exact DESC,
+    // length ASC, id ASC (docIndex ASC implicit fallback).
+    hits.sort((a, b) => compareRanked(a.rank, b.rank, tieBreakers));
+    return hits;
+  }
+
+  /**
+   * Enrich Top-K results with highlights + post-match hooks (extracted).
+   * Runs highlight enrichment, scoring-hook boost + deterministic re-sort,
+   * and postProcess transform. Returns updated results with phase timings.
+   * No behavior change.
+   */
+  private enrichResults(
+    results: DocumentSearchResultItem<TDoc>[],
+    query: string,
+    mode: SearchMode,
+    options: DocumentSearchOptions<TDoc>,
+    customTokenTerms: Uint32Array[] | undefined,
+    normalizedQueryTokens: Uint32Array,
+    effectiveHooks: SearchHooks<TDoc> | undefined,
+    tieBreakers: TieBreakerCriterion[],
+    wantsDiagnostics: boolean
+  ) {
+    const tHl0 = wantsDiagnostics ? nowMs() : 0;
+    this.enrichHighlights(results, query, mode, options, customTokenTerms, normalizedQueryTokens);
+    const highlightMs = wantsDiagnostics ? nowMs() - tHl0 : 0;
+
+    // post-match extension pipeline (Top-K only). Scoring boosts
+    // apply identically on GPU and CPU paths (parity preserved), followed
+    // by a deterministic re-sort; postProcess is the final transform.
+    // hook time joins the scoring bucket on all paths for comparability.
+    const tHook0 = wantsDiagnostics ? nowMs() : 0;
+    if (effectiveHooks?.scoringHook !== undefined) {
+      applyScoringHook(results, effectiveHooks.scoringHook, query);
+      this.resortResultsAfterScoring(results, normalizedQueryTokens, tieBreakers);
+    }
+    let out = results;
+    if (effectiveHooks?.postProcess !== undefined) {
+      out = applyPostProcess(results, effectiveHooks.postProcess);
+    }
+    const hookMs = wantsDiagnostics ? nowMs() - tHook0 : 0;
+    return { results: out, highlightMs, hookMs };
+  }
+
+  async search(
+    query: string,
+    options: DocumentSearchOptions<TDoc> = {}
+  ): Promise<DocumentSearchResponse<TDoc>> {
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    throwIfAborted(options.signal);
+    await this.searchMutex;
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    throwIfAborted(options.signal);
+    const gen = this.generation;
+
+    const validated = this.validateSearchOptions(query, options);
+    const {
+      mode,
+      caseSensitive,
+      signal,
+      cpuScorer,
+      cpuAlgorithm,
+      typo,
+      effectiveHooks,
+      cpuModeOptions,
+      budget,
+      wantsDiagnostics,
+      queryStartMs,
+      diagWarnings,
+      normalizedQuery,
+      clampedLimit,
+      forceCpu,
+      facetSpec,
+      wantsFacets,
+      facetingMode,
+      facetEngine,
+      tieBreakers,
+      suggestSpec,
+      allowedFieldIndices,
+      hasEmptyFieldList,
+      customTokenTerms
+    } = validated;
+
+    const filterState = this.compileFilterPhase(
+      options.filter,
+      effectiveHooks,
+      wantsDiagnostics,
+      signal,
+      budget,
+      queryStartMs
+    );
+    const { filterBitset, filterPredicate, structuredFilter, filteringMs } = filterState;
+    /**
+     * assemble response diagnostics (undefined unless requested).
+     * `filteringMs` is read at call time so early exits after compilation
+     * report measured filter cost; `totalMs` is wall-clock from query entry
+     * (end-to-end including inline autocomplete; see `autocompleteMs` for the slice).
+     * Scoring includes post-match scoring-hook time on all paths.
+     */
+    const buildDiagnostics = (
+      routedEngine: EngineType,
+      scoringMs: number,
+      highlightMs: number,
+      facetingMs: number | undefined,
+      hasOverflow: boolean,
+      suggestMs?: number
+    ): QueryDiagnostics | undefined => {
+      if (!wantsDiagnostics) return undefined;
+      const scanned = this.idToDocIndex.size;
+      const selectivity = filterBitset !== undefined
+        ? computeFilterSelectivity(filterBitset.popcount(), scanned)
+        : 1.0;
+      const totalMs = nowMs() - queryStartMs;
+      const timings: QueryDiagnosticsTimings = {
+        filteringMs,
+        scoringMs,
+        highlightMs,
+        ...(facetingMs !== undefined ? { facetingMs } : {}),
+        ...(suggestMs !== undefined ? { autocompleteMs: suggestMs, suggestMs } : {}),
+        totalMs
+      };
+      const diag: QueryDiagnostics = {
+        scannedCandidates: scanned,
+        filterSelectivity: selectivity,
+        routedEngine,
+        hasOverflow,
+        timings
+      };
+      if (diagWarnings.length > 0) diag.warnings = [...diagWarnings];
+      return diag;
+    };
+    /**
+     * post-hoc broad-query + overflow warnings (non-fatal, gated on
+     * `diagnostics:true` — routing decisions stay ungated for safety).
+     * `rawTotalMatches` carries the pre-filter pool count on the GPU path so
+     * the overflow sentence stays accurate; `facetsExact` suppresses the
+     * stale "approximate" claim after a force-exact rescan.
+     */
+    const pushPostHocWarnings = (
+      totalMatches: number,
+      hasOverflow: boolean,
+      opts?: { rawTotalMatches?: number; facetsRequested?: boolean; facetsExact?: boolean }
+    ): void => {
+      if (!wantsDiagnostics) return;
+      const scanned = this.idToDocIndex.size;
+      const selectivity = scanned > 0 ? totalMatches / scanned : 0;
+      if (isBroadSelectivity(selectivity, scanned)) {
+        diagWarnings.push(broadSelectivityWarning(selectivity, scanned));
+      }
+      if (hasOverflow) {
+        diagWarnings.push(
+          candidateOverflowWarning(totalMatches, this.candidateCapacity, {
+            facetsRequested: opts?.facetsRequested ?? false,
+            facetsExact: opts?.facetsExact ?? false,
+            rawTotalMatches: opts?.rawTotalMatches,
+          })
+        );
+      }
+    };
+
     const noHits = (q: string): DocumentSearchResponse<TDoc> => {
       // even trivial exits honor caller aborts and time budgets.
       throwIfAborted(signal);
@@ -876,41 +1189,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       };
     };
 
-    const tFilter0 = wantsDiagnostics ? nowMs() : 0;
-    if (filter !== undefined) {
-      if (typeof filter === 'function') {
-        filterPredicate = filter;
-      } else if (typeof filter === 'object' && filter !== null) {
-        structuredFilter = filter as FilterExpression;
-        filterBitset = compileFilter(structuredFilter, this.columnarStore);
-        if (filterBitset.isEmpty()) {
-          return noHits(query);
-        }
-      } else {
-        throw new TypeError('[webgpu-search] options.filter must be a function or FilterExpression.');
-      }
-    }
-    if (wantsDiagnostics) filteringMs = nowMs() - tFilter0;
-    throwIfAborted(signal);
-    throwIfBudgetAborted(budget);
-    assertTimeBudget(queryStartMs, budget);
-
-    // extension filter predicates compose conjunctively (AND) with
-    // `options.filter` functions. Index-level vs per-query hooks already
-    // merged via `resolveEffectiveHooks` (per-query wins per key).
-    const extensionPredicate = effectiveHooks?.filterPredicate;
-    if (extensionPredicate !== undefined) {
-      const basePredicate = filterPredicate;
-      if (basePredicate === undefined) {
-        filterPredicate = extensionPredicate;
-      } else {
-        const optFn = basePredicate;
-        const extFn = extensionPredicate;
-        filterPredicate = (doc: TDoc) => {
-          const d = doc as TDoc;
-          return optFn(d) && extFn(d);
-        };
-      }
+    if (filterBitset !== undefined && filterBitset.isEmpty()) {
+      return noHits(query);
     }
 
     if (normalizedQuery.isEmpty) {
@@ -923,46 +1203,20 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       return noHits(query);
     }
 
-    // broad-query pre-dispatch guard + candidate ceiling.
-    // `filteredCandidateCount` is the exact post-filter population to score;
-    // exceeding `maxCandidates` throws before any scoring work. Short queries
-    // over massive corpora route to the CPU streaming scan to avoid GPU
-    // buffer saturation and driver timeouts (TDR). With function-predicate
-    // filters the pre-predicate population is checked (conservative — the
-    // true post-predicate count is unknowable pre-scan).
-    const activeDocCount = this.idToDocIndex.size;
-    const filteredCandidateCount = filterBitset !== undefined
-      ? filterBitset.popcount()
-      : activeDocCount;
-    assertCandidateBudget(filteredCandidateCount, budget);
-    let broadQueryCpuRoute = false;
-    if (isBroadQueryHeuristic(normalizedQuery.tokens.length, activeDocCount)) {
-      broadQueryCpuRoute = true;
-      // Suppress the GPU-avoidance warning when already CPU-by-design
-      // (token/prefix/typo modes, explicit ufuzzy, query-too-long fallback):
-      // routing outcome is correct but the stated cause would misattribute.
-      const cpuByDesign = !isGpuSupportedMode || cpuScorer === 'ufuzzy' || forceCpu;
-      if (wantsDiagnostics && !cpuByDesign) {
-        diagWarnings.push(broadQueryRouteWarning(activeDocCount, normalizedQuery.tokens.length));
-      }
-    }
-    assertTimeBudget(queryStartMs, budget);
-
-    // When field-restricted, route to CPU to prevent unselected high-priority
-    // fields from saturating GPU candidate buffer before low-priority allowed fields.
-    const isFieldRestricted = allowedFieldIndices !== undefined && allowedFieldIndices.size < this.sortedFields.length;
-
-    // 1. WebGPU execution path (exact fuzzy/substring only; token/prefix
-    // and typo queries skip dispatch via isGpuSupportedMode above).
-    const gpuHandle = this.gpuEngine;
-    const useGpu = !forceCpu &&
-      !isFieldRestricted &&
-      !broadQueryCpuRoute &&
-      isGpuSupportedMode &&
-      cpuScorer !== 'ufuzzy' &&
-      this.engineType === 'webgpu' &&
-      gpuHandle !== null &&
-      gpuHandle.isReady;
+    const route = this.routeEngine({
+      mode,
+      typoEnabled: typo.enabled,
+      cpuScorer,
+      forceCpu,
+      allowedFieldIndices,
+      normalizedQueryTokenCount: normalizedQuery.tokens.length,
+      filterBitset,
+      budget,
+      queryStartMs,
+      wantsDiagnostics,
+      diagWarnings
+    });
+    const { broadQueryCpuRoute, isGpuSupportedMode, useGpu, gpuHandle } = route;
 
     if (useGpu && gpuHandle !== null) {
       // narrow GPU try to dispatch only so extension hook
@@ -1063,76 +1317,15 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           }
         }
 
-        interface RankedCandidate<TDoc> {
-          dIdx: number;
-          item: DocumentSearchResultItem<TDoc>;
-          rank: RankableCandidate;
-        }
-
-        const hits: RankedCandidate<TDoc>[] = [];
-        for (const [dIdx, entry] of docMatches.entries()) {
-          const primaryField = this.sortedFields[entry.bestFieldIdx];
-          const auxMatches: Array<{ field: string; score: number }> = [];
-          for (const [fIdx, score] of entry.fieldScores.entries()) {
-            if (fIdx !== entry.bestFieldIdx) {
-              auxMatches.push({ field: this.sortedFields[fIdx].name, score });
-            }
-          }
-          if (auxMatches.length > 1) {
-            auxMatches.sort((a, b) => {
-              if (b.score !== a.score) return b.score > a.score ? 1 : -1;
-              return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
-            });
-          }
-
-          const bestRowIdx = this.docToRowIndices[dIdx]?.[entry.bestFieldIdx];
-          const bestRowTokens = bestRowIdx !== undefined ? this.rowTokens[bestRowIdx] : undefined;
-          hits.push({
-            dIdx,
-            item: {
-              id: this.docIds[dIdx],
-              doc: this.records[dIdx],
-              score: entry.bestScore,
-              matchedField: primaryField.name,
-              matches: auxMatches.length > 0 ? auxMatches : undefined
-            },
-            rank: {
-              score: entry.bestScore,
-              fieldWeight: primaryField.weight,
-              isExactMatch: bestRowTokens !== undefined
-                ? isExactTokenMatch(bestRowTokens, normalizedQuery.tokens)
-                : false,
-              matchedLength: bestRowTokens !== undefined ? bestRowTokens.length : 0,
-              id: this.docIds[dIdx],
-              docIndex: dIdx
-            }
-          });
-        }
-
-        // deterministic ranking: score DESC, weight DESC, exact DESC,
-        // length ASC, id ASC (docIndex ASC implicit fallback).
-        hits.sort((a, b) => compareRanked(a.rank, b.rank, tieBreakers));
+        const hits = this.aggregateDocMatches(docMatches, normalizedQuery.tokens, tieBreakers);
 
         const totalMatches = hits.length;
         const candidateCount = Math.min(totalMatches, this.candidateCapacity);
         let results = hits.slice(0, clampedLimit).map((h) => h.item);
-        const tGpuHl0 = wantsDiagnostics ? nowMs() : 0;
-        this.enrichHighlights(results, query, mode, options, customTokenTerms, normalizedQuery.tokens);
-        const gpuHighlightMs = wantsDiagnostics ? nowMs() - tGpuHl0 : 0;
-
-        // post-match extension pipeline (Top-K only). Scoring boosts
-        // apply identically on GPU and CPU paths (parity preserved), followed
-        // by a deterministic re-sort; postProcess is the final transform.
-        // hook time joins the scoring bucket on all paths for comparability.
-        const tGpuHook0 = wantsDiagnostics ? nowMs() : 0;
-        if (effectiveHooks?.scoringHook !== undefined) {
-          applyScoringHook(results, effectiveHooks.scoringHook, query);
-          this.resortResultsAfterScoring(results, normalizedQuery.tokens, tieBreakers);
-        }
-        if (effectiveHooks?.postProcess !== undefined) {
-          results = applyPostProcess(results, effectiveHooks.postProcess);
-        }
-        const gpuHookMs = wantsDiagnostics ? nowMs() - tGpuHook0 : 0;
+        const gpuEnriched = this.enrichResults(results, query, mode, options, customTokenTerms, normalizedQuery.tokens, effectiveHooks, tieBreakers, wantsDiagnostics);
+        results = gpuEnriched.results;
+        const gpuHighlightMs = gpuEnriched.highlightMs;
+        const gpuHookMs = gpuEnriched.hookMs;
 
         // facet aggregation. Exact when the GPU pool covered all matches;
         // approximate over the top pool on overflow unless force-exact rescan.
@@ -1284,71 +1477,14 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         }
       }
 
-      interface RankedLegacyCandidate<TDoc> {
-        dIdx: number;
-        item: DocumentSearchResultItem<TDoc>;
-        rank: RankableCandidate;
-      }
-
-      const hits: RankedLegacyCandidate<TDoc>[] = [];
-      for (const [dIdx, entry] of docMatches.entries()) {
-        const primaryField = this.sortedFields[entry.bestFieldIdx];
-        const auxMatches: Array<{ field: string; score: number }> = [];
-        for (const [fIdx, score] of entry.fieldScores.entries()) {
-          if (fIdx !== entry.bestFieldIdx) {
-            auxMatches.push({ field: this.sortedFields[fIdx].name, score });
-          }
-        }
-        if (auxMatches.length > 1) {
-          auxMatches.sort((a, b) => {
-            if (b.score !== a.score) return b.score > a.score ? 1 : -1;
-            return a.field < b.field ? -1 : (a.field > b.field ? 1 : 0);
-          });
-        }
-        // Legacy ufuzzy/native scorers emit display-space scores without
-        // row-token provenance; derive exactness/length from the post-normalization
-        // token streams so ties still break deterministically.
-        const legacyRow = this.docToRowIndices[dIdx]?.[entry.bestFieldIdx];
-        const legacyTokens = legacyRow !== undefined ? this.rowTokens[legacyRow] : undefined;
-        hits.push({
-          dIdx,
-          item: {
-            id: this.docIds[dIdx],
-            doc: this.records[dIdx],
-            score: entry.bestScore,
-            matchedField: primaryField.name,
-            matches: auxMatches.length > 0 ? auxMatches : undefined
-          },
-          rank: {
-            score: entry.bestScore,
-            fieldWeight: primaryField.weight,
-            isExactMatch: legacyTokens !== undefined
-              ? isExactTokenMatch(legacyTokens, normalizedQuery.tokens)
-              : false,
-            matchedLength: legacyTokens !== undefined ? legacyTokens.length : 0,
-            id: this.docIds[dIdx],
-            docIndex: dIdx
-          }
-        });
-      }
-
-      hits.sort((a, b) => compareRanked(a.rank, b.rank, tieBreakers));
+      const hits = this.aggregateDocMatches(docMatches, normalizedQuery.tokens, tieBreakers);
 
       const totalMatches = hits.length;
       const candidateCount = Math.min(totalMatches, this.candidateCapacity);
       let results = hits.slice(0, clampedLimit).map((h) => h.item);
-      const tLegacyHl0 = wantsDiagnostics ? nowMs() : 0;
-      this.enrichHighlights(results, query, mode, options, customTokenTerms, normalizedQuery.tokens);
-      const legacyHighlightMs = wantsDiagnostics ? nowMs() - tLegacyHl0 : 0;
-
-      // post-match extension pipeline (Top-K only).
-      if (effectiveHooks?.scoringHook !== undefined) {
-        applyScoringHook(results, effectiveHooks.scoringHook, query);
-        this.resortResultsAfterScoring(results, normalizedQuery.tokens, tieBreakers);
-      }
-      if (effectiveHooks?.postProcess !== undefined) {
-        results = applyPostProcess(results, effectiveHooks.postProcess);
-      }
+      const legacyEnriched = this.enrichResults(results, query, mode, options, customTokenTerms, normalizedQuery.tokens, effectiveHooks, tieBreakers, wantsDiagnostics);
+      results = legacyEnriched.results;
+      const legacyHighlightMs = legacyEnriched.highlightMs;
       const preFacetMs = nowMs() - t0;
       // scoring bucket covers scan + ranking + post-match hooks;
       // highlight enrichment is metered separately above.
@@ -1466,23 +1602,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         matches: hit.matches
       });
     }
-    const tParityHl0 = wantsDiagnostics ? nowMs() : 0;
-    this.enrichHighlights(enrichedResults, query, mode, options, customTokenTerms, normalizedQuery.tokens);
-    const parityHighlightMs = wantsDiagnostics ? nowMs() - tParityHl0 : 0;
-
-    // post-match extension pipeline (Top-K only). Scoring boosts run
-    // after highlight enrichment (highlights travel with items), followed by
-    // a deterministic re-sort; postProcess is the final transform.
-    // hook time joins the scoring bucket for parity with the legacy path.
-    const tParityHook0 = wantsDiagnostics ? nowMs() : 0;
-    if (effectiveHooks?.scoringHook !== undefined) {
-      applyScoringHook(enrichedResults, effectiveHooks.scoringHook, query);
-      this.resortResultsAfterScoring(enrichedResults, normalizedQuery.tokens, tieBreakers);
-    }
-    if (effectiveHooks?.postProcess !== undefined) {
-      enrichedResults = applyPostProcess(enrichedResults, effectiveHooks.postProcess);
-    }
-    const parityHookMs = wantsDiagnostics ? nowMs() - tParityHook0 : 0;
+    const parityEnriched = this.enrichResults(enrichedResults, query, mode, options, customTokenTerms, normalizedQuery.tokens, effectiveHooks, tieBreakers, wantsDiagnostics);
+    enrichedResults = parityEnriched.results;
+    const parityHighlightMs = parityEnriched.highlightMs;
+    const parityHookMs = parityEnriched.hookMs;
     const parityScoringMs = parityResult.durationMs + parityHookMs;
 
     // exact facet aggregation. Disjunctive facets need the unfiltered
