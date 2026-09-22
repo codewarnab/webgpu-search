@@ -5,6 +5,11 @@ import { packDataset, checkMemoryBudget } from './dataset-packing';
 import { normalizeText } from './text-normalization';
 import { scoreExactMatches } from './exact-scorer';
 import {
+  initialEngineState,
+  transitionEngineState,
+  type EngineState,
+} from './engine-state';
+import {
   normalizeTypoTolerance,
   type NormalizedTypoOptions
 } from './search/typo-tolerance';
@@ -48,7 +53,6 @@ import {
 } from './text-profile';
 import type {
   EngineType,
-  FallbackReason,
   IndexOptions,
   IndexStats,
   QueryDiagnostics,
@@ -61,8 +65,7 @@ import type {
 export class SearchIndex {
   private items: string[];
   private isDestroyed: boolean = false;
-  private engineType: EngineType = 'cpu';
-  private fallbackReason?: FallbackReason;
+  private engineState: EngineState = initialEngineState();
   private gpuEngine: WebGPUEngine | null = null;
   private cpuEngine: CPUEngine;
   private vramAllocatedBytes: number = 0;
@@ -131,8 +134,11 @@ export class SearchIndex {
 
     // Empty dataset fast path: zero allocation, route immediately to CPU
     if (ownedItems.length === 0) {
-      index.engineType = 'cpu';
-      index.fallbackReason = options.preferGpu === false ? 'prefer-cpu' : 'below-threshold';
+      index.engineState = transitionEngineState(
+        index.engineState,
+        'cpu',
+        options.preferGpu === false ? 'prefer-cpu' : 'below-threshold',
+      );
       return index;
     }
 
@@ -146,9 +152,9 @@ export class SearchIndex {
 
     if (!shouldAttemptGpu) {
       if (options.preferGpu === false) {
-        index.fallbackReason = 'prefer-cpu';
+        index.engineState = transitionEngineState(index.engineState, 'cpu', 'prefer-cpu');
       } else {
-        index.fallbackReason = 'below-threshold';
+        index.engineState = transitionEngineState(index.engineState, 'cpu', 'below-threshold');
       }
     }
 
@@ -161,8 +167,7 @@ export class SearchIndex {
       const budget = checkMemoryBudget(ownedItems.length, measuredAvgBytes, options.device);
       if (!budget.allowed) {
         console.warn(`[webgpu-search] ${budget.reason} Falling back to CPU.`);
-        index.engineType = 'cpu';
-        index.fallbackReason = 'memory-budget-exceeded';
+        index.engineState = transitionEngineState(index.engineState, 'cpu', 'memory-budget-exceeded');
         return index;
       }
 
@@ -183,8 +188,7 @@ export class SearchIndex {
           await gpu.loadDataset(packed);
 
           index.gpuEngine = gpu;
-          index.engineType = 'webgpu';
-          index.fallbackReason = undefined;
+          index.engineState = transitionEngineState(index.engineState, 'webgpu');
           index.vramAllocatedBytes = packed.recordsByteLength + packed.offsetsByteLength;
 
           // Subscribe to device loss for automatic graceful fallback
@@ -194,28 +198,37 @@ export class SearchIndex {
               index.gpuEngine.destroy();
               index.gpuEngine = null;
             }
-            index.engineType = 'cpu';
-            index.fallbackReason = 'device-lost';
+            index.engineState = transitionEngineState(index.engineState, 'cpu', 'device-lost');
           });
 
           return index;
         } else {
-          index.fallbackReason =
+          index.engineState = transitionEngineState(
+            index.engineState,
+            'cpu',
             typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
               ? 'webgpu-unsupported'
-              : 'device-request-failed';
+              : 'device-request-failed',
+          );
         }
       } catch (gpuErr) {
         console.warn('[webgpu-search] WebGPU initialization failed, falling back to CPU:', gpuErr);
-        index.fallbackReason =
+        index.engineState = transitionEngineState(
+          index.engineState,
+          'cpu',
           typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
             ? 'webgpu-unsupported'
-            : 'device-request-failed';
+            : 'device-request-failed',
+        );
       }
     }
 
     // Default CPU engine fallback
-    index.engineType = 'cpu';
+    index.engineState = transitionEngineState(
+      index.engineState,
+      'cpu',
+      index.engineState.fallbackReason,
+    );
     return index;
   }
 
@@ -415,7 +428,7 @@ export class SearchIndex {
         candidateCount: 0, hasOverflow: false,
         timings: { queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null, readbackMs: 0, totalMs: 0, gpuDispatchMs: 0 },
         profileId: this.profileId, scoringVersion: SCORING_VERSION, cpuScorer,
-        fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
+        fallbackReason: forceCpu ? 'query-too-long' : this.engineState.fallbackReason,
         ...(diag ? { diagnostics: diag } : {})
       };
     };
@@ -462,7 +475,7 @@ export class SearchIndex {
       !broadQueryCpuRoute &&
       isGpuSupportedMode &&
       cpuScorer !== 'ufuzzy' &&
-      this.engineType === 'webgpu' &&
+      this.engineState.engine === 'webgpu' &&
       gpuHandle !== null &&
       gpuHandle.isReady;
     if (useGpu && gpuHandle !== null) {
@@ -514,8 +527,7 @@ export class SearchIndex {
           err instanceof IncompatibleOptionError && (err.option === 'mode' || err.option === 'typoTolerance');
         if (!modeRouted) {
           console.warn('[webgpu-search] GPU search failed, CPU fallback:', err);
-          this.engineType = 'cpu';
-          this.fallbackReason = 'gpu-execution-error';
+          this.engineState = transitionEngineState(this.engineState, 'cpu', 'gpu-execution-error');
           if (this.gpuEngine) {
             try { this.gpuEngine.destroy(); } catch {}
             this.gpuEngine = null;
@@ -611,7 +623,7 @@ export class SearchIndex {
       gpuDispatchMs: 0
     };
 
-    let effectiveFallbackReason = this.fallbackReason;
+    let effectiveFallbackReason = this.engineState.fallbackReason;
     if (forceCpu) {
       effectiveFallbackReason = 'query-too-long';
     } else if (!isGpuSupportedMode) {
@@ -655,7 +667,7 @@ export class SearchIndex {
     const ramBytes = this.tokenCount * 4;
     return {
       size: this.items.length,
-      engine: this.engineType,
+      engine: this.engineState.engine,
       vramAllocatedBytes: this.vramAllocatedBytes,
       adapterVendor: adapter?.vendor,
       adapterRenderer: adapter?.renderer,
@@ -665,7 +677,7 @@ export class SearchIndex {
       tokenCount: this.tokenCount,
       normalized: this.normalized,
       formatVersion: DATASET_FORMAT_VERSION,
-      fallbackReason: this.fallbackReason,
+      fallbackReason: this.engineState.fallbackReason,
       memory: {
         vramBytes: this.vramAllocatedBytes,
         ramBytes,
@@ -694,7 +706,7 @@ export class SearchIndex {
     this.recordTokens = [];
     this.items = [];
     this.tokenCount = 0;
-    this.engineType = 'cpu';
+    this.engineState = transitionEngineState(this.engineState, 'cpu', this.engineState.fallbackReason);
     this.vramAllocatedBytes = 0;
   }
 }

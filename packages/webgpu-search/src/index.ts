@@ -34,6 +34,14 @@ export {
 // Unified Types
 export type * from './types';
 
+// Explicit engine state machine (EngineState + transition helper)
+export {
+  initialEngineState,
+  transitionEngineState,
+  isWebGpuState,
+  type EngineState,
+} from './engine-state';
+
 // Unicode text profile (versions, errors, caps)
 export {
   DATASET_FORMAT_VERSION,
