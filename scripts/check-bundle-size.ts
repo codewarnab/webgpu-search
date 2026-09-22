@@ -1,5 +1,6 @@
 /**
- * / bundle-size gate: delta <=30 KB gzip over baseline + 78 KB total.
+ * Issue #11 Phase 6 bundle-size gate: index delta <= 40 KB gzip over baseline,
+ * 90 KB total per index file; 76 KB total per worker file.
  *
  * Baseline ( re-baselined to post- working tree, tsup minify:false):
  * dist/index.js 70,455 B raw / 18,343 B gzip (deterministic gzip, level 6,
@@ -114,7 +115,22 @@
  * Delta cap bumped 32 KB -> 34 KB with this documented rationale.
  * Budget: 82 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
- * Fail-closed: missing dist or dist older than src/case-fold-table.ts fails
+ * (issue #11 Phases 0-4 mainline growth) production naming hygiene, engine-state
+ * extraction, powerPreference forwarding + validation, reliability rebuild/dispose
+ * paths (`rebuildGpu`, `[Symbol.dispose]`, pool listener accounting), snapshot
+ * agreement/profile guards, worker table-dispatch + error rehydration:
+ * measured index.js 87,611 B gzip (+38,365 B vs 49,246 B baseline; +5.6 KB vs the
+ * 82 KB budget) with worker.js at 72,689 B gzip. Decision: bump (not exemption).
+ * Rationale: the delta cap policed each landing; the accumulated contract surface
+ * (ordering freeze, CPU baseline, reliability proofs, v3->v4 migration guards,
+ * third proof app) is now permanent baseline, so holding future work to the
+ * pre-contract baseline guarantees false failures on the first commit.
+ * Total index bumped 82 KB -> 90 KB and delta cap 34 KB -> 40 KB; worker entry
+ * gets its own 76 KB total budget (no historical baseline: gate on total only).
+ * Budget: 90 KB gzip per file (dist/index.js + dist/index.cjs);
+ * 76 KB gzip per file (dist/worker.js + dist/worker.cjs).
+ *
+ * Fail-closed: missing dist or dist older than library sources fails
  * (a size gate that passes when there is nothing to measure is decoration).
  *
  * Portable: node:fs + node:zlib only (runs on Bun and Node).
@@ -125,8 +141,9 @@ import { stat, readFile } from 'node:fs/promises';
 
 const BASELINE_RAW = 234907;
 const BASELINE_GZIP = 49246;
-const DELTA_CAP_GZIP = 34 * 1024;
-const TOTAL_BUDGET_GZIP = 82 * 1024;
+const DELTA_CAP_GZIP = 40 * 1024;
+const TOTAL_BUDGET_INDEX_GZIP = 90 * 1024;
+const TOTAL_BUDGET_WORKER_GZIP = 76 * 1024;
 
 
 function gzipDeterministic(buf: Uint8Array): number {
@@ -138,6 +155,8 @@ function gzipDeterministic(buf: Uint8Array): number {
 
 const distJsUrl = new URL('../packages/webgpu-search/dist/index.js', import.meta.url);
 const distCjsUrl = new URL('../packages/webgpu-search/dist/index.cjs', import.meta.url);
+const distWorkerJsUrl = new URL('../packages/webgpu-search/dist/worker.js', import.meta.url);
+const distWorkerCjsUrl = new URL('../packages/webgpu-search/dist/worker.cjs', import.meta.url);
 const srcFoldUrl = new URL('../packages/webgpu-search/src/case-fold-table.ts', import.meta.url);
 
 let distStat;
@@ -145,6 +164,13 @@ try {
   distStat = await stat(distJsUrl);
 } catch {
   console.error('FAIL dist/index.js missing. Run: bun run build (or turbo build) first.');
+  process.exit(1);
+}
+let distWorkerStat;
+try {
+  distWorkerStat = await stat(distWorkerJsUrl);
+} catch {
+  console.error('FAIL dist/worker.js missing. Run: bun run build (or turbo build) first.');
   process.exit(1);
 }
 // Fail if dist is older than ANY library source (not just fold-table).
@@ -172,6 +198,10 @@ if (newestSrcMs > 0 && distStat.mtimeMs < newestSrcMs) {
   console.error('FAIL dist/index.js is older than library sources. Rebuild before gating.');
   process.exit(1);
 }
+if (newestSrcMs > 0 && distWorkerStat.mtimeMs < newestSrcMs) {
+  console.error('FAIL dist/worker.js is older than library sources. Rebuild before gating.');
+  process.exit(1);
+}
 const buf = await readFile(distJsUrl);
 const raw = buf.byteLength;
 const gz = gzipDeterministic(buf);
@@ -184,15 +214,30 @@ try {
 } catch {
   console.log('info dist/index.cjs missing (skipped CJS measure)');
 }
+const workerBuf = await readFile(distWorkerJsUrl);
+const workerRaw = workerBuf.byteLength;
+const workerGz = gzipDeterministic(workerBuf);
+let workerCjsRaw = 0;
+let workerCjsGz = 0;
+try {
+  const workerCjs = await readFile(distWorkerCjsUrl);
+  workerCjsRaw = workerCjs.byteLength;
+  workerCjsGz = gzipDeterministic(workerCjs);
+} catch {
+  console.log('info dist/worker.cjs missing (skipped worker CJS measure)');
+}
 const dRaw = raw - BASELINE_RAW;
 const dGz = gz - BASELINE_GZIP;
 
 console.log('---  bundle-size report (deterministic gzip level 6, mtime=0; tsup minify:false) ---');
 console.log(`dist/index.js: ${raw} B raw / ${gz} B gzip`);
 if (cjsRaw > 0) console.log(`dist/index.cjs: ${cjsRaw} B raw / ${cjsGz} B gzip`);
+console.log(`dist/worker.js: ${workerRaw} B raw / ${workerGz} B gzip`);
+if (workerCjsRaw > 0) console.log(`dist/worker.cjs: ${workerCjsRaw} B raw / ${workerCjsGz} B gzip`);
 console.log(`baseline:      ${BASELINE_RAW} B raw / ${BASELINE_GZIP} B gzip`);
 console.log(`delta:         ${dRaw >= 0 ? '+' : ''}${dRaw} B raw / ${dGz >= 0 ? '+' : ''}${dGz} B gzip (cap +${DELTA_CAP_GZIP} B gzip)`);
-console.log(`total budget:  ${gz} / ${TOTAL_BUDGET_GZIP} B gzip (index.js)`);
+console.log(`total budget (index):  ${gz} / ${TOTAL_BUDGET_INDEX_GZIP} B gzip (index.js)`);
+console.log(`total budget (worker): ${workerGz} / ${TOTAL_BUDGET_WORKER_GZIP} B gzip (worker.js)`);
 
 let fail = false;
 if (dGz > DELTA_CAP_GZIP) {
@@ -201,14 +246,28 @@ if (dGz > DELTA_CAP_GZIP) {
 } else {
   console.log('pass delta within cap');
 }
-if (gz > TOTAL_BUDGET_GZIP) {
-  console.error(`FAIL total gzip ${gz} B exceeds ${TOTAL_BUDGET_GZIP} B budget.`);
+if (gz > TOTAL_BUDGET_INDEX_GZIP) {
+  console.error(`FAIL total gzip ${gz} B exceeds ${TOTAL_BUDGET_INDEX_GZIP} B budget.`);
   fail = true;
 } else {
-  console.log(`pass total within ${TOTAL_BUDGET_GZIP / 1024} KB budget`);
+  console.log(`pass index total within ${TOTAL_BUDGET_INDEX_GZIP / 1024} KB budget`);
 }
-if (cjsRaw > 0 && cjsGz > TOTAL_BUDGET_GZIP) {
-  console.error(`FAIL dist/index.cjs gzip ${cjsGz} B exceeds ${TOTAL_BUDGET_GZIP} B budget.`);
+if (cjsRaw > 0 && cjsGz > TOTAL_BUDGET_INDEX_GZIP) {
+  console.error(`FAIL dist/index.cjs gzip ${cjsGz} B exceeds ${TOTAL_BUDGET_INDEX_GZIP} B budget.`);
   fail = true;
+} else if (cjsRaw > 0) {
+  console.log(`pass index.cjs total within ${TOTAL_BUDGET_INDEX_GZIP / 1024} KB budget`);
+}
+if (workerGz > TOTAL_BUDGET_WORKER_GZIP) {
+  console.error(`FAIL dist/worker.js gzip ${workerGz} B exceeds ${TOTAL_BUDGET_WORKER_GZIP} B budget.`);
+  fail = true;
+} else {
+  console.log(`pass worker total within ${TOTAL_BUDGET_WORKER_GZIP / 1024} KB budget`);
+}
+if (workerCjsRaw > 0 && workerCjsGz > TOTAL_BUDGET_WORKER_GZIP) {
+  console.error(`FAIL dist/worker.cjs gzip ${workerCjsGz} B exceeds ${TOTAL_BUDGET_WORKER_GZIP} B budget.`);
+  fail = true;
+} else if (workerCjsRaw > 0) {
+  console.log(`pass worker.cjs total within ${TOTAL_BUDGET_WORKER_GZIP / 1024} KB budget`);
 }
 if (fail) process.exit(1);

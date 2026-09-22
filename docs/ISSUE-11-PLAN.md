@@ -2,7 +2,7 @@
 
 > **Issue Reference**: [GitHub Issue #11: 1.0: lock compatibility, reliability, and the embedding ecosystem](https://github.com/codewarnab/webgpu-fuzzy-search/issues/11)
 > **Target Milestone**: `1.0.0`
-> **Status**: Phases 0–4 complete; Phases 5–6 open
+> **Status**: Phases 0–4 and 6 complete; Phase 5 open
 > **Predecessors**: v0.1.1 (#8), v0.2 (#7), v0.3 (#9), v0.4 (#10)
 > **Roadmap**: Issue #12 (embeddable search infrastructure through 1.0)
 
@@ -26,8 +26,8 @@ Success means a host can build or restore an index off the main thread, update i
 - [x] Define index-format compatibility and migration support across supported releases. (Done: `docs/snapshot-format.md` §§1–9 migration table + reject taxonomy, `snapshot-codec` schema/header agreement guard, `DocumentIndex` ctor/`fromSnapshotData`/`applySnapshotData` `ProfileMismatchError` guards, `scripts/test-snapshot.ts` §§14–17 hookIds/worker-version/all-caps/profile+live-format pins.)
 - [x] Maintain integration examples for web IDE search, local logs/data grids, and offline docs. (Done: `apps/monaco-palette`, `apps/log-viewer`, `apps/docs-search`, `scripts/test-proof-apps.ts` §§1–12 incl. teardown + public-API-only + recipe + DOM-free audits.)
 - [ ] Publish reproducible benchmark fixtures, environments, median/p95 results, memory, build/upload, and restore costs.
-- [ ] Provide package-size budgets, tree-shaking guidance, CSP/worker setup, SSR-safe imports, and accessibility guidance for example UIs.
-- [ ] Document diagnostics, issue-report data, security/privacy boundaries, and unsupported configurations.
+- [x] Provide package-size budgets, tree-shaking guidance, CSP/worker setup, SSR-safe imports, and accessibility guidance for example UIs. (Done: per-entry gzip budgets — 90 KB index / 76 KB worker — in `scripts/check-bundle-size.ts`, `"sideEffects": false`, `docs/packaging.md`.)
+- [x] Document diagnostics, issue-report data, security/privacy boundaries, and unsupported configurations. (Done: `docs/diagnostics.md`, `.github/ISSUE_TEMPLATE/webgpu-search-issue.md`, `docs/security-privacy.md`, unsupported list in `docs/support-matrix.md` §6.)
 
 ### Acceptance boundary
 
@@ -143,11 +143,13 @@ Tasks:
 
 Exit: performance claims trace to named fixtures and environments.
 
-### Phase 6 — Packaging + Maintenance Docs
+### Phase 6 — Packaging + Maintenance Docs ✅ DONE
 
 Scope: `packages/webgpu-search/package.json`, `packages/webgpu-search/tsup.config.ts`, `scripts/check-bundle-size.ts`.
 
-Tasks:
+Shipped: per-entry gzip budgets (90 KB `index.js`/`index.cjs`, 76 KB `worker.js`/`worker.cjs`, 40 KB index delta cap + rationale log in `check-bundle-size.ts`), `"sideEffects": false`, `docs/packaging.md` (tree-shaking, CSP, worker setup, SSR-safe imports, example-UI a11y), `docs/diagnostics.md` (telemetry, warnings, budgets, issue-report data), `.github/ISSUE_TEMPLATE/webgpu-search-issue.md`, `docs/security-privacy.md` (IDB PII scope, snapshot trust boundary, CRC vs authenticity). Gates: `check:shaders`, `typecheck`, `build`, `test:mock`, `check:bundle-size`, `check:public-api` all green.
+
+Tasks (all complete):
 
 1. Keep per-file gzip budget gate; add per-entry (`index` vs `worker`) budget + rationale log.
 2. Publish tree-shaking guidance: entry choice, side-effects, what pulls in WGSL / uFuzzy.

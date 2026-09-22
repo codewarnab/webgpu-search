@@ -49,7 +49,7 @@
   "bugs": {
     "url": "https://github.com/codewarnab/webgpu-fuzzy-search/issues"
   },
-  "sideEffects": true,
+  "sideEffects": false,
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",

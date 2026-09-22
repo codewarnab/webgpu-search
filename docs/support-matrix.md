@@ -189,7 +189,7 @@ browser regression gate on stable Chrome.
 
 ## 7. What this phase does not claim
 
-Migration tables, third proof app, frozen benchmark fixtures, and packaging
-guides are later phases in `docs/ISSUE-11-PLAN.md` and are not claimed by
-this matrix. Reliability proofs (rebuild, leak/concurrency gates) live in
+Migration tables, the third proof app, and packaging guides are earlier
+phases in `docs/ISSUE-11-PLAN.md` and are not claimed by
+this matrix. Frozen benchmark fixtures remain Phase 5. Reliability proofs (rebuild, leak/concurrency gates) live in
 `docs/reliability.md`.
