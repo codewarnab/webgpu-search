@@ -25,6 +25,7 @@ import {
   QueryTooLongError,
 } from './text-profile';
 import { normalizeTypoTolerance } from './search/typo-tolerance';
+import { WebGPUSearchError } from './errors';
 import type { AdapterInfo, SearchOptions, SearchResultItem, SearchTimings, SearchMode } from './types';
 
 const BufferUsage = (typeof globalThis !== 'undefined' && 'GPUBufferUsage' in globalThis ? (globalThis as any).GPUBufferUsage : {
@@ -487,7 +488,17 @@ export class WebGPUEngine {
     this.scoringVersion = packed.scoringVersion;
 
     if (!this.device) {
-      return { uploadTimeMs: 0 };
+      Object.assign(this, {
+        currentDatasetSize: prev.size,
+        currentStrings: prev.strings,
+        currentTokens: prev.tokens,
+        currentOffsets: prev.offsets,
+        normalized: prev.normalized,
+        profileId: prev.profileId,
+        unicodeVersion: prev.unicodeVersion,
+        scoringVersion: prev.scoringVersion,
+      });
+      throw new WebGPUSearchError('[webgpu-search] loadDataset requires an initialized GPU device. Call init() first.');
     }
 
     // Staged validation (authoritative post-init): exact per-buffer check vs real
