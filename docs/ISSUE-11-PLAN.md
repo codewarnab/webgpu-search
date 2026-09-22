@@ -2,7 +2,7 @@
 
 > **Issue Reference**: [GitHub Issue #11: 1.0: lock compatibility, reliability, and the embedding ecosystem](https://github.com/codewarnab/webgpu-fuzzy-search/issues/11)
 > **Target Milestone**: `1.0.0`
-> **Status**: Phases 0–2 complete; Phases 3–6 open
+> **Status**: Phases 0–3 complete; Phases 4–6 open
 > **Predecessors**: v0.1.1 (#8), v0.2 (#7), v0.3 (#9), v0.4 (#10)
 > **Roadmap**: Issue #12 (embeddable search infrastructure through 1.0)
 
@@ -23,7 +23,7 @@ Success means a host can build or restore an index off the main thread, update i
 - [x] Freeze and document public TypeScript APIs, result ordering, versioning, and deprecation policy. (Done: `docs/public-api.md`, `scripts/check-public-api.ts` + `scripts/public-api-surface.txt` 187-export allowlist, `check:public-api` + `attw` CI gates.)
 - [x] Publish a browser/OS/GPU support matrix and a tested CPU-only baseline. (Done: `docs/support-matrix.md`, `scripts/test-cpu-baseline.ts`, `test:compatibility`.)
 - [x] Prove device-loss rebuild, resource cleanup, concurrent-query isolation, and deterministic fallback. (Done: `rebuildGpu()` on both index types, `docs/reliability.md`, `scripts/test-reliability.ts` 58 checks, parity Part 7, contracts §13, wired into `test:compatibility` + `test:all`.)
-- [ ] Define index-format compatibility and migration support across supported releases.
+- [x] Define index-format compatibility and migration support across supported releases. (Done: `docs/snapshot-format.md` §§1–9 migration table + reject taxonomy, `snapshot-codec` schema/header agreement guard, `DocumentIndex` ctor/`fromSnapshotData`/`applySnapshotData` `ProfileMismatchError` guards, `scripts/test-snapshot.ts` §§14–17 hookIds/worker-version/all-caps/profile+live-format pins.)
 - [ ] Maintain integration examples for web IDE search, local logs/data grids, and offline docs.
 - [ ] Publish reproducible benchmark fixtures, environments, median/p95 results, memory, build/upload, and restore costs.
 - [ ] Provide package-size budgets, tree-shaking guidance, CSP/worker setup, SSR-safe imports, and accessibility guidance for example UIs.
@@ -99,17 +99,19 @@ Tasks:
 
 Exit: loss, cleanup, and concurrency are proven, not just handled.
 
-### Phase 3 — Index-Format Compatibility + Migration
+### Phase 3 — Index-Format Compatibility + Migration ✅ DONE
 
 Scope: `src/snapshot-codec.ts`, `src/snapshot-idb.ts`, `src/persistence.ts`, `src/idb-storage.ts`, `docs/snapshot-format.md:1`.
 
-Tasks:
+Shipped: `docs/snapshot-format.md` §§1–9 (v3 → v4 → 1.0 table, reject taxonomy, `hasGetter`/`hookIds` rules, profile guarantee, live-format `4`, IDB caps, suites), codec agreement guard, `DocumentIndex` `ProfileMismatchError` guards, `test-snapshot` §§14–17. Gates: `test:snapshot` §§1–17, `test:records`, `bench:snapshot-matrix` all green; plus `check:shaders`, `typecheck`, `build`, `test:mock`, `check:public-api` (187 pinned).
 
-1. Extend `docs/snapshot-format.md` with a v3 → v4 → 1.0 compatibility + migration table.
-2. Standardize reject reasons: `IncompatibleIndexError` (version/profile/checksum/shape), `IncompatibleHookError` (missing hooks), `ProfileMismatchError` (case/profile).
-3. Cover in tests: legacy restore, corrupt CRC, oversize caps (`MAX_SNAPSHOT_*`), missing `getter` (`hasGetter`), missing `hookIds`, worker `serialize` / `restore` version guard.
-4. Guarantee: never read under wrong format/profile; `getStats().formatVersion` semantics stay live-format.
-5. Gates: `bun run test:snapshot`, `bun run test:records`, `bun run bench:snapshot-matrix`.
+Tasks (all complete):
+
+1. [x] Extend `docs/snapshot-format.md` with a v3 → v4 → 1.0 compatibility + migration table.
+2. [x] Standardize reject reasons: `IncompatibleIndexError` (version/profile/checksum/shape), `IncompatibleHookError` (missing hooks), `ProfileMismatchError` (case/profile).
+3. [x] Cover in tests: legacy restore, corrupt CRC, oversize caps (`MAX_SNAPSHOT_*`), missing `getter` (`hasGetter`), missing `hookIds`, worker `serialize` / `restore` version guard.
+4. [x] Guarantee: never read under wrong format/profile; `getStats().formatVersion` semantics stay live-format.
+5. [x] Gates: `bun run test:snapshot`, `bun run test:records`, `bun run bench:snapshot-matrix`.
 
 Exit: any persisted index restores or rejects with an actionable migration reason.
 
