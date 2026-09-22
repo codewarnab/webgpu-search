@@ -1,6 +1,6 @@
-import { PaletteEngine } from './palette-engine';
-import { generateMonacoRecords, CORE_FILES } from './sample-data';
-import type { MonacoFileRecord, MonacoPaletteSearchResult } from './types';
+import { DocsEngine } from './docs-engine';
+import { generateDocsRecords, CORE_DOCS } from './docs-data';
+import type { DocPageRecord, DocsSearchResult } from './types';
 
 // DOM Elements
 const searchInput = document.getElementById('search-input') as HTMLInputElement;
@@ -10,20 +10,21 @@ const engineSelect = document.getElementById('engine-select') as HTMLSelectEleme
 const workerSelect = document.getElementById('worker-select') as HTMLSelectElement;
 const highlightToggle = document.getElementById('highlight-toggle') as HTMLInputElement;
 const suggestToggle = document.getElementById('suggest-toggle') as HTMLInputElement;
-const typeSelect = document.getElementById('type-select') as HTMLSelectElement;
-const langSelect = document.getElementById('lang-select') as HTMLSelectElement;
+const sectionSelect = document.getElementById('section-select') as HTMLSelectElement;
+const versionSelect = document.getElementById('version-select') as HTMLSelectElement;
 const suggestBar = document.getElementById('suggest-bar') as HTMLDivElement;
 const suggestList = document.getElementById('suggest-list') as HTMLDivElement;
 const facetBar = document.getElementById('facet-bar') as HTMLDivElement;
 const facetList = document.getElementById('facet-list') as HTMLDivElement;
 const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement;
+const idbStatus = document.getElementById('idb-status') as HTMLSpanElement;
 
 // Preview Elements
 const previewTitle = document.getElementById('preview-title') as HTMLDivElement;
 const previewMeta = document.getElementById('preview-meta') as HTMLDivElement;
-const previewDesc = document.getElementById('preview-desc') as HTMLDivElement;
-const previewSymbols = document.getElementById('preview-symbols') as HTMLDivElement;
-const previewCode = document.getElementById('preview-code') as HTMLPreElement;
+const previewContent = document.getElementById('preview-content') as HTMLDivElement;
+const previewTags = document.getElementById('preview-tags') as HTMLDivElement;
+const previewPath = document.getElementById('preview-path') as HTMLPreElement;
 
 // Telemetry Elements
 const statRecords = document.getElementById('stat-records') as HTMLSpanElement;
@@ -41,18 +42,24 @@ const btnBatchAdd = document.getElementById('btn-batch-add') as HTMLButtonElemen
 const btnReset = document.getElementById('btn-reset') as HTMLButtonElement;
 const btnModalCancel = document.getElementById('btn-modal-cancel') as HTMLButtonElement;
 const btnModalSave = document.getElementById('btn-modal-save') as HTMLButtonElement;
-const formFilename = document.getElementById('form-filename') as HTMLInputElement;
-const formPath = document.getElementById('form-path') as HTMLInputElement;
-const formSymbols = document.getElementById('form-symbols') as HTMLInputElement;
-const formDesc = document.getElementById('form-desc') as HTMLInputElement;
+const formTitle = document.getElementById('form-title') as HTMLInputElement;
+const formSection = document.getElementById('form-section') as HTMLInputElement;
+const formTags = document.getElementById('form-tags') as HTMLInputElement;
+const formContent = document.getElementById('form-content') as HTMLInputElement;
+
+// Persistence / recovery buttons
+const btnSaveIdb = document.getElementById('btn-save-idb') as HTMLButtonElement;
+const btnRestoreIdb = document.getElementById('btn-restore-idb') as HTMLButtonElement;
+const btnClearIdb = document.getElementById('btn-clear-idb') as HTMLButtonElement;
+const btnRebuildGpu = document.getElementById('btn-rebuild-gpu') as HTMLButtonElement;
 
 // Application State
-let records = generateMonacoRecords(600);
-let activeResults: MonacoPaletteSearchResult[] = [];
+let records = generateDocsRecords(400);
+let activeResults: DocsSearchResult[] = [];
 let selectedIndex = 0;
 let currentAbortController: AbortController | null = null;
 
-const engine = new PaletteEngine({
+const engine = new DocsEngine({
   useWorker: true,
   preferGpu: true
 });
@@ -109,36 +116,21 @@ async function updateTelemetry(): Promise<void> {
   }
 }
 
-function updatePreview(record: MonacoFileRecord | null): void {
+function updatePreview(record: DocPageRecord | null): void {
   if (!record) {
-    previewTitle.textContent = 'Select a file to inspect';
-    previewMeta.textContent = 'Path and symbols overview';
-    previewDesc.textContent = '-';
-    previewSymbols.textContent = '-';
-    previewCode.textContent = '// Select a file from the list';
+    previewTitle.textContent = 'Select a page to inspect';
+    previewMeta.textContent = 'Section and version overview';
+    previewContent.textContent = '-';
+    previewTags.textContent = '-';
+    previewPath.textContent = '// Path will appear here';
     return;
   }
 
-  previewTitle.textContent = record.filename;
-  previewMeta.textContent = `${record.path} · ${record.language.toUpperCase()} · ${record.lineCount} lines (${formatBytes(record.sizeBytes)})`;
-  previewDesc.textContent = record.description;
-  previewSymbols.textContent = record.symbols;
-
-  previewCode.textContent = `// ${record.filename}
-// ${record.description}
-
-export interface ${record.filename.replace(/[^a-zA-Z0-9]/g, '_')}_Config {
-  readonly id: string;
-  readonly enabled: boolean;
-}
-
-export class ${record.symbols.split(',')[0]?.trim() || 'Component'} {
-  constructor(private readonly config: ${record.filename.replace(/[^a-zA-Z0-9]/g, '_')}_Config) {}
-
-  public async execute(): Promise<void> {
-    console.log("Executing in ${record.path}");
-  }
-}`;
+  previewTitle.textContent = record.title;
+  previewMeta.textContent = `${record.section} · v${record.version} · ${record.readingMinutes} min read`;
+  previewContent.textContent = record.content;
+  previewTags.textContent = record.tags;
+  previewPath.textContent = record.path;
 }
 
 function renderResults(): void {
@@ -150,7 +142,7 @@ function renderResults(): void {
     li.style.color = 'var(--text-muted)';
     li.style.textAlign = 'center';
     li.style.padding = '32px 16px';
-    li.textContent = searchInput.value.trim() ? 'No matching files or symbols found.' : 'Type to search...';
+    li.textContent = searchInput.value.trim() ? 'No matching pages found.' : 'Type to search...';
     resultsList.appendChild(li);
     updatePreview(null);
     return;
@@ -160,18 +152,18 @@ function renderResults(): void {
     const li = document.createElement('li');
     li.className = `result-item ${idx === selectedIndex ? 'selected' : ''}`;
 
-    const kind = res.doc.type;
-    const kindLabel = escapeHtml(kind.charAt(0).toUpperCase());
+    const section = res.doc.section;
+    const sectionLabel = escapeHtml(section.charAt(0).toUpperCase());
 
-    const highlightedFilename = res.highlightedText?.filename ? sanitizeHighlighted(res.highlightedText.filename) : escapeHtml(res.doc.filename);
+    const highlightedTitle = res.highlightedText?.title ? sanitizeHighlighted(res.highlightedText.title) : escapeHtml(res.doc.title);
     const highlightedPath = res.highlightedText?.path ? sanitizeHighlighted(res.highlightedText.path) : escapeHtml(res.doc.path);
-    const highlightedSymbols = res.highlightedText?.symbols ? sanitizeHighlighted(res.highlightedText.symbols) : escapeHtml(res.doc.symbols);
+    const highlightedContent = res.highlightedText?.content ? sanitizeHighlighted(res.highlightedText.content) : escapeHtml(res.doc.content);
 
     li.innerHTML = `
       <div class="item-header">
         <div class="item-left">
-          <span class="kind-icon kind-${escapeHtml(kind)}">${kindLabel}</span>
-          <span class="item-filename">${highlightedFilename}</span>
+          <span class="kind-icon kind-${escapeHtml(section)}">${sectionLabel}</span>
+          <span class="item-filename">${highlightedTitle}</span>
         </div>
         <div class="item-right">
           <span class="field-badge">match: ${escapeHtml(res.matchedField)}</span>
@@ -179,7 +171,7 @@ function renderResults(): void {
         </div>
       </div>
       <div class="item-path">${highlightedPath}</div>
-      <div class="item-symbols">${highlightedSymbols}</div>
+      <div class="item-symbols">${highlightedContent}</div>
     `;
 
     li.addEventListener('click', () => {
@@ -229,18 +221,18 @@ function renderSuggestions(suggestions: Array<{ text: string; score: number }>):
 
 function renderFacets(facets: Record<string, any> | undefined): void {
   facetList.innerHTML = '';
-  const byType = facets?.byType;
-  if (!byType || byType.type !== 'terms' || !Array.isArray(byType.buckets) || byType.buckets.length === 0) {
+  const bySection = facets?.bySection;
+  if (!bySection || bySection.type !== 'terms' || !Array.isArray(bySection.buckets) || bySection.buckets.length === 0) {
     facetBar.style.display = 'none';
     return;
   }
   facetBar.style.display = 'block';
-  for (const b of byType.buckets) {
+  for (const b of bySection.buckets) {
     const chip = document.createElement('button');
     chip.className = 'facet-chip';
     chip.textContent = `${String(b.value)} · ${b.count}`;
     chip.addEventListener('click', () => {
-      setSelectGuarded(typeSelect, String(b.value));
+      setSelectGuarded(sectionSelect, String(b.value));
       performSearch();
     });
     facetList.appendChild(chip);
@@ -258,16 +250,16 @@ async function performSearch(): Promise<void> {
   const mode = modeSelect.value as 'fuzzy' | 'substring' | 'prefix' | 'token';
   const highlight = highlightToggle.checked;
   const withSuggest = suggestToggle.checked;
-  const typeFilter = typeSelect.value;
-  const languageFilter = langSelect.value;
+  const sectionFilter = sectionSelect.value;
+  const versionFilter = versionSelect.value;
 
   try {
     const searchRes = await engine.search(query, {
       mode,
       highlight,
       limit: 50,
-      typeFilter,
-      languageFilter,
+      sectionFilter,
+      versionFilter,
       signal: currentAbortController.signal,
       ...(withSuggest && query ? { autocomplete: { mode: 'prefix', limit: 5 } } : {})
     });
@@ -313,7 +305,7 @@ searchInput.addEventListener('keydown', (e) => {
     const selected = activeResults[selectedIndex]?.doc;
     if (selected) {
       updatePreview(selected);
-      previewCode.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      previewPath.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
   } else if (e.key === 'Escape') {
     e.preventDefault();
@@ -325,8 +317,8 @@ searchInput.addEventListener('keydown', (e) => {
 modeSelect.addEventListener('change', () => performSearch());
 highlightToggle.addEventListener('change', () => performSearch());
 suggestToggle.addEventListener('change', () => performSearch());
-typeSelect.addEventListener('change', () => performSearch());
-langSelect.addEventListener('change', () => performSearch());
+sectionSelect.addEventListener('change', () => performSearch());
+versionSelect.addEventListener('change', () => performSearch());
 
 engineSelect.addEventListener('change', async () => {
   const preferGpu = engineSelect.value === 'webgpu';
@@ -345,7 +337,7 @@ workerSelect.addEventListener('change', async () => {
 // Modal Actions
 btnAddModal.addEventListener('click', () => {
   addModal.style.display = 'flex';
-  formFilename.focus();
+  formTitle.focus();
 });
 
 btnModalCancel.addEventListener('click', () => {
@@ -355,29 +347,28 @@ btnModalCancel.addEventListener('click', () => {
 btnModalSave.addEventListener('click', async () => {
   btnModalSave.disabled = true;
   try {
-    const filename = formFilename.value.trim() || 'new_symbol.ts';
-    const path = formPath.value.trim() || `src/custom/${filename}`;
-    const symbols = formSymbols.value.trim() || 'CustomSymbol, execute';
-    const desc = formDesc.value.trim() || 'User created symbol record';
+    const title = formTitle.value.trim() || 'Untitled offline page';
+    const section = formSection.value.trim() || 'Guide';
+    const tags = formTags.value.trim() || 'offline-docs';
+    const content = formContent.value.trim() || 'User created offline documentation page';
 
-    const newDoc: MonacoFileRecord = {
+    const newDoc: DocPageRecord = {
       id: `custom-${Date.now()}`,
-      filename,
-      path,
-      symbols,
-      type: 'class',
-      language: 'typescript',
-      description: desc,
-      sizeBytes: 2048,
-      lineCount: 85
+      path: `docs/custom/${title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 48)}.md`,
+      title,
+      section: section as DocPageRecord['section'],
+      content,
+      tags,
+      version: '1.0',
+      readingMinutes: 4
     };
 
     await engine.addRecord(newDoc);
     addModal.style.display = 'none';
-    formFilename.value = '';
-    formPath.value = '';
-    formSymbols.value = '';
-    formDesc.value = '';
+    formTitle.value = '';
+    formSection.value = '';
+    formTags.value = '';
+    formContent.value = '';
 
     await updateTelemetry();
     await performSearch();
@@ -387,7 +378,7 @@ btnModalSave.addEventListener('click', async () => {
 });
 
 btnBatchAdd.addEventListener('click', async () => {
-  const newRecords = generateMonacoRecords(200).map((r, i) => ({
+  const newRecords = generateDocsRecords(200).map((r, i) => ({
     ...r,
     id: `batch-${Date.now()}-${i}`
   }));
@@ -398,10 +389,66 @@ btnBatchAdd.addEventListener('click', async () => {
 });
 
 btnReset.addEventListener('click', async () => {
-  records = [...CORE_FILES];
+  records = [...CORE_DOCS];
   await engine.init(records);
   await updateTelemetry();
   await performSearch();
+});
+
+// Offline bundle persistence + GPU recovery
+btnSaveIdb.addEventListener('click', async () => {
+  btnSaveIdb.disabled = true;
+  try {
+    const res = await engine.saveSnapshotToIDB();
+    idbStatus.textContent = `Saved ${(res.byteLength / 1024).toFixed(1)} KB in ${res.durationMs.toFixed(1)}ms`;
+  } catch (err) {
+    console.error('[Save IDB Error]', err);
+    idbStatus.textContent = 'Save failed — see console';
+  } finally {
+    btnSaveIdb.disabled = false;
+  }
+});
+
+btnRestoreIdb.addEventListener('click', async () => {
+  btnRestoreIdb.disabled = true;
+  try {
+    const res = await engine.restoreSnapshotFromIDB();
+    idbStatus.textContent = `Restored ${res.recordCount.toLocaleString()} pages in ${res.durationMs.toFixed(1)}ms`;
+    await updateTelemetry();
+    await performSearch();
+  } catch (err) {
+    console.error('[Restore IDB Error]', err);
+    idbStatus.textContent = 'Restore failed — see console';
+  } finally {
+    btnRestoreIdb.disabled = false;
+  }
+});
+
+btnClearIdb.addEventListener('click', async () => {
+  await engine.clearIDB();
+  idbStatus.textContent = 'Snapshot cleared';
+});
+
+btnRebuildGpu.addEventListener('click', async () => {
+  btnRebuildGpu.disabled = true;
+  try {
+    const rebuilt = await engine.rebuildGpu();
+    idbStatus.textContent = rebuilt ? 'GPU pipeline rebuilt' : 'Rebuild skipped (worker path restores via snapshot)';
+    await updateTelemetry();
+    await performSearch();
+  } catch (err) {
+    console.error('[Rebuild GPU Error]', err);
+    idbStatus.textContent = 'Rebuild failed — see console';
+  } finally {
+    btnRebuildGpu.disabled = false;
+  }
+});
+
+// Teardown: release GPU buffers + terminate the worker on navigation.
+window.addEventListener('pagehide', () => {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  if (currentAbortController) currentAbortController.abort();
+  engine.destroy();
 });
 
 // Initialize
@@ -410,13 +457,6 @@ async function bootstrap(): Promise<void> {
   await updateTelemetry();
   await performSearch();
 }
-
-// Teardown: release GPU buffers + terminate the worker on navigation.
-window.addEventListener('pagehide', () => {
-  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-  if (currentAbortController) currentAbortController.abort();
-  engine.destroy();
-});
 
 bootstrap().catch((err) => {
   console.error('[Bootstrap Error]', err);

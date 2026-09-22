@@ -23,12 +23,17 @@ import { generateStructuredLogs } from '../apps/log-viewer/src/log-generator';
 import { LogEngine } from '../apps/log-viewer/src/log-engine';
 import type { StructuredLogRecord } from '../apps/log-viewer/src/types';
 
+import { CORE_DOCS, generateDocsRecords } from '../apps/docs-search/src/docs-data';
+import { DocsEngine } from '../apps/docs-search/src/docs-engine';
+import type { DocPageRecord } from '../apps/docs-search/src/types';
+
 async function runProofAppTests() {
   console.log('--- Running  Proof Applications & Verification Tests ---');
 
   const rootDir = path.resolve(__dirname, '..');
   const monacoDir = path.join(rootDir, 'apps/monaco-palette');
   const logViewerDir = path.join(rootDir, 'apps/log-viewer');
+  const docsDir = path.join(rootDir, 'apps/docs-search');
 
   // =========================================================================
   // 1. Proof Applications Monorepo Structure & File Contracts
@@ -36,7 +41,7 @@ async function runProofAppTests() {
   console.log('1. Verifying Proof Applications monorepo structure and file contracts...');
   {
     // Ensure dist builds exist on clean clones
-    if (!fs.existsSync(path.join(monacoDir, 'dist/index.html')) || !fs.existsSync(path.join(logViewerDir, 'dist/index.html'))) {
+    if (!fs.existsSync(path.join(monacoDir, 'dist/index.html')) || !fs.existsSync(path.join(logViewerDir, 'dist/index.html')) || !fs.existsSync(path.join(docsDir, 'dist/index.html'))) {
       console.log('   ℹ️ Building apps on-demand for clean-clone distribution verification...');
       execSync('bun run build', { cwd: rootDir, stdio: 'inherit' });
     }
@@ -70,6 +75,21 @@ async function runProofAppTests() {
     assert(fs.existsSync(path.join(logViewerDir, 'src/style.css')));
     assert(fs.existsSync(path.join(logViewerDir, 'src/worker.ts')));
     assert(fs.existsSync(path.join(logViewerDir, 'dist/index.html')), 'log-viewer dist/index.html must exist');
+
+    // C. apps/docs-search files
+    const docsPkg = JSON.parse(fs.readFileSync(path.join(docsDir, 'package.json'), 'utf8'));
+    assert.strictEqual(docsPkg.name, 'docs-search');
+    assert.strictEqual(docsPkg.dependencies['webgpu-search'], 'workspace:*');
+    assert(fs.existsSync(path.join(docsDir, 'tsconfig.json')));
+    assert(fs.existsSync(path.join(docsDir, 'vite.config.ts')));
+    assert(fs.existsSync(path.join(docsDir, 'index.html')));
+    assert(fs.existsSync(path.join(docsDir, 'src/main.ts')));
+    assert(fs.existsSync(path.join(docsDir, 'src/docs-engine.ts')));
+    assert(fs.existsSync(path.join(docsDir, 'src/docs-data.ts')));
+    assert(fs.existsSync(path.join(docsDir, 'src/types.ts')));
+    assert(fs.existsSync(path.join(docsDir, 'src/style.css')));
+    assert(fs.existsSync(path.join(docsDir, 'src/worker.ts')));
+    assert(fs.existsSync(path.join(docsDir, 'dist/index.html')), 'docs-search dist/index.html must exist');
 
     console.log('   ✅ Proof applications workspace contracts and build outputs verified');
   }
@@ -575,6 +595,38 @@ async function runProofAppTests() {
       assert((res.facets as any)?.byLevel?.type === 'terms');
       await client.destroy();
     }
+
+    // Docs worker path: section + version filter + facets + autocomplete.
+    {
+      const { clientWorker } = createMockWorkerScope();
+      const client = new SearchWorkerClient<DocPageRecord>({ worker: clientWorker as any });
+      const docs = generateDocsRecords(400);
+      await client.init(docs as any, {
+        idField: 'id',
+        fields: [
+          { name: 'title', weight: 3.0 },
+          { name: 'tags', weight: 2.0 },
+          { name: 'section', weight: 1.5 },
+          { name: 'content', weight: 1.0 }
+        ],
+        filterFields: [{ name: 'section' }, { name: 'version' }],
+        preferGpu: false
+      });
+      const res = await client.search('snapshot', {
+        mode: 'fuzzy',
+        limit: 20,
+        filter: { section: 'Storage' },
+        facets: { bySection: { type: 'terms', field: 'section', limit: 10 } },
+        autocomplete: { mode: 'prefix', limit: 5 }
+      } as any);
+      assert(res.totalMatches >= 1);
+      for (const item of res.results) {
+        assert.strictEqual((item.doc as any).section, 'Storage');
+      }
+      assert((res.facets as any)?.bySection?.type === 'terms');
+      assert((res.suggestions?.length ?? 0) >= 1);
+      await client.destroy();
+    }
     console.log('   ✅ Worker-boundary proof-app integration verified');
   }
 
@@ -641,6 +693,326 @@ async function runProofAppTests() {
     );
 
     console.log('   ✅ Core library 100% portable: zero unguarded DOM globals & zero runtime dependencies');
+  }
+
+  // =========================================================================
+  // 8. Docs-Search Offline Documentation Engine (third proof app)
+  // =========================================================================
+  console.log('8. Testing docs-search offline documentation engine...');
+  {
+    assert(CORE_DOCS.length >= 10, 'docs corpus must ship curated core pages');
+    const docs = generateDocsRecords(400);
+    assert.strictEqual(docs.length, 400);
+    assert.strictEqual(docs[0]!.id, 'd-001');
+
+    const sections = new Set(docs.map((d) => d.section));
+    for (const s of ['Guide', 'API', 'Storage', 'Reliability', 'Reference']) {
+      assert(sections.has(s as any), `docs corpus must contain ${s} section`);
+    }
+
+    const engine = new DocsEngine({ useWorker: false, preferGpu: false });
+    await engine.init(docs);
+
+    // A. Title-weighted query resolves the snapshot guide.
+    const titleRes = await engine.search('snapshot', { mode: 'fuzzy', highlight: true });
+    assert(titleRes.totalMatches >= 1);
+    assert(titleRes.results.some((r) => r.doc.id === 'd-004'), 'snapshot query must resolve the v4 guide');
+    assert.strictEqual(titleRes.results[0]!.matchedField, 'title');
+    assert(titleRes.results[0]!.highlightedText?.title?.includes('<mark>'));
+
+    // B. Tags-weighted query resolves the device-loss recovery page.
+    const tagRes = await engine.search('rebuildGpu', { mode: 'fuzzy', highlight: true });
+    assert(tagRes.totalMatches >= 1);
+    assert(tagRes.results.some((r) => r.doc.id === 'd-009'), 'rebuildGpu query must resolve the recovery page');
+
+    // C. Section pre-filter narrows strictly + facets populate.
+    const storageOnly = await engine.search('snapshot', {
+      mode: 'fuzzy',
+      limit: 20,
+      sectionFilter: 'Storage'
+    });
+    assert(storageOnly.totalMatches >= 1);
+    for (const r of storageOnly.results) {
+      assert.strictEqual(r.doc.section, 'Storage');
+    }
+    assert(storageOnly.totalMatches <= titleRes.totalMatches);
+    assert(storageOnly.facets?.bySection?.type === 'terms', 'docs search must return section facets');
+    assert((storageOnly.facets.bySection as any).isApproximate === false);
+
+    // D. Version filter narrows strictly.
+    const v10Only = await engine.search('offline', { mode: 'fuzzy', limit: 50, versionFilter: '1.0' });
+    const unfiltered = await engine.search('offline', { mode: 'fuzzy', limit: 50 });
+    assert(v10Only.totalMatches >= 1);
+    assert(v10Only.totalMatches <= unfiltered.totalMatches);
+    for (const r of v10Only.results) {
+      assert.strictEqual(r.doc.version, '1.0');
+    }
+
+    // E. Prefix search + autocomplete suggestions resolve.
+    const prefixRes = await engine.search('snap', { mode: 'prefix', limit: 20 });
+    assert(prefixRes.totalMatches >= 1, 'prefix search must match doc titles');
+    const autoRes = await engine.autocomplete('snap', { mode: 'prefix', limit: 5 });
+    assert(autoRes.suggestions.length >= 1, 'autocomplete must return completions');
+    const inlineAuto = await engine.search('snap', {
+      mode: 'prefix',
+      limit: 5,
+      autocomplete: { mode: 'prefix', limit: 5 }
+    });
+    assert((inlineAuto.suggestions?.length ?? 0) >= 1, 'inline autocomplete must return completions');
+
+    // F. Incremental mutations: add → update → remove.
+    // Identity is pinned with substring (contiguous) matching; fuzzy asserts recall.
+    const customDoc: DocPageRecord = {
+      id: 'd-custom-quantum',
+      path: 'docs/guides/quantum-search.md',
+      title: 'Quantum entangled offline search',
+      section: 'Guide',
+      content: 'Experimental entangled index measuring teleportState coherence across shards',
+      tags: 'quantum, teleportState, offline-docs',
+      version: '1.0',
+      readingMinutes: 6
+    };
+    await engine.addRecord(customDoc);
+    const matchAdded = await engine.search('teleportState', { mode: 'substring' });
+    assert.strictEqual(matchAdded.totalMatches, 1);
+    assert.strictEqual(matchAdded.results[0]!.doc.id, 'd-custom-quantum');
+    const matchAddedFuzzy = await engine.search('teleportState', { mode: 'fuzzy' });
+    assert(matchAddedFuzzy.results.some((r) => r.doc.id === 'd-custom-quantum'), 'fuzzy recall must include the new page');
+    assert.strictEqual(matchAddedFuzzy.results[0]!.doc.id, 'd-custom-quantum', 'exact tag hit must rank first');
+
+    customDoc.content = 'Experimental entangled index measuring teleportState fidelity across shards';
+    await engine.updateRecord(customDoc);
+    const matchUpdated = await engine.search('fidelity', { mode: 'substring' });
+    assert(matchUpdated.results.some((r) => r.doc.id === 'd-custom-quantum'));
+
+    await engine.removeRecord('d-custom-quantum');
+    const matchRemoved = await engine.search('teleportState', { mode: 'substring' });
+    assert.strictEqual(matchRemoved.totalMatches, 0);
+
+    // G. Query cancel: pre-aborted signal rejects AbortError (never fallback).
+    {
+      const controller = new AbortController();
+      controller.abort();
+      let abortName: string | null = null;
+      try {
+        await engine.search('snapshot', { mode: 'fuzzy', signal: controller.signal });
+      } catch (err: any) {
+        abortName = err?.name ?? null;
+      }
+      assert.strictEqual(abortName, 'AbortError', 'pre-aborted docs search must reject AbortError');
+    }
+
+    // H. Recovery hook: CPU-by-design rebuildGpu returns false without throwing.
+    assert.strictEqual(await engine.rebuildGpu(), false);
+
+    // I. snapshot snapshot roundtrip preserves section filtering.
+    {
+      const snap = await engine.serializeSnapshot();
+      const snapHeader = decodeSnapshotHeader(snap);
+      assert.strictEqual(snapHeader.magic, SNAPSHOT_MAGIC);
+      assert.strictEqual(snapHeader.formatVersion, SNAPSHOT_FORMAT_VERSION);
+      const fresh = new DocsEngine({ useWorker: false, preferGpu: false });
+      await fresh.init([]);
+      await fresh.restoreSnapshot(snap);
+      const after = await fresh.search('snapshot', { mode: 'fuzzy', limit: 20, sectionFilter: 'Storage' });
+      assert.strictEqual(after.totalMatches, storageOnly.totalMatches);
+      assert.strictEqual(after.results[0]!.id, storageOnly.results[0]!.id);
+      assert.strictEqual(after.results[0]!.score, storageOnly.results[0]!.score);
+      fresh.destroy();
+    }
+
+    // J. restoreSnapshot rejects non-ArrayBuffer + oversize buffers fail-closed.
+    await assert.rejects(engine.restoreSnapshot('nope' as any), TypeError);
+    {
+      const { MAX_SNAPSHOT_BYTES } = await import('../packages/webgpu-search/src/index');
+      let rejectName: string | null = null;
+      try {
+        await engine.restoreSnapshot(new ArrayBuffer((MAX_SNAPSHOT_BYTES as number) + 8));
+      } catch (err: any) {
+        rejectName = err?.name ?? null;
+      }
+      assert.strictEqual(rejectName, 'IncompatibleIndexError', 'oversize snapshot must reject fail-closed');
+    }
+
+    // K. Security: XSS sanitization in highlightedText.
+    const xssDoc: DocPageRecord = {
+      id: 'd-custom-xss',
+      path: 'docs/<script>alert("xss")</script>/xss.md',
+      title: 'xss_payload_unique_<img src=x onerror=alert(1)> guide',
+      section: 'Guide',
+      content: 'Hostile test page with markup injection',
+      tags: 'xss, UniqueXssTag',
+      version: '1.0',
+      readingMinutes: 1
+    };
+    await engine.addRecord(xssDoc);
+    const xssSearch = await engine.search('xss_payload_unique', { mode: 'fuzzy', highlight: true });
+    assert.strictEqual(xssSearch.totalMatches, 1);
+    const hlTitle = xssSearch.results[0]!.highlightedText?.title;
+    assert(hlTitle, 'Highlighted title must exist');
+    assert(!hlTitle.includes('<img'), 'Raw HTML tag <img must be escaped');
+    assert(hlTitle.includes('&lt;img') || hlTitle.includes('&gt;'), 'HTML entities must be escaped');
+
+    // L. Idempotent destroy.
+    engine.destroy();
+    engine.destroy();
+    console.log('   ✅ Docs-search offline documentation engine verified');
+  }
+
+  // =========================================================================
+  // 9. Proof-App Teardown Lint (worker-first + abort-safe + destroy-on-unmount)
+  // =========================================================================
+  console.log('9. Linting proof-app teardown, cancel, and error-path patterns...');
+  {
+    const apps = ['monaco-palette', 'log-viewer', 'docs-search'];
+    for (const app of apps) {
+      const mainSrc = fs.readFileSync(path.join(rootDir, `apps/${app}/src/main.ts`), 'utf8');
+      assert(mainSrc.includes('AbortController'), `${app}/main.ts must cancel in-flight queries via AbortController`);
+      assert(mainSrc.includes('AbortError'), `${app}/main.ts must swallow AbortError on superseded queries`);
+      assert(mainSrc.includes('engine.destroy()'), `${app}/main.ts must tear down the engine`);
+      assert(
+        mainSrc.includes("addEventListener('pagehide'") || mainSrc.includes('addEventListener("pagehide"'),
+        `${app}/main.ts must destroy resources on pagehide`
+      );
+      assert(mainSrc.includes('console.error'), `${app}/main.ts must surface error paths`);
+    }
+
+    const engines: Array<[string, string]> = [
+      ['monaco-palette', 'palette-engine.ts'],
+      ['log-viewer', 'log-engine.ts'],
+      ['docs-search', 'docs-engine.ts']
+    ];
+    for (const [app, file] of engines) {
+      const engineSrc = fs.readFileSync(path.join(rootDir, `apps/${app}/src/${file}`), 'utf8');
+      assert(engineSrc.includes('SearchWorkerClient'), `${app}/${file} must support off-main-thread build via SearchWorkerClient`);
+      assert(engineSrc.includes('new Worker('), `${app}/${file} must construct a dedicated worker`);
+      assert(engineSrc.includes('signal'), `${app}/${file} must forward AbortSignal to search`);
+      assert(engineSrc.includes('escapeHtml: true'), `${app}/${file} must request escaped original-text highlights`);
+      assert(engineSrc.includes('.terminate()'), `${app}/${file} must terminate the worker on destroy`);
+      assert(engineSrc.includes('destroy()'), `${app}/${file} must expose destroy()`);
+      assert(engineSrc.includes('serialize') && engineSrc.includes('restore'), `${app}/${file} must support snapshot serialize/restore`);
+    }
+
+    for (const app of apps) {
+      const workerSrc = fs.readFileSync(path.join(rootDir, `apps/${app}/src/worker.ts`), 'utf8');
+      assert(workerSrc.includes('startSearchWorker'), `${app}/worker.ts must boot the dedicated worker entrypoint`);
+    }
+    console.log('   ✅ Proof-app teardown, cancel, and error-path patterns verified');
+  }
+
+  // =========================================================================
+  // 10. Proof-App Public-API-Only Import Lint
+  // =========================================================================
+  console.log('10. Linting proof-app imports (public API entries only)...');
+  {
+    const allowedSpecifiers = new Set(['webgpu-search', 'webgpu-search/worker']);
+    const appSrcDirs = ['apps/monaco-palette/src', 'apps/log-viewer/src', 'apps/docs-search/src'];
+
+    function collectTsFiles(dir: string): string[] {
+      const out: string[] = [];
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) out.push(...collectTsFiles(full));
+        else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(full);
+      }
+      return out;
+    }
+
+    for (const rel of appSrcDirs) {
+      for (const file of collectTsFiles(path.join(rootDir, rel))) {
+        const content = fs.readFileSync(file, 'utf8');
+        // Only real module specifiers count: prose/data may mention
+        // `packages/webgpu-search/src/...` paths (e.g. monaco file records).
+        const specifiers = [
+          ...content.matchAll(/(?:from\s+|import\s*\(\s*|require\s*\(\s*)['"]([^'"]+)['"]/g)
+        ].map((m) => m[1]!);
+        for (const spec of specifiers) {
+          assert(
+            !spec.includes('webgpu-search/src') && !spec.includes('packages/'),
+            `Deep src import '${spec}' in ${path.relative(rootDir, file)}: proof apps must use public entries only`
+          );
+          if (spec === 'webgpu-search' || spec.startsWith('webgpu-search/')) {
+            assert(
+              allowedSpecifiers.has(spec),
+              `Unsupported entry ${spec} in ${path.relative(rootDir, file)}: only 'webgpu-search' + 'webgpu-search/worker' are public`
+            );
+          }
+        }
+      }
+    }
+    console.log("   ✅ Proof apps consume only 'webgpu-search' + 'webgpu-search/worker'");
+  }
+
+  // =========================================================================
+  // 11. Framework Recipe Audit (worker-first + abort-safe + destroy-on-unmount)
+  // =========================================================================
+  console.log('11. Auditing framework recipes for worker-first + abort-safe patterns...');
+  {
+    const recipes = [
+      'examples/react/useDocumentSearch.ts',
+      'examples/vue/useSearch.ts',
+      'examples/svelte/documentSearchStore.ts',
+      'examples/vanilla/search-app.ts'
+    ];
+    for (const rel of recipes) {
+      const src = fs.readFileSync(path.join(rootDir, rel), 'utf8');
+      assert(src.includes('SearchWorkerClient'), `${rel} must support worker-first init via SearchWorkerClient`);
+      assert(src.includes('AbortController'), `${rel} must cancel superseded queries via AbortController`);
+      assert(src.includes('AbortError'), `${rel} must tolerate AbortError on superseded queries`);
+      assert(src.includes('destroy'), `${rel} must expose destroy() for unmount teardown`);
+      assert(
+        !src.includes('webgpu-search/src') && !src.includes('../packages/'),
+        `${rel} must import from public entries only`
+      );
+    }
+
+    const vueBox = fs.readFileSync(path.join(rootDir, 'examples/vue/SearchBox.vue'), 'utf8');
+    assert(vueBox.includes('useSearch'), 'SearchBox.vue must consume the useSearch composable');
+    const vueHook = fs.readFileSync(path.join(rootDir, 'examples/vue/useSearch.ts'), 'utf8');
+    assert(vueHook.includes('onUnmounted') && vueHook.includes('destroy'), 'useSearch must destroy on unmount');
+    const svelteBox = fs.readFileSync(path.join(rootDir, 'examples/svelte/SearchBox.svelte'), 'utf8');
+    assert(svelteBox.includes('onDestroy') && svelteBox.includes('destroy'), 'SearchBox.svelte must destroy on destroy');
+    const reactHook = fs.readFileSync(path.join(rootDir, 'examples/react/useDocumentSearch.ts'), 'utf8');
+    assert(reactHook.includes('return () =>'), 'useDocumentSearch must return an effect cleanup that destroys');
+    const vanillaApp = fs.readFileSync(path.join(rootDir, 'examples/vanilla/search-app.ts'), 'utf8');
+    assert(vanillaApp.includes('removeEventListener'), 'createVanillaSearchApp must detach listeners on destroy');
+    console.log('   ✅ Framework recipes are worker-first, abort-safe, and destroy-on-unmount');
+  }
+
+  // =========================================================================
+  // 12. Proof-App Engine Cross-Platform Safety (DOM-free engines + data)
+  // =========================================================================
+  console.log('12. Auditing proof-app engines and data generators (DOM-free)...');
+  {
+    const domFreePatterns = [
+      'apps/monaco-palette/src/palette-engine.ts',
+      'apps/monaco-palette/src/sample-data.ts',
+      'apps/monaco-palette/src/types.ts',
+      'apps/monaco-palette/src/worker.ts',
+      'apps/log-viewer/src/log-engine.ts',
+      'apps/log-viewer/src/log-generator.ts',
+      'apps/log-viewer/src/types.ts',
+      'apps/log-viewer/src/worker.ts',
+      'apps/docs-search/src/docs-engine.ts',
+      'apps/docs-search/src/docs-data.ts',
+      'apps/docs-search/src/types.ts',
+      'apps/docs-search/src/worker.ts'
+    ];
+    for (const rel of domFreePatterns) {
+      const content = fs.readFileSync(path.join(rootDir, rel), 'utf8');
+      const noBlock = content.replace(/\/\*[\s\S]*?\*\//g, (m) => '\n'.repeat((m.match(/\n/g) || []).length));
+      const code = noBlock
+        .split('\n')
+        .map((line) => {
+          const idx = line.indexOf('//');
+          return idx >= 0 ? line.slice(0, idx) : line;
+        })
+        .join('\n')
+        .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`/g, "''");
+      assert(!/\bwindow\b/.test(code), `Bare window global in ${rel}: engines/data must stay DOM-free`);
+      assert(!/\bdocument\./.test(code), `Bare document reference in ${rel}: engines/data must stay DOM-free`);
+    }
+    console.log('   ✅ Proof-app engines and data generators are DOM-free');
   }
 
   console.log('\n--- All Proof Applications & Verification Tests Passed! ✅ ---');

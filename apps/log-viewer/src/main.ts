@@ -441,6 +441,13 @@ async function bootstrap(): Promise<void> {
   await loadDataset(currentLogCount);
 }
 
+// Teardown: release GPU buffers + terminate the worker on navigation.
+window.addEventListener('pagehide', () => {
+  if (isStreaming) toggleStream();
+  if (currentAbortController) currentAbortController.abort();
+  engine.destroy();
+});
+
 bootstrap().catch((err) => {
   console.error('[Log Viewer Bootstrap Error]', err);
 });

@@ -31,6 +31,18 @@
         "vite": "^8.2.2",
       },
     },
+    "apps/docs-search": {
+      "name": "docs-search",
+      "version": "0.1.0",
+      "dependencies": {
+        "webgpu-search": "workspace:*",
+      },
+      "devDependencies": {
+        "@webgpu/types": "^0.1.72",
+        "typescript": "~6.0.2",
+        "vite": "^8.2.2",
+      },
+    },
     "apps/log-viewer": {
       "name": "log-viewer",
       "version": "0.1.0",
@@ -373,6 +385,8 @@
     "devalue": ["devalue@5.9.4", "", {}, "sha512-sPAT4pztbu6586/hrhOnMKS17IJrvg12mXiSPSS3W5qDeN2RGgvZ0diZCm31dBbnevfVmujNO3IM2wrS4Y2Rhg=="],
 
     "devtools-protocol": ["devtools-protocol@0.0.1666840", "", {}, "sha512-gCcO42XCHKEs7Ag0S7aGYsnJ7hlgrO3qderYqeiY0Eqk+0GFfuvT13IA0hHreJTa2KCdDVyGMeOhdMNmrrTjVg=="],
+
+    "docs-search": ["docs-search@workspace:apps/docs-search"],
 
     "emoji-regex": ["emoji-regex@10.6.0", "", {}, "sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A=="],
 

@@ -2,7 +2,7 @@
 
 > **Issue Reference**: [GitHub Issue #11: 1.0: lock compatibility, reliability, and the embedding ecosystem](https://github.com/codewarnab/webgpu-fuzzy-search/issues/11)
 > **Target Milestone**: `1.0.0`
-> **Status**: Phases 0–3 complete; Phases 4–6 open
+> **Status**: Phases 0–4 complete; Phases 5–6 open
 > **Predecessors**: v0.1.1 (#8), v0.2 (#7), v0.3 (#9), v0.4 (#10)
 > **Roadmap**: Issue #12 (embeddable search infrastructure through 1.0)
 
@@ -24,7 +24,7 @@ Success means a host can build or restore an index off the main thread, update i
 - [x] Publish a browser/OS/GPU support matrix and a tested CPU-only baseline. (Done: `docs/support-matrix.md`, `scripts/test-cpu-baseline.ts`, `test:compatibility`.)
 - [x] Prove device-loss rebuild, resource cleanup, concurrent-query isolation, and deterministic fallback. (Done: `rebuildGpu()` on both index types, `docs/reliability.md`, `scripts/test-reliability.ts` 58 checks, parity Part 7, contracts §13, wired into `test:compatibility` + `test:all`.)
 - [x] Define index-format compatibility and migration support across supported releases. (Done: `docs/snapshot-format.md` §§1–9 migration table + reject taxonomy, `snapshot-codec` schema/header agreement guard, `DocumentIndex` ctor/`fromSnapshotData`/`applySnapshotData` `ProfileMismatchError` guards, `scripts/test-snapshot.ts` §§14–17 hookIds/worker-version/all-caps/profile+live-format pins.)
-- [ ] Maintain integration examples for web IDE search, local logs/data grids, and offline docs.
+- [x] Maintain integration examples for web IDE search, local logs/data grids, and offline docs. (Done: `apps/monaco-palette`, `apps/log-viewer`, `apps/docs-search`, `scripts/test-proof-apps.ts` §§1–12 incl. teardown + public-API-only + recipe + DOM-free audits.)
 - [ ] Publish reproducible benchmark fixtures, environments, median/p95 results, memory, build/upload, and restore costs.
 - [ ] Provide package-size budgets, tree-shaking guidance, CSP/worker setup, SSR-safe imports, and accessibility guidance for example UIs.
 - [ ] Document diagnostics, issue-report data, security/privacy boundaries, and unsupported configurations.
@@ -115,16 +115,18 @@ Tasks (all complete):
 
 Exit: any persisted index restores or rejects with an actionable migration reason.
 
-### Phase 4 — Integration Examples (Public-API Only)
+### Phase 4 — Integration Examples (Public-API Only) ✅ DONE
 
-Tasks:
+Shipped: `apps/docs-search` (offline documentation / API search: `DocsEngine`, versioned `generateDocsRecords` corpus, section/version filters + facets, IDB snapshot bundle, `rebuildGpu` recovery hook, `pagehide` teardown), `pagehide` teardown on all three proof-app UIs, `test-proof-apps` §§8–12 (docs-engine functional incl. cancel/recovery/snapshot/XSS pins, teardown lint, public-API-only import lint, framework-recipe audit, DOM-free engine/data audit). Gates: `test:proof-apps` §§1–12, `typecheck` (7 tasks), `build`, `test:mock` all green.
 
-1. Keep `apps/monaco-palette` — Monaco-style file / symbol / command search.
-2. Keep `apps/log-viewer` — large local log viewer / data-grid quick find.
-3. Add `apps/docs-search` — offline documentation / API search (the missing third proof app).
-4. Enforce per app: public-API-only imports from `webgpu-search`, off-main-thread build/restore via worker, incremental mutations, query cancel, original-text highlights, fallback/recovery observability, `destroy()` + error paths.
-5. Extend `scripts/test-proof-apps.ts` to cover all three + teardown lint + cross-platform safety audit (zero unguarded DOM globals).
-6. Check framework recipes (`examples/react`, `examples/vue`, `examples/svelte`, `examples/vanilla`) for worker-first + abort-safe + destroy-on-unmount patterns.
+Tasks (all complete):
+
+1. [x] Keep `apps/monaco-palette` — Monaco-style file / symbol / command search.
+2. [x] Keep `apps/log-viewer` — large local log viewer / data-grid quick find.
+3. [x] Add `apps/docs-search` — offline documentation / API search (the missing third proof app).
+4. [x] Enforce per app: public-API-only imports from `webgpu-search`, off-main-thread build/restore via worker, incremental mutations, query cancel, original-text highlights, fallback/recovery observability, `destroy()` + error paths.
+5. [x] Extend `scripts/test-proof-apps.ts` to cover all three + teardown lint + cross-platform safety audit (zero unguarded DOM globals).
+6. [x] Check framework recipes (`examples/react`, `examples/vue`, `examples/svelte`, `examples/vanilla`) for worker-first + abort-safe + destroy-on-unmount patterns.
 
 Exit: three proof apps pass using only public APIs.
 
