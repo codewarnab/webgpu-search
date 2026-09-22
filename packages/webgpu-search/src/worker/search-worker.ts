@@ -1,5 +1,6 @@
 import { DocumentIndex } from '../document-index';
 import { restoreDocumentIndex } from '../snapshot-codec';
+import type { WorkerMessageType } from '../types';
 import {
   serializeError,
   type WorkerAbortPayload,
@@ -45,14 +46,16 @@ export function startSearchWorker(customScope?: any): void {
   let activeAbortController: AbortController | null = null;
   let latestQueryId: number = 0;
 
-  const onMessage = async (event: MessageEvent) => {
-    const req = event?.data as WorkerRequest;
-    if (!req || typeof req.id !== 'number' || typeof req.type !== 'string') {
-      return;
-    }
+  type WorkerHandler = (req: WorkerRequest) => Promise<void> | void;
 
-    switch (req.type) {
-      case 'INIT': {
+  /**
+   * Table-driven worker dispatch: maps each WorkerMessageType to its handler.
+   * Replaces the previous 8-case switch; responses are identical.
+   */
+  const handlers = new Map<WorkerMessageType, WorkerHandler>([
+    [
+      'INIT',
+      async (req) => {
         try {
           if (index) {
             index.destroy();
@@ -69,10 +72,11 @@ export function startSearchWorker(customScope?: any): void {
             error: serializeError(err)
           } satisfies WorkerResponse);
         }
-        break;
       }
-
-      case 'SEARCH': {
+    ],
+    [
+      'SEARCH',
+      async (req) => {
         const payload = req.payload as WorkerSearchPayload<any>;
         const queryId = payload?.queryId ?? 0;
 
@@ -84,12 +88,12 @@ export function startSearchWorker(customScope?: any): void {
               new Error('[webgpu-search] Worker search index is not initialized. Call init() first.')
             )
           } satisfies WorkerResponse);
-          break;
+          return;
         }
 
         if (queryId < latestQueryId) {
           // Superseded by newer query
-          break;
+          return;
         }
         latestQueryId = queryId;
 
@@ -106,7 +110,7 @@ export function startSearchWorker(customScope?: any): void {
           });
 
           if (signal.aborted || queryId < latestQueryId) {
-            break;
+            return;
           }
 
           // String-isolated enrichment: strip `doc` across thread boundary to eliminate structured-clone overhead
@@ -121,7 +125,7 @@ export function startSearchWorker(customScope?: any): void {
           } satisfies WorkerResponse);
         } catch (err: any) {
           if (signal.aborted || queryId < latestQueryId) {
-            break;
+            return;
           }
           scope.postMessage({
             id: req.id,
@@ -129,10 +133,11 @@ export function startSearchWorker(customScope?: any): void {
             error: serializeError(err)
           } satisfies WorkerResponse);
         }
-        break;
       }
-
-      case 'ABORT': {
+    ],
+    [
+      'ABORT',
+      (req) => {
         const payload = req.payload as WorkerAbortPayload;
         if (payload && payload.queryId >= latestQueryId) {
           if (activeAbortController) {
@@ -140,10 +145,11 @@ export function startSearchWorker(customScope?: any): void {
             activeAbortController = null;
           }
         }
-        break;
       }
-
-      case 'MUTATE': {
+    ],
+    [
+      'MUTATE',
+      async (req) => {
         if (!index) {
           scope.postMessage({
             id: req.id,
@@ -152,7 +158,7 @@ export function startSearchWorker(customScope?: any): void {
               new Error('[webgpu-search] Worker search index is not initialized.')
             )
           } satisfies WorkerResponse);
-          break;
+          return;
         }
         try {
           const payload = req.payload as WorkerMutatePayload<any>;
@@ -169,10 +175,11 @@ export function startSearchWorker(customScope?: any): void {
             error: serializeError(err)
           } satisfies WorkerResponse);
         }
-        break;
       }
-
-      case 'SERIALIZE': {
+    ],
+    [
+      'SERIALIZE',
+      (req) => {
         if (!index) {
           scope.postMessage({
             id: req.id,
@@ -181,7 +188,7 @@ export function startSearchWorker(customScope?: any): void {
               new Error('[webgpu-search] Worker search index is not initialized.')
             )
           } satisfies WorkerResponse);
-          break;
+          return;
         }
         try {
           const payload = req.payload as WorkerSerializePayload | undefined;
@@ -197,10 +204,11 @@ export function startSearchWorker(customScope?: any): void {
             error: serializeError(err)
           } satisfies WorkerResponse);
         }
-        break;
       }
-
-      case 'RESTORE': {
+    ],
+    [
+      'RESTORE',
+      async (req) => {
         try {
           const payload = req.payload as WorkerRestorePayload;
           if (index) {
@@ -216,10 +224,11 @@ export function startSearchWorker(customScope?: any): void {
             error: serializeError(err)
           } satisfies WorkerResponse);
         }
-        break;
       }
-
-      case 'STATS': {
+    ],
+    [
+      'STATS',
+      (req) => {
         if (!index) {
           scope.postMessage({
             id: req.id,
@@ -228,7 +237,7 @@ export function startSearchWorker(customScope?: any): void {
               new Error('[webgpu-search] Worker search index is not initialized.')
             )
           } satisfies WorkerResponse);
-          break;
+          return;
         }
         try {
           const stats = index.getStats();
@@ -244,10 +253,11 @@ export function startSearchWorker(customScope?: any): void {
             error: serializeError(err)
           } satisfies WorkerResponse);
         }
-        break;
       }
-
-      case 'DESTROY': {
+    ],
+    [
+      'DESTROY',
+      (req) => {
         if (index) {
           index.destroy();
           index = null;
@@ -257,20 +267,28 @@ export function startSearchWorker(customScope?: any): void {
           activeAbortController = null;
         }
         scope.postMessage({ id: req.id, success: true } satisfies WorkerResponse);
-        break;
       }
+    ]
+  ]);
 
-      default: {
-        scope.postMessage({
-          id: req.id,
-          success: false,
-          error: serializeError(
-            new Error(`[webgpu-search] Unknown worker request type: ${(req as any).type}`)
-          )
-        } satisfies WorkerResponse);
-        break;
-      }
+  const onMessage = async (event: MessageEvent) => {
+    const req = event?.data as WorkerRequest;
+    if (!req || typeof req.id !== 'number' || typeof req.type !== 'string') {
+      return;
     }
+
+    const handler = handlers.get(req.type as WorkerMessageType);
+    if (!handler) {
+      scope.postMessage({
+        id: req.id,
+        success: false,
+        error: serializeError(
+          new Error(`[webgpu-search] Unknown worker request type: ${(req as any).type}`)
+        )
+      } satisfies WorkerResponse);
+      return;
+    }
+    await handler(req);
   };
 
   if (typeof scope.addEventListener === 'function') {

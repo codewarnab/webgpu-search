@@ -108,6 +108,81 @@ export function serializeError(err: unknown): SerializedWorkerError {
 }
 
 /**
+ * Table-driven error rehydration: maps serialized `name` to its constructor.
+ * Replaces the previous 12-case switch; behavior is identical.
+ */
+type ErrorFactory = (details: Record<string, unknown>, message: string) => Error;
+
+const errorConstructors = new Map<string, ErrorFactory>([
+  [
+    'QueryTooLongError',
+    (details) =>
+      new QueryTooLongError(
+        (details.limit as number) ?? 128,
+        (details.actual as number) ?? 0,
+        (details.profileId as string) ?? 'unicode-default'
+      )
+  ],
+  ['IncompatibleIndexError', (details) => new IncompatibleIndexError(details.expected, details.actual)],
+  [
+    'ProfileMismatchError',
+    (details) =>
+      new ProfileMismatchError(
+        details.expected,
+        details.actual,
+        (details.property as string) ?? 'caseSensitive'
+      )
+  ],
+  [
+    'IncompatibleOptionError',
+    (details, message) =>
+      new IncompatibleOptionError(
+        (details.option as string) ?? 'option',
+        (details.reason as string) ?? message
+      )
+  ],
+  [
+    'DuplicateIdError',
+    (details, message) => new DuplicateIdError(details.id as string | number, message)
+  ],
+  [
+    'DocumentNotFoundError',
+    (details, message) => new DocumentNotFoundError(details.id as string | number, message)
+  ],
+  [
+    'IncompatibleHookError',
+    (details, message) =>
+      new IncompatibleHookError(
+        (details.hookId as string) ?? 'hook',
+        (details.reason as string) ?? message,
+        message
+      )
+  ],
+  [
+    'CostBudgetExceededError',
+    (details, message) =>
+      new CostBudgetExceededError(
+        (details.budgetType as 'time' | 'candidates') ?? 'time',
+        (details.limit as number) ?? 0,
+        (details.actual as number) ?? 0,
+        message
+      )
+  ],
+  [
+    'InvalidFilterError',
+    (details, message) =>
+      new InvalidFilterError(
+        (details.reason as string) ?? message,
+        details.field as string | undefined,
+        message
+      )
+  ],
+  ['AbortError', () => abortError()],
+  ['TypeError', (_details, message) => new TypeError(message)],
+  ['RangeError', (_details, message) => new RangeError(message)]
+]);
+
+/**
  * Rehydrate a serialized error into its exact error class instance across the thread boundary.
  */
 export function deserializeError(serialized: SerializedWorkerError): Error {
@@ -120,73 +195,14 @@ export function deserializeError(serialized: SerializedWorkerError): Error {
     serialized?.details && typeof serialized.details === 'object' && serialized.details !== null
       ? (serialized.details as Record<string, unknown>)
       : {};
+  const factory = errorConstructors.get(name);
   let error: Error;
 
-  switch (name) {
-    case 'QueryTooLongError':
-      error = new QueryTooLongError(
-        (details.limit as number) ?? 128,
-        (details.actual as number) ?? 0,
-        (details.profileId as string) ?? 'unicode-default'
-      );
-      break;
-    case 'IncompatibleIndexError':
-      error = new IncompatibleIndexError(details.expected, details.actual);
-      break;
-    case 'ProfileMismatchError':
-      error = new ProfileMismatchError(
-        details.expected,
-        details.actual,
-        (details.property as string) ?? 'caseSensitive'
-      );
-      break;
-    case 'IncompatibleOptionError':
-      error = new IncompatibleOptionError(
-        (details.option as string) ?? 'option',
-        (details.reason as string) ?? message
-      );
-      break;
-    case 'DuplicateIdError':
-      error = new DuplicateIdError(details.id as string | number, message);
-      break;
-    case 'DocumentNotFoundError':
-      error = new DocumentNotFoundError(details.id as string | number, message);
-      break;
-    case 'IncompatibleHookError':
-      error = new IncompatibleHookError(
-        (details.hookId as string) ?? 'hook',
-        (details.reason as string) ?? message,
-        message
-      );
-      break;
-    case 'CostBudgetExceededError':
-      error = new CostBudgetExceededError(
-        (details.budgetType as 'time' | 'candidates') ?? 'time',
-        (details.limit as number) ?? 0,
-        (details.actual as number) ?? 0,
-        message
-      );
-      break;
-    case 'InvalidFilterError':
-      error = new InvalidFilterError(
-        (details.reason as string) ?? message,
-        details.field as string | undefined,
-        message
-      );
-      break;
-    case 'AbortError':
-      error = abortError();
-      break;
-    case 'TypeError':
-      error = new TypeError(message);
-      break;
-    case 'RangeError':
-      error = new RangeError(message);
-      break;
-    default:
-      error = new Error(message);
-      error.name = name;
-      break;
+  if (factory) {
+    error = factory(details, message);
+  } else {
+    error = new Error(message);
+    error.name = name;
   }
 
   if (stack) {
