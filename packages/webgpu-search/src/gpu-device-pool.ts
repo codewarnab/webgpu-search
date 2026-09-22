@@ -1,9 +1,26 @@
 import type { AdapterInfo } from './types';
+import { IncompatibleOptionError } from './errors';
 
 export interface AcquiredDeviceContext {
   device: GPUDevice;
   adapterInfo: AdapterInfo | null;
   isShared: boolean;
+}
+
+/**
+ * Fail-closed power-preference validation.
+ * Accepts only 'high-performance' | 'low-power' (or undefined = default).
+ * Unknown values throw `IncompatibleOptionError` — even on CPU-only paths
+ * where no adapter request is made.
+ */
+export function assertValidPowerPreference(value: unknown): asserts value is GPUPowerPreference | undefined {
+  if (value === undefined) return;
+  if (value !== 'high-performance' && value !== 'low-power') {
+    throw new IncompatibleOptionError(
+      'powerPreference',
+      `Unknown powerPreference '${String(value)}'. Expected 'high-performance' or 'low-power'.`
+    );
+  }
 }
 
 export class GpuDevicePool {
@@ -62,6 +79,9 @@ export class GpuDevicePool {
     device?: GPUDevice;
     powerPreference?: GPUPowerPreference;
   }): Promise<AcquiredDeviceContext | null> {
+    // Fail-closed: unknown preferences throw even when a custom device is
+    // injected (no adapter request) or WebGPU is unsupported.
+    assertValidPowerPreference(options?.powerPreference);
     // 1. Custom injected device (e.g. testing with vgpu/mock or existing 3D context)
     if (options?.device) {
       const mockInfo: AdapterInfo = {

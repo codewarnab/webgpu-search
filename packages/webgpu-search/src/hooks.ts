@@ -15,10 +15,10 @@
  * Persistence safety: closures are never serialized. `serialize()` records
  * only declarative `ExtensionHookIds` (stable `hookId` property when set and
  * non-blank, else `function.name`, else `'anonymous'`); `restore` requires
- * matching handlers via `options.options.extensions` or throws
+ * matching handlers via `options.options.hooks` or throws
  * `IncompatibleHookError`. Name-derived IDs can collide; assign explicit
  * `hookId` for persisted hooks. Hooks cannot cross the Web Worker boundary
- * (`SearchWorkerClient` init/search/restore reject `extensions` fail-closed;
+ * (`SearchWorkerClient` init/search/restore reject `hooks` fail-closed;
  * empty `{}` is a no-op).
  *
  * Portable: no DOM refs. Zero runtime dependencies.
@@ -191,13 +191,13 @@ export function normalizeSearchHooks<TDoc>(
 ): SearchHooks<TDoc> | undefined {
   if (raw === undefined) return undefined;
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new TypeError('[webgpu-search] extensions must be an object.');
+    throw new TypeError('[webgpu-search] hooks must be an object.');
   }
   const record = raw as Record<string, unknown>;
   for (const key of Object.keys(record)) {
     if ((KNOWN_HOOK_KEYS as readonly string[]).indexOf(key) < 0) {
       throw new TypeError(
-        `[webgpu-search] Unknown extension hook '${key}'. Expected one of 'tokenizer', 'scoringHook', 'filterPredicate', 'postProcess'.`
+        `[webgpu-search] Unknown hook '${key}'. Expected one of 'tokenizer', 'scoringHook', 'filterPredicate', 'postProcess'.`
       );
     }
   }
@@ -208,7 +208,7 @@ export function normalizeSearchHooks<TDoc>(
     const val = (raw as Record<string, unknown>)[key];
     if (val === undefined) continue;
     if (typeof val !== 'function') {
-      throw new TypeError(`[webgpu-search] extensions.${key} must be a function.`);
+      throw new TypeError(`[webgpu-search] hooks.${key} must be a function.`);
     }
     (out as Record<string, unknown>)[key] = val;
     count++;
@@ -308,7 +308,7 @@ export function assertHooksSatisfied<TDoc>(
     if (typeof haveFn !== 'function') {
       throw new IncompatibleHookError(
         String(need),
-        `Snapshot requires "${key}" hook "${String(need)}" but no matching handler was supplied (pass via options.options.extensions).`
+        `Snapshot requires "${key}" hook "${String(need)}" but no matching handler was supplied (pass via options.options.hooks).`
       );
     }
     const haveId = providedIds ? (providedIds as Record<string, unknown>)[key] as string | undefined : undefined;
@@ -389,7 +389,7 @@ export function applyScoringHook<TDoc>(
 ): void {
   if (hook === undefined) return;
   if (typeof hook !== 'function') {
-    throw new TypeError('[webgpu-search] extensions.scoringHook must be a function.');
+    throw new TypeError('[webgpu-search] hooks.scoringHook must be a function.');
   }
   for (let i = 0; i < results.length; i++) {
     const item = results[i] as DocumentSearchResultItem<TDoc>;
@@ -406,7 +406,7 @@ export function applyScoringHook<TDoc>(
       matchInfo
     );
     if (typeof next !== 'number' || !Number.isFinite(next) || !Number.isInteger(next)) {
-      throw new TypeError('[webgpu-search] extensions.scoringHook must return a finite integer.');
+      throw new TypeError('[webgpu-search] hooks.scoringHook must return a finite integer.');
     }
     item.score = next;
   }
@@ -430,16 +430,13 @@ export function applyPostProcess<TDoc>(
 ): DocumentSearchResultItem<TDoc>[] {
   if (hook === undefined) return results;
   if (typeof hook !== 'function') {
-    throw new TypeError('[webgpu-search] extensions.postProcess must be a function.');
+    throw new TypeError('[webgpu-search] hooks.postProcess must be a function.');
   }
   const next = (
     hook as (results: DocumentSearchResultItem<TDoc>[]) => DocumentSearchResultItem<TDoc>[]
   )(results);
   if (!Array.isArray(next)) {
-    throw new TypeError('[webgpu-search] extensions.postProcess must return an array.');
+    throw new TypeError('[webgpu-search] hooks.postProcess must return an array.');
   }
   return next as DocumentSearchResultItem<TDoc>[];
 }
-
-/** @deprecated Use normalizeSearchHooks. */
-export const normalizeSearchExtensionHooks = normalizeSearchHooks;

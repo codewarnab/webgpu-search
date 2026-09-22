@@ -111,7 +111,7 @@ async function runMockTests() {
     if (normalizeText(STRASSE, true).tokenCount !== 7) {
         throw new Error('Strasse fold sanity failed: expected 7 post-fold tokens');
     }
-    const packedTokens = packDataset([STRASSE, 'ab', GRIN], { folded: true });
+    const packedTokens = packDataset([STRASSE, 'ab', GRIN], { normalized: true });
     if (packedTokens.rowCount !== 3 || packedTokens.tokenCount !== 7 + 2 + 1) {
         throw new Error(`packUnicode counts wrong: ${packedTokens.rowCount}/${packedTokens.tokenCount}`);
     }
@@ -123,12 +123,12 @@ async function runMockTests() {
     }
     // Pre-tokenized input takes the zero-renorm path (no strings involved).
     const preTok = [new Uint32Array([1, 2, 3]), new Uint32Array([4])];
-    const packedPre = packDataset(preTok, { folded: true });
+    const packedPre = packDataset(preTok, { normalized: true });
     if (packedPre.tokenCount !== 4 || packedPre.offsets[2] !== 4 || packedPre.tokens[3] !== 4) {
         throw new Error('packUnicode Uint32Array[] path wrong');
     }
     // Empty input returns rowCount 0 before input[0] discrimination.
-    const packedEmpty = packDataset([], { folded: true });
+    const packedEmpty = packDataset([], { normalized: true });
     if (packedEmpty.rowCount !== 0 || packedEmpty.tokenCount !== 0) {
         throw new Error('packUnicode empty input wrong');
     }
@@ -140,17 +140,17 @@ async function runMockTests() {
         slotThrew = e instanceof IncompatibleOptionError;
     }
     if (!slotThrew) throw new Error('packUnicode slotBytes must throw IncompatibleOptionError');
-    console.log('   ✅ packDataset verified (folded tokens, offsets, empty, slotBytes)');
+    console.log('   ✅ packDataset verified (normalized tokens, offsets, empty, slotBytes)');
 
     console.log('4. Testing dataset serialization roundtrip + corrupt-header rejection...');
-    const rt = packDataset(['hello', STRASSE, GRIN], { folded: true });
+    const rt = packDataset(['hello', STRASSE, GRIN], { normalized: true });
     const bytes = serializeDataset(rt);
     const header = new Uint32Array(bytes, 0, 9);
     if (header[0] !== 0x55324632 || header[1] !== 2) {
         throw new Error(`dataset magic/version wrong: ${header[0].toString(16)}/${header[1]}`);
     }
     const back = deserializeDataset(bytes);
-    if (back.rowCount !== 3 || back.folded !== true || back.profileId !== 'unicode-default' ||
+    if (back.rowCount !== 3 || back.normalized !== true || back.profileId !== 'unicode-default' ||
         back.unicodeVersion !== '16.0.0' || back.scoringVersion !== 'parity-v1' ||
         back.formatVersion !== 2 || back.nfcProbedVersion !== null) {
         throw new Error('deserialize field mismatch');
@@ -187,7 +187,7 @@ async function runMockTests() {
 
     console.log('5. Testing buffer packer and mock VRAM loading (packed/string/serialized)...');
     const strings = generateTestStrings(500);
-    const packed = packDataset(strings, { folded: true });
+    const packed = packDataset(strings, { normalized: true });
     const { uploadTimeMs } = await engine.loadDataset(packed);
     console.log(`   ✅ Packed dataset loaded (500 items, ${packed.combinedByteLength} bytes, ${uploadTimeMs.toFixed(2)}ms)`);
     await engine.loadDataset(strings);
@@ -344,11 +344,11 @@ async function runMockTests() {
     console.log('15. Testing caseSensitivity parity on CPUEngine...');
     const cpuEngineTest = new CPUEngine();
     const testCases = ['AuthController.ts', 'authcontroller.ts', 'AUTHCONTROLLER.TS'];
-    const caseSensitiveRes = cpuEngineTest.searchNative(testCases, 'Auth', 10, true);
+    const caseSensitiveRes = cpuEngineTest.searchNaiveScan(testCases, 'Auth', 10, true);
     if (caseSensitiveRes.totalMatches !== 1) {
         throw new Error(`Expected exactly 1 case-sensitive match, got ${caseSensitiveRes.totalMatches}`);
     }
-    const caseInsensitiveRes = cpuEngineTest.searchNative(testCases, 'Auth', 10, false);
+    const caseInsensitiveRes = cpuEngineTest.searchNaiveScan(testCases, 'Auth', 10, false);
     if (caseInsensitiveRes.totalMatches !== 3) {
         throw new Error(`Expected 3 case-insensitive matches, got ${caseInsensitiveRes.totalMatches}`);
     }
@@ -385,7 +385,7 @@ async function runMockTests() {
     if (veryLongString.length <= 100) {
         throw new Error('Test string must be > 100 chars');
     }
-    const dynamicPacked = packDataset([veryLongString], { folded: true });
+    const dynamicPacked = packDataset([veryLongString], { normalized: true });
     if (dynamicPacked.tokenCount !== veryLongString.length) {
         throw new Error(`Expected packed tokenCount ${veryLongString.length}, got ${dynamicPacked.tokenCount}`);
     }
@@ -527,11 +527,11 @@ async function runMockTests() {
     try { await gateIndex.search('a'.repeat(129), { mode: 'substring' }); } catch (e: any) { threwIndex = e instanceof QueryTooLongError && e.actual === 129; }
     if (!threwIndex) throw new Error('index 129-token must throw QueryTooLongError actual=129');
     gateIndex.destroy();
-    // ProfileMismatch at engine level (default folded=true index, caseSensitive:true).
+    // ProfileMismatch at engine level (default normalized=true index, caseSensitive:true).
     let pmThrew = false;
     try { await gateEngine.search('alpha', { mode: 'substring', caseSensitive: true }); } catch (e: any) { pmThrew = e instanceof ProfileMismatchError; }
-    if (!pmThrew) throw new Error('engine ProfileMismatchError must throw for caseSensitive:true on folded index');
-    // Omitted flag defaults to false (hybrid-compatible): must NOT throw on folded=true.
+    if (!pmThrew) throw new Error('engine ProfileMismatchError must throw for caseSensitive:true on normalized index');
+    // Omitted flag defaults to false (hybrid-compatible): must NOT throw on normalized=true.
     await gateEngine.search('alpha', { mode: 'substring' });
     // Forged non-boolean caseSensitive fails closed.
     let typeThrew = false;
@@ -552,7 +552,7 @@ async function runMockTests() {
     console.log('   ✅ 129 boundary + ProfileMismatch + mode/caseSensitive + no-device gates verified');
 
     console.log('22. Testing dataset hostile headers + engine-level rejections...');
-    const good = packDataset(['hello', 'world'], { folded: true });
+    const good = packDataset(['hello', 'world'], { normalized: true });
     const goodBytes = serializeDataset(good);
     const hostile = (label: string, fn: () => void) => {
         try { fn(); } catch (e: any) {
@@ -582,13 +582,13 @@ async function runMockTests() {
         h[8] = ((crc ^ 0xffffffff) >>> 0);
         deserializeDataset(b);
     });
-    hostile('folded-2', () => {
+    hostile('normalized-2', () => {
         const b = goodBytes.slice(0);
         new Uint32Array(b, 0, 9)[7] = 2;
         deserializeDataset(b);
     });
     hostile('non-monotonic', () => {
-        const p = packDataset(['ab', 'cd'], { folded: true });
+        const p = packDataset(['ab', 'cd'], { normalized: true });
         const b = serializeDataset(p);
         const h = new Uint32Array(b, 0, 9);
         const recLen = (h[6] as number) * 4;
@@ -601,7 +601,7 @@ async function runMockTests() {
     await forgedEngine.init(mockDevice);
     let forgedThrew = false;
     try {
-        await forgedEngine.loadDataset({ tokens: new Uint32Array([1, 2, 3, 4, 5, 6]), offsets: new Uint32Array([0, 999, 6]), rowCount: 2, tokenCount: 6, folded: true, profileId: 'unicode-default', unicodeVersion: '16.0.0', scoringVersion: 'parity-v1', formatVersion: 2, recordsBufferData: new Uint32Array([1, 2, 3, 4, 5, 6]).buffer as ArrayBuffer, offsetsBufferData: new Uint32Array([0, 999, 6]).buffer as ArrayBuffer, recordsByteLength: 24, offsetsByteLength: 12, combinedByteLength: 36 } as any);
+        await forgedEngine.loadDataset({ tokens: new Uint32Array([1, 2, 3, 4, 5, 6]), offsets: new Uint32Array([0, 999, 6]), rowCount: 2, tokenCount: 6, normalized: true, folded: true, profileId: 'unicode-default', unicodeVersion: '16.0.0', scoringVersion: 'parity-v1', formatVersion: 2, recordsBufferData: new Uint32Array([1, 2, 3, 4, 5, 6]).buffer as ArrayBuffer, offsetsBufferData: new Uint32Array([0, 999, 6]).buffer as ArrayBuffer, recordsByteLength: 24, offsetsByteLength: 12, combinedByteLength: 36 } as any);
     } catch (e: any) { forgedThrew = e instanceof IncompatibleIndexError; }
     if (!forgedThrew) throw new Error('forged non-monotonic offsets must throw IncompatibleIndexError');
     // Engine-level legacy DatasetLike rejected.
@@ -616,9 +616,9 @@ async function runMockTests() {
     console.log('23. Testing packer/serialize/budget edge cases...');
     // totalTokens hint validated.
     let ttThrew = false;
-    try { packDataset([new Uint32Array([1, 2])], { folded: true, totalTokens: 99 }); } catch (e: any) { ttThrew = e instanceof IncompatibleIndexError; }
+    try { packDataset([new Uint32Array([1, 2])], { normalized: true, totalTokens: 99 }); } catch (e: any) { ttThrew = e instanceof IncompatibleIndexError; }
     if (!ttThrew) throw new Error('totalTokens mismatch must throw IncompatibleIndexError');
-    packDataset([new Uint32Array([1, 2])], { folded: true, totalTokens: 2 });
+    packDataset([new Uint32Array([1, 2])], { normalized: true, totalTokens: 2 });
     // Unknown versions fail at pack time (not just serialize).
     let uvThrew = false;
     try { packDataset(['a'], { unicodeVersion: 'nope' }); } catch (e: any) { uvThrew = e instanceof IncompatibleIndexError; }
@@ -626,7 +626,7 @@ async function runMockTests() {
     // serialize shape validation (not raw RangeError).
     let serThrew = false;
     try {
-        const p = packDataset(['ab'], { folded: true });
+        const p = packDataset(['ab'], { normalized: true });
         serializeDataset({ ...p, recordsByteLength: 999 } as any);
     } catch (e: any) { serThrew = e instanceof IncompatibleIndexError; }
     if (!serThrew) throw new Error('serialize shape mismatch must throw IncompatibleIndexError');
@@ -651,7 +651,7 @@ async function runMockTests() {
     if (typeof exactFit.allowed !== 'boolean') throw new Error('exact-boundary budget must return boolean');
     // Mixed input rejected.
     let mixedThrew = false;
-    try { packDataset(['a', new Uint32Array([1])] as any, { folded: true }); } catch (e: any) { mixedThrew = e instanceof TypeError; }
+    try { packDataset(['a', new Uint32Array([1])] as any, { normalized: true }); } catch (e: any) { mixedThrew = e instanceof TypeError; }
     if (!mixedThrew) throw new Error('mixed string/Uint32Array must throw TypeError');
     console.log('   ✅ Packer/serialize/budget edge cases verified');
 
@@ -692,15 +692,15 @@ async function runMockTests() {
         throw new Error('src/index.ts must not import scripts/test-parity-harness (bundle gate)');
     }
     await fsSentinel.stat(new URL('./test-parity-harness.ts', import.meta.url));
-    // preferGpu:true + cpuAlgorithm:'ufuzzy' is a hard conflict (CPU-only scorer).
+    // preferGpu:true + cpuScorer:'ufuzzy' is a hard conflict (CPU-only scorer).
     const conflictIndex = await SearchIndex.create(['hello'], { device: mockDevice, preferGpu: true });
     let conflictThrew = false;
     try {
-        await conflictIndex.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'ufuzzy' });
+        await conflictIndex.search('hello', { mode: 'fuzzy', cpuScorer: 'ufuzzy' });
     } catch (e: any) {
         conflictThrew = e instanceof IncompatibleOptionError;
     }
-    if (!conflictThrew) throw new Error("preferGpu:true + cpuAlgorithm:'ufuzzy' must throw IncompatibleOptionError");
+    if (!conflictThrew) throw new Error("preferGpu:true + cpuScorer:'ufuzzy' must throw IncompatibleOptionError");
     conflictIndex.destroy();
     // Worker blocker: LOAD_DATASET/SEARCH must not use the legacy ASCII packer
     // (code-only match: comments may name it for migration context).

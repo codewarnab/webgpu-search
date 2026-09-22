@@ -644,15 +644,15 @@ async function runM3Tests() {
 
     // (f) Pre-computed source map case-sensitive option preservation in alignHighlights
     const csRaw = 'CaseSensitive Test';
-    const csMap = normalizeWithSourceMap(csRaw, false); // folded: false
+    const csMap = normalizeWithSourceMap(csRaw, false); // normalized: false
     // Should match exact case 'Case'
     const csRanges = alignHighlights(csRaw, 'Case', { sourceMap: csMap });
     assert.strictEqual(csRanges.length, 1);
     assert.strictEqual(csRaw.slice(csRanges[0].start, csRanges[0].end), 'Case');
 
-    // Mismatched sourceMap.folded and options.folded should throw IncompatibleOptionError
+    // Mismatched sourceMap.normalized and options.normalized should throw IncompatibleOptionError
     assert.throws(
-      () => alignHighlights(csRaw, 'Case', { sourceMap: csMap, folded: true }),
+      () => alignHighlights(csRaw, 'Case', { sourceMap: csMap, normalized: true }),
       (err: any) => err instanceof IncompatibleOptionError
     );
 

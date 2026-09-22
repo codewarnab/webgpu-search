@@ -3,6 +3,8 @@
  * Frozen wire values mirror docs/text-normalization.md. Portable: no DOM refs.
  */
 
+import { IncompatibleOptionError } from './errors';
+
 export const UNICODE_VERSION = '16.0.0' as const;
 export const SCORING_VERSION = 'parity-v1' as const;
 // Canonical dataset (packed token stream) version + magic.
@@ -24,27 +26,6 @@ export const SNAPSHOT_FORMAT_VERSION = 4 as const;
 export const SNAPSHOT_MAGIC = 0x55324434 as const;
 export const SNAPSHOT_HEADER_BYTES = 56 as const;
 
-/** @deprecated Use DATASET_FORMAT_VERSION. */
-export const FORMAT_VERSION = DATASET_FORMAT_VERSION;
-/** @deprecated Use DATASET_MAGIC. Wire bytes unchanged ('dataset'). */
-export const SERIALIZED_MAGIC = DATASET_MAGIC;
-/** @deprecated Use LEGACY_SNAPSHOT_VERSION (read-only). */
-export const DOC_FORMAT_VERSION = LEGACY_SNAPSHOT_VERSION;
-/** @deprecated Use LEGACY_SNAPSHOT_MAGIC (read-only). */
-export const SERIALIZED_DOC_MAGIC = LEGACY_SNAPSHOT_MAGIC;
-/** @deprecated Use LEGACY_SNAPSHOT_HEADER_BYTES (read-only). */
-export const SERIALIZED_DOC_HEADER_BYTES = LEGACY_SNAPSHOT_HEADER_BYTES;
-/** @deprecated Use SNAPSHOT_MAGIC. Wire bytes unchanged ('snapshot'). */
-export const U2D4_MAGIC = SNAPSHOT_MAGIC;
-/** @deprecated Use SNAPSHOT_FORMAT_VERSION. */
-export const U2D4_FORMAT_VERSION = SNAPSHOT_FORMAT_VERSION;
-/** @deprecated Use SNAPSHOT_HEADER_BYTES. */
-export const U2D4_HEADER_BYTES = SNAPSHOT_HEADER_BYTES;
-/** @deprecated Duplicate of SNAPSHOT_FORMAT_VERSION; use SNAPSHOT_FORMAT_VERSION. */
-export const FORMAT_VERSION_4 = SNAPSHOT_FORMAT_VERSION;
-/** @deprecated Duplicate of SNAPSHOT_FORMAT_VERSION; use SNAPSHOT_FORMAT_VERSION. */
-export const DOC_FORMAT_VERSION_4 = SNAPSHOT_FORMAT_VERSION;
-
 
 export type TextProfileId = 'unicode-default';
 
@@ -65,33 +46,23 @@ export const ENUM_TO_SCORING: Record<number, string> = { 1: 'parity-v1' };
  * the differential matrix).
  */
 export type CpuScorer = 'exact' | 'ufuzzy';
-/** @deprecated Use CpuScorer ('parity' value renamed to 'exact'). */
-export type CpuAlgorithm = CpuScorer | 'parity';
 
-/** Normalize a caller-supplied scorer, mapping legacy 'parity' → 'exact' with a deprecation warning. */
-export function normalizeCpuScorer(raw: CpuAlgorithm | undefined): CpuScorer | undefined {
+/**
+ * Normalize a caller-supplied scorer fail-closed.
+ * Accepts only 'exact' | 'ufuzzy'; unknown values throw `IncompatibleOptionError`.
+ */
+export function normalizeCpuScorer(raw: CpuScorer | undefined): CpuScorer | undefined {
   if (raw === undefined) return undefined;
-  if (raw === 'parity') {
-    console.warn(
-      "[webgpu-search] cpuAlgorithm 'parity' is deprecated, use 'exact'."
+  if (raw !== 'exact' && raw !== 'ufuzzy') {
+    throw new IncompatibleOptionError(
+      'cpuScorer',
+      `Unknown cpuScorer '${String(raw)}'. Expected 'exact' or 'ufuzzy'.`
     );
-    return 'exact';
   }
-  return raw as CpuScorer;
+  return raw;
 }
 
 export type OnQueryTooLong = 'throw' | 'cpu-fallback';
-
-/**
- * @deprecated Pre-normalization code-point counter.
- * Sizes use exact post-normalization token counts from `normalizeText()`.
- * Kept for compat only; do not use for budgets/limits (e.g. `Strasse` is 6
- * pre-normalization vs 7 post-normalization).
- */
-export function countUnicodeCodePoints(s: string): number {
-  if (!s) return 0;
-  return [...s].length;
-}
 
 // Re-export all error classes from ./errors for backwards-compatible imports
 export {

@@ -230,7 +230,6 @@ self.onmessage = async (e: MessageEvent) => {
             stringsChars: countChars(datasetStrings),
             tokenCount: packed.tokenCount,
             normalized: packed.normalized,
-            folded: packed.folded,
             transferLatencyMs: transferLatencyMs !== undefined ? Number(transferLatencyMs.toFixed(2)) : undefined,
             datasetGeneration
           }
@@ -453,8 +452,8 @@ self.onmessage = async (e: MessageEvent) => {
           );
         }
         if (cpuEngine && datasetStrings.length > 0) {
-          ufuzzyResult = cpuEngine.searchUFuzzy(datasetStrings, query, limit);
-          nativeResult = cpuEngine.searchNative(datasetStrings, query, limit);
+          ufuzzyResult = cpuEngine.searchWithUFuzzy(datasetStrings, query, limit);
+          nativeResult = cpuEngine.searchNaiveScan(datasetStrings, query, limit);
         }
       }
 

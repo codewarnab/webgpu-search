@@ -2,8 +2,8 @@
  * v0.4 M5 Test Suite (Issue #10): Deterministic Ranking & Autocomplete Primitives.
  *
  * Covers the five-tier tie-breaker (score DESC, weight DESC, exact DESC,
- * length ASC, id ASC), custom tieBreaker hierarchies, first-party suggest()
- * (prefix completions + fuzzy did-you-mean), inline search({ suggest }),
+ * length ASC, id ASC), custom tieBreaker hierarchies, first-party autocomplete()
+ * (prefix completions + fuzzy did-you-mean), inline search({ autocomplete }),
  * determinism across repeated runs, and cross-platform portability.
  *
  * Run: bun test packages/webgpu-search/test/ranking-suggest.test.ts
@@ -16,11 +16,11 @@ import {
   sortRanked,
   isExactTokenMatch,
   normalizeTieBreakers,
-  normalizeSuggestOptions,
+  normalizeAutocompleteOptions,
   normalizeText,
-  searchMultiFieldCpuReference,
+  scoreExactMatchesMultiField,
   DEFAULT_TIE_BREAKERS,
-  SUGGEST_DEFAULT_LIMIT,
+  AUTOCOMPLETE_DEFAULT_LIMIT,
   type DocumentIndexOptions,
   type RankableCandidate,
 } from '../src/index';
@@ -246,7 +246,7 @@ describe('DocumentIndex M5: deterministic search ranking', () => {
     const rec = [toks('hello')];
     // Garbage hierarchy throws even without docIds (legacy order otherwise).
     expect(() =>
-      searchMultiFieldCpuReference(
+      scoreExactMatchesMultiField(
         1, [{ name: 't', weight: 1 }], rec, [0], [0], toks('hello'),
         'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
         { tieBreakers: ['nope'] as never }
@@ -254,7 +254,7 @@ describe('DocumentIndex M5: deterministic search ranking', () => {
     ).toThrow(TypeError);
     // docIds shorter than docCount throws.
     expect(() =>
-      searchMultiFieldCpuReference(
+      scoreExactMatchesMultiField(
         2, [{ name: 't', weight: 1 }], [rec[0] as Uint32Array, rec[0] as Uint32Array], [0, 1], [0, 0], toks('hello'),
         'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
         { docIds: ['only-one'] }
@@ -284,7 +284,7 @@ describe('DocumentIndex M5: deterministic search ranking', () => {
         rowToField.push(f);
       }
     }
-    const ref = searchMultiFieldCpuReference(
+    const ref = scoreExactMatchesMultiField(
       2, fields, rowTokens, rowToDoc, rowToField, toks('hello'),
       'substring', 50, 8192, undefined, undefined, undefined, true, undefined,
       { tieBreakers: ['score', 'weight', 'exact', 'length', 'id'], docIds: ['b', 'a'] }
@@ -296,7 +296,7 @@ describe('DocumentIndex M5: deterministic search ranking', () => {
   });
 });
 
-describe('DocumentIndex M5: suggest()', () => {
+describe('DocumentIndex M5: autocomplete()', () => {
   const SYMBOLS: TitleDoc[] = [
     { id: '1', title: 'AuthController', body: 'handles login sessions' },
     { id: '2', title: 'AuthService', body: 'token refresh flow' },
@@ -305,7 +305,7 @@ describe('DocumentIndex M5: suggest()', () => {
 
   test('prefix mode returns completions ranked deterministically', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    const res = await index.suggest('Auth');
+    const res = await index.autocomplete('Auth');
     expect(res.suggestions.length).toBe(2);
     // Both match at token offset 0 with equal weights; the shorter field
     // scores higher (length penalty), so AuthService outranks AuthController.
@@ -319,7 +319,7 @@ describe('DocumentIndex M5: suggest()', () => {
     // Highlight ranges cover the prefix span.
     expect(res.suggestions[0]?.matchedRanges).toEqual([{ start: 0, end: 4 }]);
     expect(typeof res.queryDurationMs).toBe('number');
-    const again = await index.suggest('Auth');
+    const again = await index.autocomplete('Auth');
     expect(again.suggestions.map((s) => [s.text, s.score])).toEqual(
       res.suggestions.map((s) => [s.text, s.score])
     );
@@ -328,11 +328,11 @@ describe('DocumentIndex M5: suggest()', () => {
 
   test('limit truncates; field restricts the scan', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    const limited = await index.suggest('Auth', { limit: 1 });
+    const limited = await index.autocomplete('Auth', { limit: 1 });
     expect(limited.suggestions.length).toBe(1);
-    const bodyOnly = await index.suggest('Auth', { field: 'body' });
+    const bodyOnly = await index.autocomplete('Auth', { field: 'body' });
     expect(bodyOnly.suggestions.length).toBe(0);
-    const titleOnly = await index.suggest('Auth', { field: 'title' });
+    const titleOnly = await index.autocomplete('Auth', { field: 'title' });
     expect(titleOnly.suggestions.length).toBe(2);
     index.destroy();
   });
@@ -342,10 +342,10 @@ describe('DocumentIndex M5: suggest()', () => {
     // 'pool' is a prefix of the body token 'pooling' (offset 11), so the
     // body field completes. ('DatabasePool' does NOT match: camelCase
     // interiors are not token starts, so 'pool' is not anchored there.)
-    const res = await index.suggest('pool');
+    const res = await index.autocomplete('pool');
     expect(res.suggestions.map((s) => s.text)).toEqual(['connection pooling layer']);
     // A head-anchored symbol prefix completes the title itself.
-    const head = await index.suggest('Data');
+    const head = await index.autocomplete('Data');
     expect(head.suggestions.map((s) => s.text)).toEqual(['DatabasePool']);
     index.destroy();
   });
@@ -357,7 +357,7 @@ describe('DocumentIndex M5: suggest()', () => {
       prefixMatch: { prefixLength: 2 },
       typoTolerance: { enabled: true, maxDistance: 1 as const },
       ranking: { tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] as const },
-      suggest: { limit: 3, mode: 'prefix' as const, fuzzyDistance: 1, tieBreakers: ['score', 'id'] as const },
+      autocomplete: { limit: 3, mode: 'prefix' as const, fuzzyDistance: 1, tieBreakers: ['score', 'id'] as const },
     };
     const roundtripped = structuredClone(opts);
     expect(roundtripped).toEqual(opts);
@@ -365,14 +365,14 @@ describe('DocumentIndex M5: suggest()', () => {
     expect(normalizeTieBreakers([...roundtripped.ranking.tieBreakers])).toEqual(
       ['score', 'weight', 'exact', 'length', 'id']
     );
-    expect(normalizeSuggestOptions({ ...roundtripped.suggest, tieBreakers: [...roundtripped.suggest.tieBreakers] })).toEqual(
+    expect(normalizeAutocompleteOptions({ ...roundtripped.autocomplete, tieBreakers: [...roundtripped.autocomplete.tieBreakers] })).toEqual(
       { limit: 3, mode: 'prefix', fuzzyDistance: 1, tieBreakers: ['score', 'id'] }
     );
   });
 
   test('fuzzy mode returns did-you-mean suggestions', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    const res = await index.suggest('AuthControllr', { mode: 'fuzzy' });
+    const res = await index.autocomplete('AuthControllr', { mode: 'fuzzy' });
     expect(res.suggestions.length).toBeGreaterThan(0);
     expect(res.suggestions[0]?.text).toBe('AuthController');
     expect(res.suggestions[0]?.type).toBe('did-you-mean');
@@ -381,9 +381,9 @@ describe('DocumentIndex M5: suggest()', () => {
 
   test('prefix + fuzzyDistance tolerates typos in completions', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    const exactMiss = await index.suggest('Auht');
+    const exactMiss = await index.autocomplete('Auht');
     expect(exactMiss.suggestions.length).toBe(0);
-    const typo = await index.suggest('Auht', { fuzzyDistance: 1 });
+    const typo = await index.autocomplete('Auht', { fuzzyDistance: 1 });
     expect(typo.suggestions.length).toBeGreaterThan(0);
     expect(typo.suggestions[0]?.type).toBe('completion');
     index.destroy();
@@ -391,26 +391,26 @@ describe('DocumentIndex M5: suggest()', () => {
 
   test('empty query and no-match query return empty suggestions', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    expect((await index.suggest('')).suggestions).toEqual([]);
-    expect((await index.suggest('zzz-no-match')).suggestions).toEqual([]);
+    expect((await index.autocomplete('')).suggestions).toEqual([]);
+    expect((await index.autocomplete('zzz-no-match')).suggestions).toEqual([]);
     index.destroy();
   });
 
   test('unknown suggest field throws; malformed options throw fail-closed', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    await expect(index.suggest('Auth', { field: 'nope' })).rejects.toThrow();
-    await expect(index.suggest('Auth', { mode: 'regex' as never })).rejects.toThrow();
-    await expect(index.suggest('Auth', { fuzzyDistance: 9 as never })).rejects.toThrow(RangeError);
-    await expect(index.suggest(42 as never)).rejects.toThrow(TypeError);
+    await expect(index.autocomplete('Auth', { field: 'nope' })).rejects.toThrow();
+    await expect(index.autocomplete('Auth', { mode: 'regex' as never })).rejects.toThrow();
+    await expect(index.autocomplete('Auth', { fuzzyDistance: 9 as never })).rejects.toThrow(RangeError);
+    await expect(index.autocomplete(42 as never)).rejects.toThrow(TypeError);
     index.destroy();
   });
 
-  test('normalizeSuggestOptions defaults and boolean shorthand', () => {
-    expect(normalizeSuggestOptions(undefined)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0, tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] });
-    expect(normalizeSuggestOptions(true)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0, tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] });
-    expect(SUGGEST_DEFAULT_LIMIT).toBe(5);
-    expect(() => normalizeSuggestOptions(false)).toThrow(TypeError);
-    expect(() => normalizeSuggestOptions({ fuzzyDistance: 3 })).toThrow(RangeError);
+  test('normalizeAutocompleteOptions defaults and boolean shorthand', () => {
+    expect(normalizeAutocompleteOptions(undefined)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0, tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] });
+    expect(normalizeAutocompleteOptions(true)).toEqual({ limit: 5, mode: 'prefix', fuzzyDistance: 0, tieBreakers: ['score', 'weight', 'exact', 'length', 'id'] });
+    expect(AUTOCOMPLETE_DEFAULT_LIMIT).toBe(5);
+    expect(() => normalizeAutocompleteOptions(false)).toThrow(TypeError);
+    expect(() => normalizeAutocompleteOptions({ fuzzyDistance: 3 })).toThrow(RangeError);
   });
 
   test('suggest latency stays well under budget on 2k docs', async () => {
@@ -420,21 +420,21 @@ describe('DocumentIndex M5: suggest()', () => {
     }
     const index = await DocumentIndex.create<TitleDoc>(docs, titleOpts());
     const t0 = performance.now();
-    const res = await index.suggest('symbol_1');
+    const res = await index.autocomplete('symbol_1');
     const dt = performance.now() - t0;
     expect(res.suggestions.length).toBeGreaterThan(0);
     expect(dt).toBeLessThan(500);
     index.destroy();
   });
 
-  test('inline search({ suggest }) attaches suggestions to the response', async () => {
+  test('inline search({ autocomplete }) attaches suggestions to the response', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    const res = await index.search('Auth', { mode: 'prefix', suggest: true });
+    const res = await index.search('Auth', { mode: 'prefix', autocomplete: true });
     expect(res.suggestions?.length).toBe(2);
     expect(res.suggestions?.[0]?.type).toBe('completion');
     const withOpts = await index.search('Auth', {
       mode: 'prefix',
-      suggest: { limit: 1, field: 'title' },
+      autocomplete: { limit: 1, field: 'title' },
     });
     expect(withOpts.suggestions?.length).toBe(1);
     const without = await index.search('Auth', { mode: 'prefix' });
@@ -445,7 +445,7 @@ describe('DocumentIndex M5: suggest()', () => {
   test('removed docs never surface as suggestions', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
     await index.remove('1');
-    const res = await index.suggest('Auth');
+    const res = await index.autocomplete('Auth');
     expect(res.suggestions.map((s) => s.text)).toEqual(['AuthService']);
     index.destroy();
   });
@@ -473,27 +473,27 @@ describe('DocumentIndex M5: suggest()', () => {
   });
 
   test('suggest limit edges clamp fail-closed', () => {
-    expect(normalizeSuggestOptions({ limit: 0 }).limit).toBe(1);
-    expect(normalizeSuggestOptions({ limit: -5 }).limit).toBe(1);
-    expect(normalizeSuggestOptions({ limit: NaN }).limit).toBe(5);
-    expect(normalizeSuggestOptions({ limit: 1e12 }).limit).toBe(8192);
+    expect(normalizeAutocompleteOptions({ limit: 0 }).limit).toBe(1);
+    expect(normalizeAutocompleteOptions({ limit: -5 }).limit).toBe(1);
+    expect(normalizeAutocompleteOptions({ limit: NaN }).limit).toBe(5);
+    expect(normalizeAutocompleteOptions({ limit: 1e12 }).limit).toBe(8192);
   });
 
   test('fuzzyDistance:2 hits the upper boundary', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    const res = await index.suggest('Auht', { fuzzyDistance: 2 });
+    const res = await index.autocomplete('Auht', { fuzzyDistance: 2 });
     expect(res.suggestions.length).toBeGreaterThan(0);
     index.destroy();
   });
 
-  test('suggest tieBreakers are honored; inline search inherits ranking hierarchy', async () => {
+  test('autocomplete tieBreakers are honored; inline search inherits ranking hierarchy', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
-    const custom = await index.suggest('Auth', { tieBreakers: ['id'] });
+    const custom = await index.autocomplete('Auth', { tieBreakers: ['id'] });
     expect(custom.suggestions.map((s) => s.docId)).toEqual(['1', '2']);
     const inline = await index.search('Auth', {
       mode: 'prefix',
       ranking: { tieBreakers: ['score', 'id'] },
-      suggest: { limit: 2 },
+      autocomplete: { limit: 2 },
     });
     expect(inline.suggestions?.length).toBe(2);
     index.destroy();
@@ -509,7 +509,7 @@ describe('DocumentIndex M5: suggest()', () => {
       filterFields: [{ name: 'kind', type: 'string' }],
       preferGpu: false,
     });
-    const res = await index.search('Auth', { mode: 'prefix', filter: { kind: 'a' }, suggest: true });
+    const res = await index.search('Auth', { mode: 'prefix', filter: { kind: 'a' }, autocomplete: true });
     expect(res.results.map((r) => r.id)).toEqual(['1']);
     expect(res.suggestions?.length).toBe(2);
     index.destroy();
@@ -528,7 +528,7 @@ describe('DocumentIndex M5: suggest()', () => {
   test('over-long suggest query throws QueryTooLongError', async () => {
     const index = await DocumentIndex.create<TitleDoc>(SYMBOLS, titleOpts());
     const long = 'a'.repeat(1000);
-    await expect(index.suggest(long)).rejects.toThrow();
+    await expect(index.autocomplete(long)).rejects.toThrow();
     index.destroy();
   });
 
@@ -540,7 +540,7 @@ describe('DocumentIndex M5: suggest()', () => {
       ],
       titleOpts()
     );
-    const res = await index.search('hello', { mode: 'substring', cpuAlgorithm: 'ufuzzy' });
+    const res = await index.search('hello', { mode: 'substring', cpuScorer: 'ufuzzy' });
     expect(res.results.map((r) => r.id)).toEqual(['a', 'b']);
     index.destroy();
   });
@@ -570,21 +570,21 @@ describe('DocumentIndex M5: suggest()', () => {
   test('deterministic parity rejects bad weights, docIds length, and docIds entries', () => {
     const rec = [toks('hello')];
     expect(() =>
-      searchMultiFieldCpuReference(
+      scoreExactMatchesMultiField(
         1, [{ name: 't', weight: NaN }], rec, [0], [0], toks('hello'),
         'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
         { docIds: ['a'] }
       )
     ).toThrow(RangeError);
     expect(() =>
-      searchMultiFieldCpuReference(
+      scoreExactMatchesMultiField(
         1, [{ name: 't', weight: 1 }], rec, [0], [0], toks('hello'),
         'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
         { docIds: ['a', 'extra'] }
       )
     ).toThrow(RangeError);
     expect(() =>
-      searchMultiFieldCpuReference(
+      scoreExactMatchesMultiField(
         1, [{ name: 't', weight: 1 }], rec, [0], [0], toks('hello'),
         'substring', 10, 8192, undefined, undefined, undefined, true, undefined,
         { docIds: [''] }
@@ -597,7 +597,7 @@ describe('M5 portability', () => {
   test('zero unguarded DOM references in M5 modules', async () => {
     const files = [
       'packages/webgpu-search/src/ranking.ts',
-      'packages/webgpu-search/src/suggest.ts',
+      'packages/webgpu-search/src/autocomplete.ts',
       'packages/webgpu-search/src/document-index.ts',
     ];
     for (const f of files) {

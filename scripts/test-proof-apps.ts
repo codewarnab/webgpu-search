@@ -367,7 +367,7 @@ async function runProofAppTests() {
   }
 
   // =========================================================================
-  // 5. Proof-App Feature Integration (prefix, filters, facets, suggest)
+  // 5. Proof-App Feature Integration (prefix, filters, facets, autocomplete)
   // =========================================================================
   console.log('5. Testing  proof-app feature integration (prefix + type filter + autocomplete)...');
   {
@@ -394,15 +394,15 @@ async function runProofAppTests() {
     assert((shaderOnly.facets.byType as any).isApproximate === false);
 
     // Autocomplete suggestions resolve.
-    const suggestRes = await palette.suggest('comp', { mode: 'prefix', limit: 5 });
-    assert(suggestRes.suggestions.length >= 1, 'suggest must return completions');
+    const autocompleteRes = await palette.autocomplete('comp', { mode: 'prefix', limit: 5 });
+    assert(autocompleteRes.suggestions.length >= 1, 'autocomplete must return completions');
 
-    const inlineSuggest = await palette.search('comp', {
+    const inlineAutocomplete = await palette.search('comp', {
       mode: 'prefix',
       limit: 5,
-      suggest: { mode: 'prefix', limit: 5 }
+      autocomplete: { mode: 'prefix', limit: 5 }
     });
-    assert((inlineSuggest.suggestions?.length ?? 0) >= 1, 'inline suggest must return completions');
+    assert((inlineAutocomplete.suggestions?.length ?? 0) >= 1, 'inline autocomplete must return completions');
 
     // Palette snapshot snapshot roundtrip preserves prefix + type filtering.
     {
@@ -476,7 +476,7 @@ async function runProofAppTests() {
   }
 
   // =========================================================================
-  // 6. Worker-Boundary Proof-App Integration (filter/facets/suggest survive)
+  // 6. Worker-Boundary Proof-App Integration (filter/facets/autocomplete survive)
   // =========================================================================
   console.log('6. Testing worker-boundary proof-app integration (mock worker)...');
   {
@@ -517,7 +517,7 @@ async function runProofAppTests() {
       return { clientWorker };
     };
 
-    // Palette worker path: prefix + type filter + facets + suggest.
+    // Palette worker path: prefix + type filter + facets + autocomplete.
     {
       const { clientWorker } = createMockWorkerScope();
       const client = new SearchWorkerClient<MonacoFileRecord>({ worker: clientWorker as any });
@@ -538,7 +538,7 @@ async function runProofAppTests() {
         limit: 20,
         filter: { type: 'shader' },
         facets: { byType: { type: 'terms', field: 'type', limit: 10 } },
-        suggest: { mode: 'prefix', limit: 5 }
+        autocomplete: { mode: 'prefix', limit: 5 }
       } as any);
       assert(res.totalMatches >= 1);
       assert((res.facets as any)?.byType?.type === 'terms');

@@ -7,7 +7,7 @@ export { SearchWorkerClient, INTERNAL_WORKER_ID_KEY } from './worker/worker-clie
 // Low-Level Engines & Hardware Utilities for Power Users & Benchmarks
 export { WebGPUEngine, type DatasetLike, type EngineDataset, type ColdSearchResult, type WebGPUSearchResult, type SearchResult } from './webgpu-engine';
 export { CPUEngine, type CPUSearchResult } from './cpu-engine';
-export { GpuDevicePool, WebGPUContextManager, type AcquiredDeviceContext } from './gpu-device-pool';
+export { GpuDevicePool, WebGPUContextManager, assertValidPowerPreference, type AcquiredDeviceContext } from './gpu-device-pool';
 export {
   packStringsToGPUBuffer,
   sanitizeStringForSlot,
@@ -48,7 +48,6 @@ export {
   ENUM_TO_UNICODE_VERSION,
   SCORING_TO_ENUM,
   ENUM_TO_SCORING,
-  countUnicodeCodePoints,
   normalizeCpuScorer,
   IncompatibleIndexError,
   IncompatibleOptionError,
@@ -62,19 +61,7 @@ export {
   LEGACY_SNAPSHOT_VERSION,
   LEGACY_SNAPSHOT_MAGIC,
   LEGACY_SNAPSHOT_HEADER_BYTES,
-  // Deprecated aliases (removal in next major)
-  FORMAT_VERSION,
-  SERIALIZED_MAGIC,
-  DOC_FORMAT_VERSION,
-  SERIALIZED_DOC_MAGIC,
-  SERIALIZED_DOC_HEADER_BYTES,
-  U2D4_MAGIC, // deprecated alias for SNAPSHOT_MAGIC
-  U2D4_FORMAT_VERSION, // deprecated alias
-  FORMAT_VERSION_4, // deprecated alias
-  DOC_FORMAT_VERSION_4, // deprecated alias
-  U2D4_HEADER_BYTES, // deprecated alias
   type CpuScorer,
-  type CpuAlgorithm,
   type OnQueryTooLong,
   type TextProfileId,
 } from './text-profile';
@@ -127,13 +114,7 @@ export {
   AUTOCOMPLETE_DEFAULT_MODE,
   AUTOCOMPLETE_MAX_FUZZY_DISTANCE,
   normalizeAutocompleteOptions,
-  SUGGEST_DEFAULT_LIMIT,
-  SUGGEST_DEFAULT_MODE,
-  SUGGEST_MAX_FUZZY_DISTANCE,
-  normalizeSuggestOptions,
   type NormalizedAutocompleteOptions,
-  type NormalizedSuggestOptions,
-  type SuggestCandidateKeys,
 } from './autocomplete';
 
 // Query diagnostics, cost budgets & broad-search safeguards
@@ -163,7 +144,6 @@ export {
   defaultTokenizer,
   codeTokenizer,
   normalizeSearchHooks,
-  normalizeSearchExtensionHooks,
   resolveEffectiveHooks,
   hasAnyHook,
   getHookId,
@@ -193,8 +173,6 @@ export {
   abortError,
   nowMs,
   throwIfAborted,
-  isAsciiTokens,
-  isPrintableAsciiTokens,
 } from './guard';
 // Token & prefix search with bounded typo tolerance
 export {
@@ -228,22 +206,17 @@ export {
 } from './search/prefix-search';
 export {
   compareExactResults,
-  compareParityResults,
   scoreFuzzyTokens,
   scoreSubstringTokens,
   scoreSubstringTypoTokens,
   scoreExactMatches,
-  searchCpuReference,
   scoreExactMatchesMultiField,
-  searchMultiFieldCpuReference,
   WORD_BOUNDARY_PREV,
   type CpuModeOptions,
   type ExactScorerOutput,
-  type CpuReferenceOutput,
   type MultiFieldHit,
   type MultiFieldMatch,
   type MultiFieldExactScorerOutput,
-  type MultiFieldCpuReferenceOutput,
   type MultiFieldRankingOptions,
   type FieldScoreDefinition,
 } from './exact-scorer';

@@ -594,15 +594,4 @@ export function scoreExactMatchesMultiField(
 }
 
 
-/** @deprecated Use scoreExactMatches. Scores unchanged. */
-export const searchCpuReference = scoreExactMatches;
-/** @deprecated Use scoreExactMatchesMultiField. Scores unchanged. */
-export const searchMultiFieldCpuReference = scoreExactMatchesMultiField;
 
-/** @deprecated Use ExactScorerOutput. */
-export type CpuReferenceOutput = ExactScorerOutput;
-/** @deprecated Use MultiFieldExactScorerOutput. */
-export type MultiFieldCpuReferenceOutput = MultiFieldExactScorerOutput;
-
-/** @deprecated Use compareExactResults. Order unchanged. */
-export const compareParityResults = compareExactResults;

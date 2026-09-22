@@ -23,7 +23,6 @@ import type { AutocompleteOptions, TieBreakerCriterion } from './types';
 import { RESULT_LIMIT_MAX } from './text-profile';
 import { IncompatibleOptionError } from './errors';
 import { normalizeTieBreakers, DEFAULT_TIE_BREAKERS } from './ranking';
-import type { RankableCandidate } from './ranking';
 
 export const AUTOCOMPLETE_DEFAULT_LIMIT = 5 as const;
 export const AUTOCOMPLETE_DEFAULT_MODE = 'prefix' as const;
@@ -111,20 +110,3 @@ export function normalizeAutocompleteOptions(
   const base = { limit, mode, fuzzyDistance, tieBreakers };
   return field === undefined ? base : { ...base, field };
 }
-
-/**
- * @deprecated Use RankableCandidate. Identical alias kept so existing imports
- * keep working without a duplicate interface to drift.
- */
-export type SuggestCandidateKeys = RankableCandidate;
-
-/** @deprecated Use AUTOCOMPLETE_DEFAULT_LIMIT. */
-export const SUGGEST_DEFAULT_LIMIT = AUTOCOMPLETE_DEFAULT_LIMIT;
-/** @deprecated Use AUTOCOMPLETE_DEFAULT_MODE. */
-export const SUGGEST_DEFAULT_MODE = AUTOCOMPLETE_DEFAULT_MODE;
-/** @deprecated Use AUTOCOMPLETE_MAX_FUZZY_DISTANCE. */
-export const SUGGEST_MAX_FUZZY_DISTANCE = AUTOCOMPLETE_MAX_FUZZY_DISTANCE;
-/** @deprecated Use NormalizedAutocompleteOptions. */
-export type NormalizedSuggestOptions = NormalizedAutocompleteOptions;
-/** @deprecated Use normalizeAutocompleteOptions. */
-export const normalizeSuggestOptions = normalizeAutocompleteOptions;

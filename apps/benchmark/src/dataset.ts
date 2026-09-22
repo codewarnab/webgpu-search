@@ -31,7 +31,8 @@ export interface Dataset {
   tokenCount: number;
   /** records + offsets bytes actually allocated (no 64 B fiction). */
   packedBytes: number;
-  folded: boolean;
+  /** Whether the dataset was packed in normalized (case-folded) mode. */
+  normalized: boolean;
   /** Total UTF-16 code units across all strings in the corpus. */
   utf16Units: number;
   /** Total Unicode scalar values (code points) across all strings. */
@@ -310,7 +311,7 @@ export function generateDataset(
 
   const strings = generateSyntheticStrings(count, corpusType, onProgress);
 
-  const folded = true;
+  const normalized = true;
   const tokenRows = new Array<Uint32Array>(count);
   let totalTokens = 0;
   let utf16Units = 0;
@@ -329,7 +330,7 @@ export function generateDataset(
       j += cp > 0xffff ? 2 : 1;
       codePoints++;
     }
-    const norm = normalizeText(s, folded);
+    const norm = normalizeText(s, normalized);
     tokenRows[i] = norm.tokens;
     totalTokens += norm.tokenCount;
 
@@ -341,7 +342,7 @@ export function generateDataset(
 
   // Phase 2: Packing and Serialization timing (zero-renorm path using pre-tokenized rows)
   const tPack0 = performance.now();
-  const packed = packDataset(tokenRows, { normalized: folded, totalTokens });
+  const packed = packDataset(tokenRows, { normalized, totalTokens });
   const serializedDataset = serializeDataset(packed);
   const packMs = performance.now() - tPack0;
 
@@ -357,7 +358,7 @@ export function generateDataset(
     serializedByteLength: serializedDataset.byteLength,
     tokenCount: packed.tokenCount,
     packedBytes: packed.combinedByteLength,
-    folded,
+    normalized,
     utf16Units,
     codePoints,
     normalizeMs,

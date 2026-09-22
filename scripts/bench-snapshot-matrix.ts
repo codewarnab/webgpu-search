@@ -3,7 +3,7 @@
  *
  * Covers the benchmark invariant without requiring a browser/GPU:
  * - IDE symbols (monaco-palette records): prefix search, type-filtered
- * search, and suggest() autocomplete latency.
+ * search, and autocomplete() latency.
  * - Data-grid rows (structured logs at 10k / 50k / 100k): fuzzy search,
  * structured level/service/latency filtering, and facet aggregation.
  * - snapshot persistence: serialize/restore wall-clock, snapshot bytes, and
@@ -115,14 +115,14 @@ async function main(): Promise<void> {
     );
     rows.push({ scenario: 'ide-symbols-5k', docs: 5000, operation: 'prefix-search+type-filter', medianMs: filtered.medianMs, p95Ms: filtered.p95Ms, samples: filtered.samples });
 
-    const suggest = await timeSamples(() =>
-      index.suggest('comp', { mode: 'prefix', limit: 5 }).then(() => {})
+    const autocomplete = await timeSamples(() =>
+      index.autocomplete('comp', { mode: 'prefix', limit: 5 }).then(() => {})
     );
-    const suggestRes = await index.suggest('comp', { mode: 'prefix', limit: 5 });
+    const autocompleteRes = await index.autocomplete('comp', { mode: 'prefix', limit: 5 });
     rows.push({
       scenario: 'ide-symbols-5k', docs: 5000, operation: 'autocomplete',
-      medianMs: suggest.medianMs, p95Ms: suggest.p95Ms, samples: suggest.samples,
-      extra: { suggestionCount: suggestRes.suggestions.length }
+      medianMs: autocomplete.medianMs, p95Ms: autocomplete.p95Ms, samples: autocomplete.samples,
+      extra: { suggestionCount: autocompleteRes.suggestions.length }
     });
 
     const facets = await timeSamples(() =>

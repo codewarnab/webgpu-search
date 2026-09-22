@@ -931,7 +931,7 @@ async function runSnapshotTests() {
     const docCount = snapshotDv.getUint32(20, true);
     const rowCount = snapshotDv.getUint32(24, true);
     const tokenCount = snapshotDv.getUint32(28, true);
-    const foldedVal = snapshotDv.getUint32(32, true);
+    const normalizedVal = snapshotDv.getUint32(32, true);
     const schemaLen = snapshotDv.getUint32(36, true);
     const docsLen = snapshotDv.getUint32(40, true);
     const schemaBytes = new Uint8Array(snapshotBuf, SNAPSHOT_HEADER_BYTES, schemaLen);
@@ -957,7 +957,7 @@ async function runSnapshotTests() {
     legacyDv.setUint32(20, docCount, true);
     legacyDv.setUint32(24, rowCount, true);
     legacyDv.setUint32(28, tokenCount, true);
-    legacyDv.setUint32(32, foldedVal, true);
+    legacyDv.setUint32(32, normalizedVal, true);
     legacyDv.setUint32(36, schemaLen, true);
     legacyDv.setUint32(40, docsLen, true);
     new Uint8Array(legacyBuf, LEGACY_SNAPSHOT_HEADER_BYTES, schemaLen).set(schemaBytes);

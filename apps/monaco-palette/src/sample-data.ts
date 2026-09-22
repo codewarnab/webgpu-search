@@ -126,7 +126,7 @@ export const CORE_FILES: MonacoFileRecord[] = [
     id: 'f-012',
     path: 'packages/webgpu-search/src/text-normalization.ts',
     filename: 'text-normalization.ts',
-    symbols: 'normalizeText, toWellFormedSafe, tokensEqual, countUnicodeCodePoints',
+    symbols: 'normalizeText, toWellFormedSafe, tokensEqual',
     type: 'function',
     language: 'typescript',
     description: 'NFC normalization, full C+F case folding table lookup, and surrogate pair sanitation',

@@ -477,7 +477,7 @@ async function runTests() {
         },
         profileId: 'unicode-default',
         scoringVersion: 'parity-v1',
-        cpuAlgorithm: 'parity',
+        cpuScorer: 'exact',
       }),
     });
 

@@ -93,24 +93,3 @@ export function throwIfAborted(signal: unknown): void {
   }
   if (aborted) throw abortError();
 }
-
-/** True when every scalar is ASCII (<=0x7F). Kept for compat; the GPU gate uses printable-ASCII below. */
-export function isAsciiTokens(tokens: Uint32Array): boolean {
-  for (let i = 0; i < tokens.length; i++) {
-    if ((tokens[i] as number) > 0x7f) return false;
-  }
-  return true;
-}
-
-/**
- * True when every scalar is printable ASCII (0x20..0x7E). Legacy helper kept
- * for compat; all valid queries route to WebGPU regardless of script
- * (the legacy ASCII-only GPU gate is deleted). Not used in the exact path.
- */
-export function isPrintableAsciiTokens(tokens: Uint32Array): boolean {
-  for (let i = 0; i < tokens.length; i++) {
-    const c: number = tokens[i] as number;
-    if (c < 0x20 || c > 0x7e) return false;
-  }
-  return true;
-}

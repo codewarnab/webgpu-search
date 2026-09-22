@@ -22,7 +22,7 @@ import {
 import { abortError, throwIfAborted } from '../guard';
 import { decodeSnapshotHeader, MAX_SNAPSHOT_BYTES } from '../snapshot-codec';
 import { LEGACY_SNAPSHOT_HEADER_BYTES, SNAPSHOT_HEADER_BYTES, SNAPSHOT_MAGIC, IncompatibleIndexError } from '../text-profile';
-import { IncompatibleHookError } from '../errors';
+import { IncompatibleHookError, IncompatibleOptionError } from '../errors';
 import { hasAnyHook, normalizeSearchHooks } from '../hooks';
 
 /**
@@ -421,8 +421,14 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       }
     }
 
-    if (options.hooks ?? options.extensions) {
-      assertNoWorkerExtensions(options.hooks ?? options.extensions, 'init');
+    if ((options as unknown as Record<string, unknown>).extensions !== undefined) {
+      throw new IncompatibleHookError(
+        'hooks',
+        "[webgpu-search] extensions was removed; use hooks."
+      );
+    }
+    if (options.hooks) {
+      assertNoWorkerExtensions(options.hooks, 'init');
     }
 
     const workerFields = this.fieldDefinitions.map((f) => ({
@@ -441,7 +447,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       });
     }
 
-    const { extensions: _omitExtensionsInit, hooks: _omitHooksInit, filterFields, ...restInitOptions } = options;
+    const { hooks: _omitHooksInit, filterFields, ...restInitOptions } = options;
     const workerOptions = {
       ...restInitOptions,
       ...(workerFilterFields ? { filterFields: workerFilterFields } : {}),
@@ -470,11 +476,29 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
 
     throwIfAborted(options?.signal);
 
-    if (options?.hooks ?? options?.extensions) {
-      assertNoWorkerExtensions(options?.hooks ?? options?.extensions, 'search');
+    if ((options as unknown as Record<string, unknown> | undefined)?.extensions !== undefined) {
+      throw new IncompatibleHookError(
+        'hooks',
+        "[webgpu-search] extensions was removed; use hooks."
+      );
+    }
+    if ((options as unknown as Record<string, unknown> | undefined)?.suggest !== undefined) {
+      throw new IncompatibleHookError(
+        'autocomplete',
+        "[webgpu-search] suggest was removed; use autocomplete."
+      );
+    }
+    if ((options as unknown as Record<string, unknown> | undefined)?.cpuAlgorithm !== undefined) {
+      throw new IncompatibleOptionError(
+        'cpuScorer',
+        "[webgpu-search] cpuAlgorithm was removed; use cpuScorer: 'exact' | 'ufuzzy'."
+      );
+    }
+    if (options?.hooks) {
+      assertNoWorkerExtensions(options?.hooks, 'search');
     }
 
-    const { filter, signal, limit, maxResults, extensions: _omitExtensions, hooks: _omitHooks, ...restOptions } = options || {};
+    const { filter, signal, limit, maxResults, hooks: _omitHooks, ...restOptions } = (options || {}) as DocumentSearchOptions<TDoc> & { hooks?: unknown };
 
     if (filter !== undefined && typeof filter !== 'function') {
       if (typeof filter !== 'object' || filter === null) {
@@ -671,8 +695,14 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     if ((buffer as ArrayBuffer).byteLength > MAX_SNAPSHOT_BYTES) {
       throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
     }
-    if (options?.options?.hooks ?? options?.options?.extensions) {
-      assertNoWorkerExtensions(options?.options?.hooks ?? options?.options?.extensions, 'restore');
+    if ((options?.options as unknown as Record<string, unknown> | undefined)?.extensions !== undefined) {
+      throw new IncompatibleHookError(
+        'hooks',
+        "[webgpu-search] extensions was removed; use hooks."
+      );
+    }
+    if (options?.options?.hooks) {
+      assertNoWorkerExtensions(options?.options?.hooks, 'restore');
     }
 
     let stagedFieldDefs = this.fieldDefinitions;
@@ -788,7 +818,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     }
 
     // Sanitize options to avoid DataCloneError over postMessage.
-    // Extensions are rejected fail-closed above; strip them defensively so
+    // Hooks are rejected fail-closed above; strip them defensively so
     // an empty `{}` no-op never crosses the boundary.
     const sanitizedOptions: RestoreDocumentIndexOptions<TDoc> | undefined = options ? {
       ...options,
@@ -797,7 +827,6 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         ...options.options,
         device: undefined,
         hooks: undefined,
-        extensions: undefined,
         fields: options.options.fields?.map((f) =>
           typeof f === 'string' ? f : { name: f.name, weight: f.weight }
         ),

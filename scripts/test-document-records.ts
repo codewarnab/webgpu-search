@@ -318,8 +318,8 @@ async function runM2Tests() {
     assert.strictEqual(tieRes.totalMatches, 3);
     assert.strictEqual(tieRes.results[0].id, 'first');
     assert.strictEqual(tieRes.results[1].id, 'second');
-    // Verify native CPU algorithm (mode: 'substring' under cpuAlgorithm: 'ufuzzy') tie-breaking
-    const tieNativeRes = await tieIndex.search('Target', { mode: 'substring', cpuAlgorithm: 'ufuzzy' });
+    // Verify native CPU algorithm (mode: 'substring' under cpuScorer: 'ufuzzy') tie-breaking
+    const tieNativeRes = await tieIndex.search('Target', { mode: 'substring', cpuScorer: 'ufuzzy' });
     assert.strictEqual(tieNativeRes.totalMatches, 3);
     assert.strictEqual(tieNativeRes.results[0].id, 'first');
     assert.strictEqual(tieNativeRes.results[1].id, 'second');

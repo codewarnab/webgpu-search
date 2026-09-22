@@ -269,7 +269,7 @@ async function performSearch(): Promise<void> {
       typeFilter,
       languageFilter,
       signal: currentAbortController.signal,
-      ...(withSuggest && query ? { suggest: { mode: 'prefix', limit: 5 } } : {})
+      ...(withSuggest && query ? { autocomplete: { mode: 'prefix', limit: 5 } } : {})
     });
 
     activeResults = searchRes.results;

@@ -205,7 +205,7 @@ async function runM7Tests() {
     // 4.4 'cpu-algorithm-requested'
     {
       const idx = await DocumentIndex.create(SAMPLE_DOCS, { fields: ['title'], preferGpu: false });
-      const res = await idx.search('pipeline', { cpuAlgorithm: 'ufuzzy' });
+      const res = await idx.search('pipeline', { cpuScorer: 'ufuzzy' });
       assert.strictEqual(res.fallbackReason, 'cpu-algorithm-requested');
       assert.strictEqual(res.engine, 'cpu');
       idx.destroy();
@@ -423,7 +423,7 @@ async function runM7Tests() {
     assert.strictEqual(searchRes.fallbackReason, 'prefer-cpu');
 
     // Legacy ufuzzy fallback reason
-    const ufuzzyRes = await sIndex.search('alpha', { cpuAlgorithm: 'ufuzzy' });
+    const ufuzzyRes = await sIndex.search('alpha', { cpuScorer: 'ufuzzy' });
     assert.strictEqual(ufuzzyRes.fallbackReason, 'cpu-algorithm-requested');
 
     sIndex.destroy();

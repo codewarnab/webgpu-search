@@ -9,12 +9,12 @@ jargon (`fold`, `sanitize`, `parity`) in user-visible identifiers.
 
 | Use | Not | Notes |
 |---|---|---|
-| `normalize` / `normalized` / `caseSensitive` | `fold` / `folded` / `sanitize` | Unicode NFC + default case folding; `folded` stays only as a `@deprecated` alias |
-| `cpuScorer: 'exact' \| 'ufuzzy'` | `cpuAlgorithm` / `'parity'` | `exact` describes behavior; `'parity'` maps to `'exact'` with a warning |
-| `autocomplete` | `suggest` | User-facing completion feature; `suggest` is a `@deprecated` alias |
-| `snapshot` | `U2D*` / `serializeDocumentIndex` vocabulary | Versioned binary persistence; wire magics frozen |
-| `dataset` / `packDataset` / `PackedDataset` | `U2F2` / `packUnicodeToGPUBuffer` / `PackedUnicodeBufferV2` | Packed token stream; wire bytes unchanged |
-| `hooks` / `SearchHooks` | `extensions` / `SearchExtensionHooks` | `extensions` is a `@deprecated` alias |
+| `normalize` / `normalized` / `caseSensitive` | `fold` / `folded` / `sanitize` | Unicode NFC + default case folding; `folded` was removed from public fields — use `normalized` |
+| `cpuScorer: 'exact' \| 'ufuzzy'` | `cpuAlgorithm` / `'parity'` | `exact` describes behavior; `cpuAlgorithm` / `'parity'` were removed (unknown values throw `IncompatibleOptionError`) |
+| `autocomplete` | `suggest` | User-facing completion feature; `suggest` option / `SuggestOptions` / `SUGGEST_*` were removed — use `autocomplete` / `AutocompleteOptions` / `AUTOCOMPLETE_*` (`SuggestionItem` / `SuggestResponse` / `autocomplete()` stay canonical) |
+| `snapshot` | `U2D*` / `serializeDocumentIndex` vocabulary | Versioned binary persistence; wire magics frozen (`SNAPSHOT_*` / `LEGACY_SNAPSHOT_*`; `U2D4_*` / `SERIALIZED_*` / `FORMAT_VERSION*` removed) |
+| `dataset` / `packDataset` / `PackedDataset` | `U2F2` / `packUnicodeToGPUBuffer` / `PackedUnicodeBufferV2` | Packed token stream; wire bytes unchanged (`DATASET_*` canonical; `FORMAT_VERSION` / `SERIALIZED_*` removed) |
+| `hooks` / `SearchHooks` | `extensions` / `SearchExtensionHooks` | `extensions` was removed — use `hooks` / `SearchHooks` / `normalizeSearchHooks` |
 | `devicePool` / `GpuDevicePool` | `context-manager` / `WebGPUContextManager` | Singleton device pool; old name aliased |
 | `guard` | `runtime-guards` | Small cohesive module |
 | `broad-search` / `BROAD_SEARCH_*` | `broad-query` / `BROAD_QUERY_*` | Old constants aliased |
@@ -32,10 +32,15 @@ jargon (`fold`, `sanitize`, `parity`) in user-visible identifiers.
    `check-bundle-size.ts`, `bench-snapshot-matrix.ts`; npm `test:<domain>`.
 4. **Comments explain why, never when.** No milestone/version tags in
    `packages/*/src`, `apps/*/src`, `examples/`, `scripts/`.
-5. **Aliases, not forks.** Every rename keeps a
-   `/** @deprecated Use X. */ export const Old = New` for one minor. Only
-   runtime-behavioral aliases log warnings (`packStringsToGPUBuffer`,
-   `cpuScorer: 'parity'`); pure type/constant renames are silent.
+5. **Breaking cleanup removed the rename aliases.** `cpuAlgorithm`,
+   `extensions` / `SearchExtensionHooks`, `suggest` / `SuggestOptions` /
+   `SUGGEST_*`, `folded` public fields, `FORMAT_VERSION*` / `U2D4_*` /
+   `SERIALIZED_*`, `countUnicodeCodePoints`, `isAsciiTokens` /
+   `isPrintableAsciiTokens`, and `CPUEngine.searchUFuzzy` / `searchNative`
+   no longer exist — passing them throws fail-closed (`IncompatibleOptionError`
+   / `TypeError`). Low-level CPU entry points are `searchWithUFuzzy` /
+   `searchNaiveScan`. `SCORING_VERSION = 'parity-v1'` keeps its value
+   (differential "parity harness" prose is unchanged).
 
 ## Lint
 
@@ -45,15 +50,20 @@ and wire-magic comments. Keep it clean.
 
 ## Observable renames (intentional, not zero-change)
 
-Canonical renames change these observable surfaces; deprecated aliases cover
-imports/options, but exact strings do not round-trip:
+Canonical renames change these observable surfaces; removed aliases throw
+fail-closed instead of round-tripping (exact strings do not round-trip):
 
 - `INTERNAL_WORKER_ID_KEY` stays exported from the package root for compat
   (internal use only).
-- `IncompatibleOptionError.option` is `'cpuScorer'` (was `'cpuAlgorithm'`);
-  worker hook guard throws `IncompatibleHookError('hooks')` (was `'extensions'`).
-  Branch on the canonical names; `cpuAlgorithm`/`extensions` inputs still parse.
-- `Unknown autocomplete field` (was `Unknown suggest field`);
+- `IncompatibleOptionError.option` is `'cpuScorer'` (removed `'cpuAlgorithm'`;
+  passing `cpuAlgorithm` throws "was removed; use `cpuScorer`");
+  worker hook guard throws `IncompatibleHookError('hooks')` (removed
+  `'extensions'`; passing `extensions` throws "was removed; use `hooks`").
+  Branch on the canonical names.
+- `Unknown autocomplete field` (removed `Unknown suggest field`);
   `slotBytes is not supported` (was versioned throw-on-use text).
-- `QueryDiagnostics.timings` emits both `autocompleteMs` and deprecated
-  `suggestMs` with identical values.
+- `QueryDiagnostics.timings` emits `autocompleteMs` (deprecated `suggestMs`
+  mirror removed).
+- `powerPreference` is forwarded to `GpuDevicePool.acquireDevice`
+  (`navigator.gpu.requestAdapter({ powerPreference })`); unknown values throw
+  `IncompatibleOptionError` fail-closed, even on CPU-only paths.

@@ -1,6 +1,6 @@
 import SUBSTRING_WGSL from './shaders/substring.wgsl';
 import FUZZY_WGSL from './shaders/fuzzy.wgsl';
-import { GpuDevicePool } from './gpu-device-pool';
+import { GpuDevicePool, assertValidPowerPreference } from './gpu-device-pool';
 import {
   checkMemoryBudget,
   computeClampedHeadroomBytes,
@@ -158,14 +158,36 @@ export class WebGPUEngine {
     return !this.canFitHeadroom(requiredRows, requiredTokens);
   }
 
-  async init(customDevice?: GPUDevice): Promise<boolean> {
+  async init(
+    customDevice?: GPUDevice | { device?: GPUDevice; powerPreference?: GPUPowerPreference }
+  ): Promise<boolean> {
     // Guard re-entry: dispose existing GPU buffers before re-creating so
     // init() twice does not leak the first set (benchmark/power users).
     if (this.device) {
       this.disposeGpuBuffers();
     }
-    if (customDevice) {
-      this.device = customDevice;
+    // Normalize overloads: bare GPUDevice (legacy) or options bag.
+    // powerPreference is validated fail-closed (unknown throws) and forwarded
+    // to GpuDevicePool.acquireDevice; ignored when a custom device is injected.
+    let injected: GPUDevice | undefined;
+    let powerPreference: GPUPowerPreference | undefined;
+    if (
+      customDevice !== undefined &&
+      customDevice !== null &&
+      typeof customDevice === 'object' &&
+      ('powerPreference' in (customDevice as Record<string, unknown>) ||
+        ('device' in (customDevice as Record<string, unknown>) &&
+          !('queue' in (customDevice as Record<string, unknown>))))
+    ) {
+      const opts = customDevice as { device?: GPUDevice; powerPreference?: GPUPowerPreference };
+      injected = opts.device;
+      powerPreference = opts.powerPreference;
+    } else if (customDevice !== undefined && customDevice !== null) {
+      injected = customDevice as GPUDevice;
+    }
+    if (injected) {
+      assertValidPowerPreference(powerPreference);
+      this.device = injected;
       this.isSharedDevice = false;
       this.deviceReleased = false;
       this.adapterInfo = {
@@ -178,13 +200,15 @@ export class WebGPUEngine {
         maxStorageBindingSizeMB: 128,
         maxComputeWorkgroupsPerDimension: 65535,
         maxComputeInvocationsPerWorkgroup: 256,
-        hasTimestampQuery: customDevice.features ? customDevice.features.has('timestamp-query') : false
+        hasTimestampQuery: injected.features ? injected.features.has('timestamp-query') : false
       };
       this.attachLostHandler();
       return await this.setupPipelinesAndBuffers();
     }
 
-    const acquired = await GpuDevicePool.acquireDevice();
+    const acquired = await GpuDevicePool.acquireDevice(
+      powerPreference !== undefined ? { powerPreference } : undefined
+    );
     if (!acquired) {
       return false;
     }

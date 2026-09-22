@@ -354,12 +354,12 @@ async function main(): Promise<void> {
   // (d) ASCII fast-path == full-path (fuzz).
   {
     const rnd = mulberry32(0xA5C11);
-    const refFull = (s: string, folded: boolean): Uint32Array => {
+    const refFull = (s: string, normalized: boolean): Uint32Array => {
       const trimmed = s.trim();
       if (trimmed.length === 0) return new Uint32Array(0);
       const wf = toWellFormedSafe(trimmed);
       const nfc1 = wf.normalize('NFC');
-      if (!folded) {
+      if (!normalized) {
         const buf: number[] = [];
         for (const ch of nfc1) buf.push(ch.codePointAt(0) as number);
         return new Uint32Array(buf);
@@ -381,9 +381,9 @@ async function main(): Promise<void> {
       const len = 1 + Math.floor(rnd() * 24);
       let s = '';
       for (let i = 0; i < len; i++) s += FCP(0x20 + Math.floor(rnd() * 0x5f));
-      for (const folded of [true, false]) {
-        if (!tokensEqual(normalizeText(s, folded).tokens, refFull(s, folded))) {
-          drift = `t=${t} folded=${folded} s=${JSON.stringify(s)}`;
+      for (const normalized of [true, false]) {
+        if (!tokensEqual(normalizeText(s, normalized).tokens, refFull(s, normalized))) {
+          drift = `t=${t} normalized=${normalized} s=${JSON.stringify(s)}`;
           break;
         }
       }
@@ -429,11 +429,11 @@ async function main(): Promise<void> {
   // (g) zero-renorm pack + totalTokens fail-fast + unknown-version throw.
   {
     const pre = [new Uint32Array([5, 6]), new Uint32Array([7])];
-    const p = packDataset(pre, { folded: true });
+    const p = packDataset(pre, { normalized: true });
     ok('(g) Uint32Array[] zero-renorm', p.tokenCount === 3 && p.tokens[2] === 7);
     let tt = false;
     try {
-      packDataset(pre, { folded: true, totalTokens: 99 });
+      packDataset(pre, { normalized: true, totalTokens: 99 });
     } catch (e) {
       tt = e instanceof IncompatibleIndexError;
     }
@@ -449,7 +449,7 @@ async function main(): Promise<void> {
 
   // (h) dataset + CRC32 + cross-realm duck-typing + neutered guard.
   {
-    const rt = packDataset(['hello'], { folded: true });
+    const rt = packDataset(['hello'], { normalized: true });
     const bytes = serializeDataset(rt);
     ok('(h) roundtrip', deserializeDataset(bytes).tokenCount === 5);
     let neut = false;
@@ -477,7 +477,7 @@ async function main(): Promise<void> {
     const xRealmRow = vm.runInNewContext('new Uint32Array([9, 8, 7])') as Uint32Array;
     let xPackOk = false;
     try {
-      xPackOk = packDataset([xRealmRow], { folded: true }).tokenCount === 3;
+      xPackOk = packDataset([xRealmRow], { normalized: true }).tokenCount === 3;
     } catch {
       xPackOk = false;
     }
@@ -601,13 +601,13 @@ async function main(): Promise<void> {
     eng.destroy();
   }
 
-  // (n) powerPreference reserved (accepted, not forwarded).
+  // (n) powerPreference forwarded to GpuDevicePool.acquireDevice; unknown throws IncompatibleOptionError.
   {
     const cpuIdx = await SearchIndex.create(['a'], { preferGpu: false, powerPreference: 'low-power' });
     ok('(n) powerPreference accepted on CPU path', cpuIdx.getStats().engine === 'cpu');
     cpuIdx.destroy();
     const gpuIdx = await SearchIndex.create(['a'], { device: mockDevice, preferGpu: true, powerPreference: 'low-power' });
-    ok('(n) powerPreference accepted on GPU path (not gated)', gpuIdx.getStats().engine === 'webgpu');
+    ok('(n) powerPreference accepted on GPU path (forwarded, not gated)', gpuIdx.getStats().engine === 'webgpu');
     gpuIdx.destroy();
   }
 
@@ -619,7 +619,7 @@ async function main(): Promise<void> {
     // field at all (a future warn+record change must add the field AND flip
     // this assert -- no `||` escape).
     ok('echo stats carry no nfcProbedVersion field', !('nfcProbedVersion' in (st as unknown as Record<string, unknown>)));
-    const p = packDataset(['hello'], { folded: true });
+    const p = packDataset(['hello'], { normalized: true });
     ok('echo pack nfcProbedVersion null', p.nfcProbedVersion === null);
     ok('echo scoring/profile versions', st.profileId === 'unicode-default' && st.scoringVersion === 'parity-v1' && st.formatVersion === 2);
     const fs3 = await import('node:fs/promises');
@@ -636,13 +636,13 @@ async function main(): Promise<void> {
     let conflict = false;
     const gpuIdx = await SearchIndex.create(['hello'], { device: mockDevice, preferGpu: true });
     try {
-      await gpuIdx.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'ufuzzy' });
+      await gpuIdx.search('hello', { mode: 'fuzzy', cpuScorer: 'ufuzzy' });
     } catch (e) {
       conflict = e instanceof IncompatibleOptionError;
     }
     ok('ufuzzy preferGpu:true + ufuzzy throws IncompatibleOptionError', conflict);
-    const u = await idx.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'ufuzzy' });
-    ok('ufuzzy explicit stays CPU-only', u.engine === 'cpu' && u.cpuAlgorithm === 'ufuzzy');
+    const u = await idx.search('hello', { mode: 'fuzzy', cpuScorer: 'ufuzzy' });
+    ok('ufuzzy explicit stays CPU-only', u.engine === 'cpu' && u.cpuScorer === 'ufuzzy');
     gpuIdx.destroy();
     idx.destroy();
   }
@@ -677,8 +677,8 @@ async function main(): Promise<void> {
         const res = await idx.search(cell.query, { mode: cell.mode, limit: cell.limit, caseSensitive: cs, cpuScorer: 'exact' });
         if (cellState.timedOut) return;
         const recordTokens = (idx as unknown as { recordTokens: Uint32Array[] }).recordTokens;
-        const folded = (idx as unknown as { normalized?: boolean; folded?: boolean }).normalized ?? (idx as unknown as { folded?: boolean }).folded ?? true;
-        const qT = normalizeText(cell.query, folded).tokens;
+        const normalized = (idx as unknown as { normalized?: boolean }).normalized ?? true;
+        const qT = normalizeText(cell.query, normalized).tokens;
         const direct = scoreExactMatches(recordTokens, qT, cell.mode, cell.limit, cell.corpus);
         const asCompared: ComparedResponse = {
           totalMatches: res.totalMatches,
@@ -709,7 +709,7 @@ async function main(): Promise<void> {
         }
         // Degenerate echo rule.
         let echo = '';
-        const postEmpty = normalizeText(cell.query, folded).isEmpty;
+        const postEmpty = normalizeText(cell.query, normalized).isEmpty;
         if (postEmpty && res.query !== '') echo = `degenerate must echo '', got ${JSON.stringify(res.query)}`;
         if (!postEmpty && cell.query === 'a'.repeat(QUERY_TOKENS_MAX) && res.query !== cell.query) {
           echo = 'at-cap must echo original';
@@ -817,7 +817,7 @@ async function main(): Promise<void> {
     // Engine-level token-only text:'' contract (holds vacuously on mock).
     const eng = new WebGPUEngine();
     await eng.init(mockDevice);
-    const packed = packDataset(['hello', 'world'], { folded: true });
+    const packed = packDataset(['hello', 'world'], { normalized: true });
     await eng.loadDataset(serializeDataset(packed));
     const er = await eng.search('hello', { mode: 'substring' });
     ok('engine token-only resolves text to empty', er.results.every((r) => r.text === ''));
@@ -1161,7 +1161,7 @@ async function main(): Promise<void> {
       ok('worker rejects legacy  buffers explicitly', legacy.length === 1 && typeof legacy[0]?.payload.error === 'string');
 
       // Legacy + new fields combo still rejected (no silent clone waste).
-      const comboPacked = packDataset(['combo'], { folded: true });
+      const comboPacked = packDataset(['combo'], { normalized: true });
       const comboSer = serializeDataset(comboPacked);
       await send({
         type: 'LOAD_DATASET',
@@ -1192,7 +1192,7 @@ async function main(): Promise<void> {
       const genAfterStrings = (loaded[0] as { payload: { datasetGeneration: number } }).payload.datasetGeneration;
 
       // Serialized path carries generation; state only commits on success.
-      const packed = packDataset(['alpha', 'beta'], { folded: true });
+      const packed = packDataset(['alpha', 'beta'], { normalized: true });
       const serialized = serializeDataset(packed);
       await send({ type: 'LOAD_DATASET', payload: { strings: ['alpha', 'beta'], serialized } });
       const sloaded = take('DATASET_LOADED') as Array<{

@@ -19,7 +19,9 @@ Magic bytes are frozen: old snapshots stay readable forever via the
 migration read path. Only the exported constant names changed
 (`SNAPSHOT_MAGIC`, `SNAPSHOT_FORMAT_VERSION`, `SNAPSHOT_HEADER_BYTES`;
 legacy: `LEGACY_SNAPSHOT_MAGIC`, `LEGACY_SNAPSHOT_VERSION`,
-`LEGACY_SNAPSHOT_HEADER_BYTES`).
+`LEGACY_SNAPSHOT_HEADER_BYTES`). The old names (`FORMAT_VERSION*`,
+`U2D4_*`, `SERIALIZED_*`) were removed — use `DATASET_*` /
+`SNAPSHOT_*` / `LEGACY_SNAPSHOT_*`.
 
 ## Compatibility
 

@@ -15,8 +15,6 @@ import {
   DocumentNotFoundError,
   SNAPSHOT_MAGIC,
   SNAPSHOT_FORMAT_VERSION,
-  FORMAT_VERSION_4, // deprecated alias pin
-  DOC_FORMAT_VERSION_4, // deprecated alias pin
   SNAPSHOT_HEADER_BYTES,
   WebGPUSearchError,
   IncompatibleHookError,
@@ -243,7 +241,7 @@ async function runM1Tests() {
     },
     profileId: 'unicode-default',
     scoringVersion: 'parity-v1',
-    cpuAlgorithm: 'parity',
+    cpuScorer: 'exact',
     fallbackReason
   };
 
@@ -270,7 +268,7 @@ async function runM1Tests() {
     unicodeVersion: '16.0.0',
     scoringVersion: 'parity-v1',
     tokenCount: 10,
-    folded: true,
+    normalized: true,
     formatVersion: 2,
     docCount: 1,
     rowCount: 2,
@@ -309,9 +307,6 @@ async function runM1Tests() {
   }
   if (SNAPSHOT_FORMAT_VERSION !== 4) {
     throw new Error(`SNAPSHOT_FORMAT_VERSION must be 4, got ${SNAPSHOT_FORMAT_VERSION}`);
-  }
-  if (FORMAT_VERSION_4 !== 4 || DOC_FORMAT_VERSION_4 !== 4) { // deprecated alias pins
-    throw new Error('FORMAT_VERSION_4 and DOC_FORMAT_VERSION_4 aliases must be 4');
   }
   if (SNAPSHOT_HEADER_BYTES !== 56) {
     throw new Error(`SNAPSHOT_HEADER_BYTES must be 56, got ${SNAPSHOT_HEADER_BYTES}`);
@@ -469,8 +464,8 @@ async function runM1Tests() {
   if (!threwWorkerFilterExpr) throw new Error('SearchWorkerClient.search must throw InvalidFilterError on FilterExpression with unindexed field');
   console.log('   ✅ Filter AST schemas and unindexed field guards verified');
 
-  // 12. Verifying Facet Aggregations, Typo Tolerance, Ranking, Suggestions, Extensions, & Diagnostics
-  console.log('12. Verifying Facets, Typo Tolerance, Ranking, Suggestions, Extensions & Diagnostics...');
+  // 12. Verifying Facet Aggregations, Typo Tolerance, Ranking, Suggestions, Hooks, & Diagnostics
+  console.log('12. Verifying Facets, Typo Tolerance, Ranking, Suggestions, Hooks & Diagnostics...');
   const termsFacetReq: TermsFacetRequest = { type: 'terms', field: 'category', limit: 5, sortBy: 'count' };
   const rangeFacetReq: RangeFacetRequest = {
     type: 'range',
@@ -504,7 +499,7 @@ async function runM1Tests() {
     tieBreakers: ['score', 'weight', 'exact', 'length', 'id']
   };
 
-  const suggestOpts: AutocompleteOptions = { limit: 5, mode: 'prefix', fuzzyDistance: 0 };
+  const autocompleteOpts: AutocompleteOptions = { limit: 5, mode: 'prefix', fuzzyDistance: 0 };
   const suggestItem: SuggestionItem<TestDoc> = {
     text: 'AuthController',
     score: 980,
@@ -523,7 +518,7 @@ async function runM1Tests() {
     rawScore: 900,
     normalizedScore: 950
   };
-  const extensions: SearchHooks<TestDoc> = {
+  const hooks: SearchHooks<TestDoc> = {
     tokenizer: (text) => text.split(/[\s_]+/),
     scoringHook: (_doc, baseScore, _info) => baseScore + 50
   };
@@ -549,7 +544,7 @@ async function runM1Tests() {
   const boolBucket: TermsFacetBucket = { value: true, count: 10 };
   const nullValue: FilterValue = null;
   const searchOptsWithSuggest: DocumentSearchOptions<TestDoc> = {
-    suggest: { limit: 5, mode: 'prefix' }
+    autocomplete: { limit: 5, mode: 'prefix' }
   };
 
   // Verify SearchWorkerClient fails fast on extensions across worker boundary
@@ -568,20 +563,20 @@ async function runM1Tests() {
   let threwWorkerExtensionsAlias = false;
   const workerForExtAlias = new SearchWorkerClient<TestDoc>();
   try {
-    await workerForExtAlias.search('query', { extensions: { scoringHook: () => 100 } });
+    await workerForExtAlias.search('query', { extensions: { scoringHook: () => 100 } } as any);
   } catch (err: any) {
     threwWorkerExtensionsAlias = err instanceof IncompatibleHookError;
   } finally {
     await workerForExtAlias.destroy();
   }
   if (!threwWorkerExtensionsAlias) {
-    throw new Error('SearchWorkerClient.search must throw IncompatibleHookError on non-cloneable extensions alias');
+    throw new Error('SearchWorkerClient.search must throw IncompatibleHookError on removed extensions alias');
   }
 
   if (
     termsFacetReq.type !== 'terms' ||
     rangeFacetReq.ranges.length !== 3 ||
-    suggestOpts.limit !== 5 ||
+    autocompleteOpts.limit !== 5 ||
     termsFacetRes.buckets.length !== 1 ||
     rangeFacetRes.isApproximate !== true ||
     typoOpts.maxDistance !== 1 ||
@@ -589,16 +584,16 @@ async function runM1Tests() {
     prefixOpts.prefixLength !== 3 ||
     rankingOpts.tieBreakers?.length !== 5 ||
     suggestResp.suggestions.length !== 1 ||
-    extensions.scoringHook?.({ id: '1', title: 't', content: 'c' }, 100, matchInfo) !== 150 ||
+    hooks.scoringHook?.({ id: '1', title: 't', content: 'c' }, 100, matchInfo) !== 150 ||
     budgetOpts.maxExecutionTimeMs !== 100 ||
     diagnostics.scannedCandidates !== 250 ||
     boolBucket.value !== true ||
     nullValue !== null ||
-    !searchOptsWithSuggest.suggest
+    !searchOptsWithSuggest.autocomplete
   ) {
     throw new Error(' feature type shapes failed validation');
   }
-  console.log('   ✅ Facets, Typo Tolerance, Ranking, Suggestions, Extensions, and Diagnostics verified');
+  console.log('   ✅ Facets, Typo Tolerance, Ranking, Suggestions, Hooks, and Diagnostics verified');
 
   console.log('\n--- All Public Contracts & Specifications Tests Passed! ✅ ---');
 }

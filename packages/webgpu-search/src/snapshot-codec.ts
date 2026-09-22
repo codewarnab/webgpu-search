@@ -265,7 +265,6 @@ export function decodeSnapshotHeader(buffer: ArrayBuffer): DocumentSnapshotHeade
       rowCount,
       tokenCount,
       normalized: foldedVal === 1,
-      folded: foldedVal === 1,
       schemaByteLength,
       docsByteLength,
       columnarByteLength: 0,
@@ -324,7 +323,6 @@ export function decodeSnapshotHeader(buffer: ArrayBuffer): DocumentSnapshotHeade
       rowCount,
       tokenCount,
       normalized: foldedVal === 1,
-      folded: foldedVal === 1,
       schemaByteLength,
       docsByteLength,
       columnarByteLength,
@@ -384,7 +382,7 @@ export function encodeSnapshot<TDoc = Record<string, unknown>>(
   // Schema segment encoding (declarative hookIds only — closures
   // are never serialized; filter `hasGetter` persisted so restore
   // can fail closed when a custom getter cannot be revived).
-  const hookIds = collectHookIds((index.getHooks?.() ?? index.getExtensions?.()) as any);
+  const hookIds = collectHookIds((index.getHooks?.()) as any);
   const schema: DocumentIndexSchema = {
     fields: sortedFields.map((f: InternalField<TDoc>) => ({
       name: f.name,

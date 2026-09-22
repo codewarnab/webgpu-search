@@ -1,6 +1,6 @@
 import { WebGPUEngine } from './webgpu-engine';
 import { CPUEngine } from './cpu-engine';
-import { GpuDevicePool } from './gpu-device-pool';
+import { GpuDevicePool, assertValidPowerPreference } from './gpu-device-pool';
 import { packDataset, checkMemoryBudget } from './dataset-packing';
 import { normalizeText } from './text-normalization';
 import {
@@ -217,11 +217,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     if (!options || !Array.isArray(options.fields) || options.fields.length === 0) {
       throw new TypeError('[webgpu-search] DocumentIndex expects options.fields to be a non-empty array.');
     }
+    if ((options as unknown as Record<string, unknown>).extensions !== undefined) {
+      throw new IncompatibleOptionError(
+        'hooks',
+        "[webgpu-search] extensions was removed; use hooks."
+      );
+    }
+    // Fail-closed: unknown powerPreference throws even on CPU-only paths.
+    assertValidPowerPreference(options.powerPreference);
     this.options = options;
     this.normalized = !(options.caseSensitive ?? false);
     this.preferGpu = options.preferGpu ?? false;
     // fail-closed extension hook validation at construction.
-    this.indexHooks = normalizeSearchHooks(options.hooks ?? options.extensions);
+    this.indexHooks = normalizeSearchHooks(options.hooks);
     this.initialCapacity = typeof options.initialCapacity === 'number' && Number.isFinite(options.initialCapacity) && options.initialCapacity > 0
       ? Math.floor(options.initialCapacity)
       : 0;
@@ -487,7 +495,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         let gpu: WebGPUEngine | null = null;
         try {
           gpu = new WebGPUEngine();
-          const initialized = await gpu.init(this.options.device);
+          const initialized = await gpu.init(
+            this.options.device !== undefined || this.options.powerPreference !== undefined
+              ? { device: this.options.device, powerPreference: this.options.powerPreference }
+              : undefined
+          );
 
           if (initialized && gpu.isReady) {
             gpu.ensureCandidateCapacity(this.candidateCapacity);
@@ -558,12 +570,29 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     if (typeof query !== 'string') {
       throw new TypeError(`[webgpu-search] search expects query: string, got ${typeof query}.`);
     }
+    if ((options as unknown as Record<string, unknown>).cpuAlgorithm !== undefined) {
+      throw new IncompatibleOptionError(
+        'cpuScorer',
+        "[webgpu-search] cpuAlgorithm was removed; use cpuScorer: 'exact' | 'ufuzzy'."
+      );
+    }
+    if ((options as unknown as Record<string, unknown>).extensions !== undefined) {
+      throw new IncompatibleOptionError(
+        'hooks',
+        "[webgpu-search] extensions was removed; use hooks."
+      );
+    }
+    if ((options as unknown as Record<string, unknown>).suggest !== undefined) {
+      throw new IncompatibleOptionError(
+        'autocomplete',
+        "[webgpu-search] suggest was removed; use autocomplete."
+      );
+    }
 
     const {
       mode = 'fuzzy',
       caseSensitive = false,
       signal,
-      cpuAlgorithm: cpuAlgorithmOpt,
       cpuScorer: cpuScorerOpt,
       onQueryTooLong = 'throw',
       fields: searchFields,
@@ -571,9 +600,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       faceting
     } = options;
 
-    const requestedScorer = cpuScorerOpt ?? cpuAlgorithmOpt ?? 'exact';
-    const cpuScorer = normalizeCpuScorer(requestedScorer as 'exact' | 'ufuzzy' | 'parity') ?? 'exact';
-    const cpuAlgorithm = requestedScorer;
+    const cpuScorer = normalizeCpuScorer(cpuScorerOpt) ?? 'exact';
     if (caseSensitive === this.normalized) {
       throw new ProfileMismatchError(!this.normalized, caseSensitive);
     }
@@ -603,7 +630,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
     // fail-closed extension hook validation up front so malformed
     // hook shapes throw identically on GPU and CPU paths (before early exits).
-    const effectiveHooks = resolveEffectiveHooks(this.indexHooks, options.hooks ?? options.extensions);
+    const effectiveHooks = resolveEffectiveHooks(this.indexHooks, options.hooks);
     // Threaded into every exact CPU call below (single normalization).
     const cpuModeOptions: CpuModeOptions = {
       tokenMatch: { operator: tokenOpts.operator, minMatchCount: tokenOpts.minMatchCount },
@@ -713,7 +740,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       options.ranking?.tieBreakers
     );
     let suggestSpec: NormalizedAutocompleteOptions | undefined = undefined;
-    const suggestRaw = options.autocomplete ?? options.suggest;
+    const suggestRaw = options.autocomplete;
     if (suggestRaw !== undefined && suggestRaw !== false) {
       suggestSpec = normalizeAutocompleteOptions(suggestRaw as AutocompleteOptions | boolean);
       // Inline autocomplete inherits the search ranking hierarchy unless the
@@ -759,7 +786,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       caseSensitive,
       signal,
       cpuScorer,
-      cpuAlgorithm,
       tokenOpts,
       prefixOpts,
       typo,
@@ -1014,7 +1040,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       caseSensitive,
       signal,
       cpuScorer,
-      cpuAlgorithm,
       typo,
       effectiveHooks,
       cpuModeOptions,
@@ -1058,7 +1083,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       highlightMs: number,
       facetingMs: number | undefined,
       hasOverflow: boolean,
-      suggestMs?: number
+      autocompleteMs?: number
     ): QueryDiagnostics | undefined => {
       if (!wantsDiagnostics) return undefined;
       const scanned = this.idToDocIndex.size;
@@ -1071,7 +1096,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         scoringMs,
         highlightMs,
         ...(facetingMs !== undefined ? { facetingMs } : {}),
-        ...(suggestMs !== undefined ? { autocompleteMs: suggestMs, suggestMs } : {}),
+        ...(autocompleteMs !== undefined ? { autocompleteMs } : {}),
         totalMs
       };
       const diag: QueryDiagnostics = {
@@ -1140,7 +1165,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         profileId: this.profileId,
         scoringVersion: SCORING_VERSION,
         cpuScorer,
-        cpuAlgorithm,
         fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
         ...(wantsFacets && facetEngine && facetSpec
           ? { facets: facetEngine.emptyResults(facetSpec) }
@@ -1349,7 +1373,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
           cpuScorer,
-          cpuAlgorithm,
           ...(gpuFacets ? { facets: gpuFacets } : {}),
           ...(gpuDiag ? { diagnostics: gpuDiag } : {}),
           ...(gpuSuggestions ? { suggestions: gpuSuggestions } : {})
@@ -1381,8 +1404,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         const fDef = this.sortedFields[fIdx];
         const fieldStrings = this.records.map((doc, dIdx) => (doc && this.rawFieldStrings[dIdx] ? this.rawFieldStrings[dIdx][fIdx] : ''));
         const legacyResult = mode === 'fuzzy'
-          ? cpuEngine.searchUFuzzy(fieldStrings, query, this.records.length, caseSensitive)
-          : cpuEngine.searchNative(fieldStrings, query, this.records.length, caseSensitive);
+          ? cpuEngine.searchWithUFuzzy(fieldStrings, query, this.records.length, caseSensitive)
+          : cpuEngine.searchNaiveScan(fieldStrings, query, this.records.length, caseSensitive);
 
         for (const hit of legacyResult.results) {
           const dIdx = hit.index;
@@ -1468,7 +1491,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         profileId: this.profileId,
         scoringVersion: SCORING_VERSION,
         cpuScorer,
-        cpuAlgorithm,
         fallbackReason: 'cpu-algorithm-requested',
         ...(legacyFacets ? { facets: legacyFacets } : {}),
         ...(legacyDiag ? { diagnostics: legacyDiag } : {}),
@@ -1589,7 +1611,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       effectiveFallbackReason = 'query-too-long';
     } else if (!isGpuSupportedMode) {
       // token/prefix/typo queries are CPU-by-design (exact-only
-      // WGSL kernels) — recorded per the parity boundary.
+      // WGSL kernels) — recorded per the exact boundary.
       effectiveFallbackReason = 'unsupported-mode';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
@@ -1637,7 +1659,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       profileId: this.profileId,
       scoringVersion: SCORING_VERSION,
       cpuScorer,
-      cpuAlgorithm,
       fallbackReason: effectiveFallbackReason,
       ...(parityFacets ? { facets: parityFacets } : {}),
       ...(parityDiag ? { diagnostics: parityDiag } : {}),
@@ -1704,14 +1725,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       : undefined;
     const suggestions = this.computeSuggestions(query, normalized.tokens, spec, allowed);
     return { suggestions, queryDurationMs: nowMs() - t0 };
-  }
-
-  /** @deprecated Use autocomplete. */
-  async suggest(
-    query: string,
-    options: AutocompleteOptions = {}
-  ): Promise<SuggestResponse<TDoc>> {
-    return this.autocomplete(query, options);
   }
 
   /**
@@ -1973,7 +1986,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     const alignOpts = {
       mode,
       normalized: this.normalized,
-      folded: this.normalized,
       queryTokens,
       tokenMatch: options.tokenMatch,
       prefixMatch: options.prefixMatch,
@@ -2583,11 +2595,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     return this.normalized;
   }
 
-  /** @deprecated Use isNormalized. */
-  isFolded(): boolean {
-    return this.normalized;
-  }
-
   getProfileId(): TextProfileId {
     return this.profileId;
   }
@@ -2614,11 +2621,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
    */
   getHooks(): SearchHooks<TDoc> | undefined {
     return this.indexHooks === undefined ? undefined : { ...this.indexHooks };
-  }
-
-  /** @deprecated Use getHooks. */
-  getExtensions(): SearchHooks<TDoc> | undefined {
-    return this.getHooks();
   }
 
   serialize(options?: SerializeDocumentIndexOptions): ArrayBuffer {
@@ -2687,7 +2689,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       ...(options?.options as any),
       fields: resolvedFields,
       idField: options?.options?.idField ?? snapshot.schema.idField ?? 'id',
-      caseSensitive: options?.options?.caseSensitive ?? snapshot.schema.caseSensitive ?? !(snapshot.header.normalized ?? snapshot.header.folded),
+      caseSensitive: options?.options?.caseSensitive ?? snapshot.schema.caseSensitive ?? !(snapshot.header.normalized),
       device: (options?.device ?? options?.options?.device) as GPUDevice | undefined,
       preferGpu: options?.options?.preferGpu ?? snapshot.schema.preferGpu,
       threshold: options?.options?.threshold ?? snapshot.schema.threshold,
@@ -2695,7 +2697,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       initialCapacity: options?.options?.initialCapacity ?? snapshot.schema.initialCapacity,
       growthFactor: options?.options?.growthFactor ?? snapshot.schema.growthFactor,
       filterFields: options?.options?.filterFields ?? (snapshot.schema.filterFields as any),
-      hooks: options?.options?.hooks ?? options?.options?.extensions
+      hooks: options?.options?.hooks
     };
 
     // fail-closed hook restore guard. Snapshots recording hookIds
@@ -2703,7 +2705,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     // are never serialized, only declarative IDs.
     assertHooksSatisfied(
       snapshot.schema.hookIds,
-      normalizeSearchHooks(mergedOptions.hooks ?? mergedOptions.extensions)
+      normalizeSearchHooks(mergedOptions.hooks)
     );
 
     const index = new DocumentIndex<TDoc>(mergedOptions);
@@ -2778,13 +2780,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     snapshot: RestoredDocumentSnapshot<TDoc>,
     options?: RestoreDocumentIndexOptions<TDoc>
   ): Promise<void> {
+    if ((options?.options as unknown as Record<string, unknown> | undefined)?.extensions !== undefined) {
+      throw new IncompatibleOptionError(
+        'hooks',
+        "[webgpu-search] extensions was removed; use hooks."
+      );
+    }
     // fail-closed hook restore guard for instance `restore()`.
     // Restore-supplied handlers (if any) replace the live index hooks;
     // otherwise the live hooks must satisfy the snapshot.
-    const restoreHooks = normalizeSearchHooks(options?.options?.hooks ?? options?.options?.extensions);
+    const restoreHooks = normalizeSearchHooks(options?.options?.hooks);
     if (restoreHooks !== undefined) {
       this.indexHooks = restoreHooks;
-      (this.options as { hooks?: SearchHooks<TDoc>; extensions?: SearchHooks<TDoc> }).hooks = restoreHooks;
+      (this.options as { hooks?: SearchHooks<TDoc> }).hooks = restoreHooks;
     }
     assertHooksSatisfied(snapshot.schema.hookIds, this.indexHooks);
 
@@ -2987,6 +2995,8 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       if (shouldAttemptGpu) {
         const measuredAvgBytes = totalRows > 0 ? (this.totalTokens * 4) / totalRows : 0;
         const deviceToUse = options?.device ?? this.options.device;
+        const powerPreference = options?.options?.powerPreference ?? this.options.powerPreference;
+        assertValidPowerPreference(powerPreference);
         const budget = checkMemoryBudget(totalRows, measuredAvgBytes, deviceToUse, this.candidateCapacity);
         if (!budget.allowed) {
           this.engineType = 'cpu';
@@ -2994,7 +3004,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         } else {
           try {
             const gpu = new WebGPUEngine();
-            const initialized = await gpu.init(deviceToUse);
+            const initialized = await gpu.init(
+              deviceToUse !== undefined || powerPreference !== undefined
+                ? { device: deviceToUse ?? undefined, powerPreference }
+                : undefined
+            );
             if (initialized && gpu.isReady) {
               gpu.ensureCandidateCapacity(this.candidateCapacity);
               const packed = packDataset(this.rowTokens, {
@@ -3064,7 +3078,11 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
 
     try {
       const gpu = new WebGPUEngine();
-      const initialized = await gpu.init(this.options.device);
+      const initialized = await gpu.init(
+        this.options.device !== undefined || this.options.powerPreference !== undefined
+          ? { device: this.options.device, powerPreference: this.options.powerPreference }
+          : undefined
+      );
       if (initialized && gpu.isReady) {
         gpu.ensureCandidateCapacity(this.candidateCapacity);
         const packed = packDataset(this.rowTokens, {
@@ -3129,7 +3147,6 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       scoringVersion: SCORING_VERSION,
       tokenCount: this.totalTokens,
       normalized: this.normalized,
-      folded: this.normalized,
       formatVersion: SNAPSHOT_FORMAT_VERSION,
       docCount,
       rowCount,

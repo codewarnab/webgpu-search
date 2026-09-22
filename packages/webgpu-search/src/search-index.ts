@@ -1,6 +1,6 @@
 import { WebGPUEngine } from './webgpu-engine';
 import { CPUEngine } from './cpu-engine';
-import { GpuDevicePool } from './gpu-device-pool';
+import { GpuDevicePool, assertValidPowerPreference } from './gpu-device-pool';
 import { packDataset, checkMemoryBudget } from './dataset-packing';
 import { normalizeText } from './text-normalization';
 import { scoreExactMatches } from './exact-scorer';
@@ -104,6 +104,8 @@ export class SearchIndex {
     if (options.textProfile !== undefined && options.textProfile !== 'unicode-default') {
       throw new ProfileMismatchError('unicode-default', options.textProfile, 'textProfile');
     }
+    // Fail-closed: unknown powerPreference throws even on CPU-only paths.
+    assertValidPowerPreference(options.powerPreference);
     const normalized = !(options.caseSensitive ?? false);
     const preferGpu = options.preferGpu ?? false;
     // exact post-normalization tokenization shared by query gate + tokenCount.
@@ -166,7 +168,11 @@ export class SearchIndex {
 
       try {
         const gpu = new WebGPUEngine();
-        const initialized = await gpu.init(options.device);
+        const initialized = await gpu.init(
+          options.device !== undefined || options.powerPreference !== undefined
+            ? { device: options.device, powerPreference: options.powerPreference }
+            : undefined
+        );
 
         if (initialized && gpu.isReady) {
           // pack the cached pre-tokenized streams directly — zero
@@ -223,9 +229,13 @@ export class SearchIndex {
       signal,
       onQueryTooLong = 'throw',
     } = options;
-    const requestedScorer = options.cpuScorer ?? options.cpuAlgorithm ?? 'exact';
-    const cpuScorer = normalizeCpuScorer(requestedScorer as 'exact' | 'ufuzzy' | 'parity') ?? 'exact';
-    const cpuAlgorithm = requestedScorer;
+    if ((options as unknown as Record<string, unknown>).cpuAlgorithm !== undefined) {
+      throw new IncompatibleOptionError(
+        'cpuScorer',
+        "[webgpu-search] cpuAlgorithm was removed; use cpuScorer: 'exact' | 'ufuzzy'."
+      );
+    }
+    const cpuScorer = normalizeCpuScorer(options.cpuScorer) ?? 'exact';
     if (this.isDestroyed) {
       throw new Error('[webgpu-search] SearchIndex has been destroyed.');
     }
@@ -404,7 +414,7 @@ export class SearchIndex {
         results: [], totalMatches: 0, query: q, mode, engine: 'cpu',
         candidateCount: 0, hasOverflow: false,
         timings: { queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null, readbackMs: 0, totalMs: 0, gpuDispatchMs: 0 },
-        profileId: this.profileId, scoringVersion: SCORING_VERSION, cpuScorer, cpuAlgorithm,
+        profileId: this.profileId, scoringVersion: SCORING_VERSION, cpuScorer,
         fallbackReason: forceCpu ? 'query-too-long' : this.fallbackReason,
         ...(diag ? { diagnostics: diag } : {})
       };
@@ -491,7 +501,6 @@ export class SearchIndex {
           profileId: this.profileId,
           scoringVersion: SCORING_VERSION,
           cpuScorer,
-          cpuAlgorithm,
           ...(gpuDiag ? { diagnostics: gpuDiag } : {})
         };
       } catch (err: any) {
@@ -518,8 +527,8 @@ export class SearchIndex {
     // 2. CPU execution path.
     // uFuzzy is quarantined to explicit cpuScorer:'ufuzzy' (CPU-only,
     // never in the differential matrix; explicitly non-conforming scores).
-    // Default 'parity' serves the shared-pipeline reference scorer; GPU
-    // failures also land here with identical parity semantics.
+    // Default 'exact' serves the shared-pipeline reference scorer; GPU
+    // failures also land here with identical exact semantics.
     throwIfAborted(signal);
     throwIfBudgetAborted(budget);
     assertTimeBudget(queryStartMs, budget);
@@ -532,9 +541,9 @@ export class SearchIndex {
         durationMs: number;
       };
       if (mode === 'fuzzy') {
-        legacyResult = this.cpuEngine.searchUFuzzy(this.items, query, clampedLimit, caseSensitive);
+        legacyResult = this.cpuEngine.searchWithUFuzzy(this.items, query, clampedLimit, caseSensitive);
       } else {
-        legacyResult = this.cpuEngine.searchNative(this.items, query, clampedLimit, caseSensitive);
+        legacyResult = this.cpuEngine.searchNaiveScan(this.items, query, clampedLimit, caseSensitive);
       }
       throwIfAborted(signal);
       const timings: SearchTimings = {
@@ -563,7 +572,6 @@ export class SearchIndex {
         profileId: this.profileId,
         scoringVersion: SCORING_VERSION,
         cpuScorer,
-        cpuAlgorithm,
         fallbackReason: 'cpu-algorithm-requested',
         ...(legacyDiag ? { diagnostics: legacyDiag } : {})
       };
@@ -608,12 +616,12 @@ export class SearchIndex {
       effectiveFallbackReason = 'query-too-long';
     } else if (!isGpuSupportedMode) {
       // token/prefix/typo queries are CPU-by-design (exact-only
-      // WGSL kernels) — recorded per the parity boundary.
+      // WGSL kernels) — recorded per the exact boundary.
       effectiveFallbackReason = 'unsupported-mode';
     } else if (useGpu && gpuHandle !== null) {
       effectiveFallbackReason = 'gpu-execution-error';
     }
-    // broad-query CPU routing is a routing decision (like the parity
+    // broad-query CPU routing is a routing decision (like the exact
     // note above for exhausted GPU), not a scorer request — surfaced in
     // diagnostics.warnings instead of fallbackReason.
 
@@ -634,7 +642,6 @@ export class SearchIndex {
       profileId: this.profileId,
       scoringVersion: SCORING_VERSION,
       cpuScorer,
-      cpuAlgorithm,
       fallbackReason: effectiveFallbackReason,
       ...(parityDiag ? { diagnostics: parityDiag } : {})
     };
@@ -657,7 +664,6 @@ export class SearchIndex {
       scoringVersion: SCORING_VERSION,
       tokenCount: this.tokenCount,
       normalized: this.normalized,
-      folded: this.normalized,
       formatVersion: DATASET_FORMAT_VERSION,
       fallbackReason: this.fallbackReason,
       memory: {

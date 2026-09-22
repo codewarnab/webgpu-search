@@ -314,23 +314,23 @@ async function main(): Promise<void> {
   {
     const items = ['hello', 'hallo', 'hollow', 'help'];
     const idx = await SearchIndex.create(items, { preferGpu: false });
-    const parity = await idx.search('hello', { mode: 'substring', cpuAlgorithm: 'parity' });
-    const ufuzzy = await idx.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'ufuzzy' });
+    const exact = await idx.search('hello', { mode: 'substring', cpuScorer: 'exact' });
+    const ufuzzy = await idx.search('hello', { mode: 'fuzzy', cpuScorer: 'ufuzzy' });
     const differ =
-      parity.totalMatches !== ufuzzy.totalMatches ||
-      parity.results.length !== ufuzzy.results.length ||
-      parity.results.some((r, i) => r.index !== ufuzzy.results[i]?.index || r.score !== ufuzzy.results[i]?.score);
-    ok('uFuzzy != parity on >=1 fixture', differ, `parity=${parity.totalMatches} ufuzzy=${ufuzzy.totalMatches}`);
+      exact.totalMatches !== ufuzzy.totalMatches ||
+      exact.results.length !== ufuzzy.results.length ||
+      exact.results.some((r, i) => r.index !== ufuzzy.results[i]?.index || r.score !== ufuzzy.results[i]?.score);
+    ok('uFuzzy != parity on >=1 fixture', differ, `parity=${exact.totalMatches} ufuzzy=${ufuzzy.totalMatches}`);
     // Same-mode quarantine: parity vs ufuzzy must also differ (scores are
     // fabricated rank scores on the legacy path, formula scores on parity).
-    const parityFuzzy = await idx.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'parity' });
-    const ufuzzyFuzzy = await idx.search('hello', { mode: 'fuzzy', cpuAlgorithm: 'ufuzzy' });
+    const exactFuzzy = await idx.search('hello', { mode: 'fuzzy', cpuScorer: 'exact' });
+    const ufuzzyFuzzy = await idx.search('hello', { mode: 'fuzzy', cpuScorer: 'ufuzzy' });
     const sameModeDiffer =
-      parityFuzzy.totalMatches !== ufuzzyFuzzy.totalMatches ||
-      parityFuzzy.results.some((r, i) => r.score !== ufuzzyFuzzy.results[i]?.score);
+      exactFuzzy.totalMatches !== ufuzzyFuzzy.totalMatches ||
+      exactFuzzy.results.some((r, i) => r.score !== ufuzzyFuzzy.results[i]?.score);
     ok('same-mode fuzzy parity != ufuzzy', sameModeDiffer);
-    ok('parity echo', parity.cpuAlgorithm === 'parity');
-    ok('ufuzzy echo', ufuzzy.cpuAlgorithm === 'ufuzzy');
+    ok('parity echo', exact.cpuScorer === 'exact');
+    ok('ufuzzy echo', ufuzzy.cpuScorer === 'ufuzzy');
     const recT = items.map((s) => normalizeText(s, true).tokens);
     const qT = normalizeText('hello', true).tokens;
     const ref = scoreExactMatches(recT, qT, 'substring', 10, items);

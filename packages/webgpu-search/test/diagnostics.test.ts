@@ -271,7 +271,7 @@ describe('search(): diagnostics telemetry', () => {
 
   test('diagnostics on the legacy ufuzzy path', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
-    const res = await index.search('auth', { cpuAlgorithm: 'ufuzzy', diagnostics: true });
+    const res = await index.search('auth', { cpuScorer: 'ufuzzy', diagnostics: true });
     expect(res.engine).toBe('cpu');
     expect(res.diagnostics).toBeDefined();
     expect(res.diagnostics!.scannedCandidates).toBe(4);
@@ -422,19 +422,19 @@ describe('M7 review fixes: contracts + telemetry accuracy', () => {
 
   test('ufuzzy path pins cpu-algorithm-requested fallbackReason', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
-    const res = await index.search('auth', { cpuAlgorithm: 'ufuzzy', diagnostics: true });
+    const res = await index.search('auth', { cpuScorer: 'ufuzzy', diagnostics: true });
     expect(res.engine).toBe('cpu');
     expect(res.fallbackReason).toBe('cpu-algorithm-requested');
     expect(res.diagnostics!.routedEngine).toBe('cpu');
     await index.destroy();
   });
 
-  test('suggest + diagnostics coexist with suggestMs bucket', async () => {
+  test('autocomplete + diagnostics coexist with autocompleteMs bucket', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
-    const res = await index.search('auth', { diagnostics: true, suggest: { limit: 2 } });
+    const res = await index.search('auth', { diagnostics: true, autocomplete: { limit: 2 } });
     expect(res.suggestions).toBeDefined();
     expect(res.diagnostics).toBeDefined();
-    expect(typeof res.diagnostics!.timings.suggestMs).toBe('number');
+    expect(typeof res.diagnostics!.timings.autocompleteMs).toBe('number');
     expect(res.diagnostics!.timings.totalMs).toBeGreaterThanOrEqual(
       res.diagnostics!.timings.scoringMs
     );

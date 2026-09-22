@@ -132,8 +132,11 @@ gpu.destroy();
 - `options.preferGpu`: Force WebGPU if available (default: `false`). Conflicts with `search({ cpuScorer: 'ufuzzy' })` → `IncompatibleOptionError`.
 - `options.slotBytes`: throw-on-use (`IncompatibleOptionError`; dynamic variable-length indexing replaced fixed slots). Remove it and rebuild.
 - `options.textProfile`: Index-level immutable profile (default: `'unicode-default'`; unknown values throw `ProfileMismatchError`).
-- `options.caseSensitive`: Pack-time fold control (default: `false` = normalized/NFC+C+F; `true` = NFC-only). Fixed at construction.
+- `options.caseSensitive`: Pack-time normalization control (default: `false` = normalized/NFC+C+F; `true` = NFC-only). Fixed at construction.
 - `options.device`: Custom injected `GPUDevice`.
+- `options.powerPreference`: `'high-performance'` | `'low-power'`. Forwarded to `GpuDevicePool.acquireDevice` (`navigator.gpu.requestAdapter({ powerPreference })`). Unknown values throw `IncompatibleOptionError` fail-closed, even on CPU-only paths. Ignored when `device` is injected (no adapter request is made).
+- `options.hooks`: `SearchHooks` for custom tokenization, scoring boosts, or predicates (`extensions` / `SearchExtensionHooks` were removed; unknown hooks throw fail-closed).
+- `options.autocomplete`: `AutocompleteOptions | boolean` for inline suggestions on `DocumentIndex.search()` (`suggest` / `SuggestOptions` were removed; use `autocomplete()` / `AutocompleteOptions` / `SuggestionItem`).
 
 ### `index.search(query, options?)`
 - `query: string`: Query string.
@@ -141,13 +144,13 @@ gpu.destroy();
 - `options.limit`: Maximum results to return. Defaults to `50` and is clamped to the inclusive range `1..8192` (`RESULT_LIMIT_MAX`) on both CPU and WebGPU.
 - `options.maxResults`: Backwards-compatible alias for `limit`; `limit` takes precedence when both are provided.
 - `options.caseSensitive`: Must match the index packed mode (default: `false`). Mismatch throws `ProfileMismatchError` — build one index per mode instead of varying per query.
-- `options.cpuScorer`: `'exact'` (default) or `'ufuzzy'` (explicit opt-in CPU-only, skips GPU). Legacy `cpuAlgorithm: 'parity'` maps to `'exact'` with a warning.
+- `options.cpuScorer`: `'exact'` (default) or `'ufuzzy'` (explicit opt-in CPU-only, skips GPU). `cpuAlgorithm` / `'parity'` were removed — unknown scorers throw `IncompatibleOptionError` fail-closed.
 - `options.onQueryTooLong`: `'throw'` (default, throws `QueryTooLongError` over `QUERY_TOKENS_MAX=128` tokens) or `'cpu-fallback'` (forces CPU for that query).
 - `options.signal`: `AbortSignal` to cancel stale query readback during fast typing.
-- Returns `SearchResponse` with `profileId`/`scoringVersion`/`cpuScorer` echo (`cpuAlgorithm` mirrors as deprecated).
+- Returns `SearchResponse` with `profileId`/`scoringVersion`/`cpuScorer` echo.
 
 ### `index.getStats()`
-Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer, profileId, unicodeVersion, scoringVersion, tokenCount, normalized, formatVersion }`. `tokenCount` is the post-fold Unicode scalar count.
+Returns `{ size, engine, vramAllocatedBytes, adapterVendor, adapterRenderer, profileId, unicodeVersion, scoringVersion, tokenCount, normalized, formatVersion }`. `tokenCount` is the post-normalization Unicode scalar count.
 
 ### Snapshot format
 Records are packed as u32 scalar tokens with token offsets; the binary snapshot format is versioned (`SNAPSHOT_MAGIC 0x55324434`, legacy `LEGACY_SNAPSHOT_MAGIC 0x55324433` read-only). See the full [**Snapshot Format (`docs/snapshot-format.md`)**](../../docs/snapshot-format.md).

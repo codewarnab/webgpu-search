@@ -5,7 +5,6 @@ import {
   type DocumentIndexStats,
   type DocumentSearchResponse,
   type FilterExpression,
-  type SuggestOptions,
   type SuggestionItem
 } from 'webgpu-search';
 import type { MonacoFileRecord, MonacoPaletteSearchResult } from './types';
@@ -27,8 +26,6 @@ export interface PaletteSearchOptions {
   languageFilter?: string;
   /** Request autocomplete suggestions alongside results. */
   autocomplete?: boolean | AutocompleteOptions;
-  /** @deprecated Use autocomplete. */
-  suggest?: boolean | SuggestOptions;
 }
 
 export interface PaletteSearchResult {
@@ -186,7 +183,7 @@ export class PaletteEngine {
     const highlight = options?.highlight ?? true;
     const limit = options?.limit ?? 50;
     const filter = this.buildFilter(options?.typeFilter, options?.languageFilter);
-    const autocomplete = options?.autocomplete ?? options?.suggest;
+    const autocomplete = options?.autocomplete;
 
     let response: DocumentSearchResponse<MonacoFileRecord>;
 
@@ -239,15 +236,15 @@ export class PaletteEngine {
     };
   }
 
-  /** First-party autocomplete primitive for symbol navigation. */
-  async suggest(
+  /** Canonical autocomplete primitive for symbol navigation. */
+  async autocomplete(
     query: string,
     options?: AutocompleteOptions
   ): Promise<{ suggestions: SuggestionItem<MonacoFileRecord>[]; queryDurationMs: number }> {
     if (this.useWorker && this.workerClient) {
       const t0 = performance.now();
-      // Worker client has no dedicated suggest RPC; fan out via a
-      // suggest-only worker search (suggestions stay index-wide by design).
+      // Worker client has no dedicated autocomplete RPC; fan out via an
+      // autocomplete-only worker search (suggestions stay index-wide by design).
       const res = await this.workerClient.search(query, {
         limit: 1,
         highlight: false,
@@ -258,14 +255,6 @@ export class PaletteEngine {
       return this.mainIndex.autocomplete(query, options);
     }
     return { suggestions: [], queryDurationMs: 0 };
-  }
-
-  /** Canonical autocomplete primitive for symbol navigation. */
-  async autocomplete(
-    query: string,
-    options?: AutocompleteOptions
-  ): Promise<{ suggestions: SuggestionItem<MonacoFileRecord>[]; queryDurationMs: number }> {
-    return this.suggest(query, options);
   }
 
   async addRecord(record: MonacoFileRecord): Promise<void> {

@@ -190,6 +190,22 @@ bun run check:bundle-size
 
 ---
 
+## ⚠️ Breaking Changes (next major)
+
+The deprecated aliases were removed. Update call sites before upgrading:
+
+- `cpuAlgorithm` / `'parity'` → `cpuScorer: 'exact' | 'ufuzzy'` (default `'exact'`). Unknown scorers throw `IncompatibleOptionError` fail-closed.
+- `extensions` / `SearchExtensionHooks` / `normalizeSearchExtensionHooks` → `hooks` / `SearchHooks` / `normalizeSearchHooks`.
+- `suggest` option / `SuggestOptions` / `SUGGEST_*` / `normalizeSuggestOptions` → `autocomplete` / `AutocompleteOptions` / `AUTOCOMPLETE_*` / `normalizeAutocompleteOptions` (`SuggestionItem` / `SuggestResponse` / `autocomplete()` stay canonical).
+- `folded` public fields → `normalized` (e.g. `packDataset(..., { normalized: true })`, `getStats().normalized`).
+- `FORMAT_VERSION*` / `U2D4_*` / `SERIALIZED_*` → `DATASET_*` / `SNAPSHOT_*` / `LEGACY_SNAPSHOT_*` (wire magic bytes unchanged).
+- `countUnicodeCodePoints`, `isAsciiTokens` / `isPrintableAsciiTokens`, `CPUEngine.searchUFuzzy` / `searchNative` removed (low-level CPU entry points are `searchWithUFuzzy` / `searchNaiveScan`).
+- `powerPreference` is now forwarded to `GpuDevicePool.acquireDevice` (`navigator.gpu.requestAdapter({ powerPreference })`); unknown values throw `IncompatibleOptionError` fail-closed, even on CPU-only paths.
+
+`SCORING_VERSION = 'parity-v1'` keeps its value; differential "parity harness" prose is unchanged.
+
+---
+
 ## 📄 Documentation
 
 - [**Snapshot format (`docs/snapshot-format.md`)**](./docs/snapshot-format.md): Versioned binary persistence, compatibility, and IndexedDB notes.

@@ -1,5 +1,4 @@
 import type {
-  CpuAlgorithm,
   CpuScorer,
   DATASET_FORMAT_VERSION,
   LEGACY_SNAPSHOT_VERSION,
@@ -22,11 +21,8 @@ export interface SearchOptions {
   /**
    * Default: 'exact' (contract default). The exact scorer serves the shared-pipeline
    * exact path (`exact-scorer.ts`); 'ufuzzy' = explicit opt-in CPU-only.
-   * Legacy value 'parity' is accepted and mapped to 'exact' with a deprecation warning.
    */
   cpuScorer?: CpuScorer;
-  /** @deprecated Use cpuScorer. Accepts legacy 'parity' (mapped to 'exact'). */
-  cpuAlgorithm?: CpuAlgorithm;
   /**
    * Default: 'throw'. Enforced on the exact post-normalization token count
    * (`normalizeText(query, normalized)` vs QUERY_TOKENS_MAX).
@@ -96,8 +92,6 @@ export interface SearchResponse {
   profileId: TextProfileId;       // text profile that served this query
   scoringVersion: typeof SCORING_VERSION; // scoring contract version
   cpuScorer: CpuScorer;             // requested CPU scorer (exact serves the contract)
-  /** @deprecated Use cpuScorer. Mirrors the requested scorer ('parity' preserved on echo). */
-  cpuAlgorithm: CpuAlgorithm;
   fallbackReason?: FallbackReason; // Reason for CPU execution path if fallback occurred
   /** detailed telemetry and diagnostic metrics (when requested via options.diagnostics) */
   diagnostics?: QueryDiagnostics;
@@ -107,7 +101,15 @@ export interface IndexOptions {
   threshold?: number;             // Item count cutoff for CPU vs GPU (Default: 30,000)
   preferGpu?: boolean;            // Force WebGPU if available regardless of size (conflicts with cpuScorer:'ufuzzy' → IncompatibleOptionError at search())
   device?: GPUDevice;             // Custom injected GPUDevice (for testing/context sharing)
-  powerPreference?: GPUPowerPreference; // 'high-performance' | 'low-power' (Reserved: accepted but not forwarded)
+  /**
+   * Adapter power preference forwarded to `GpuDevicePool.acquireDevice`
+   * (`navigator.gpu.requestAdapter({ powerPreference })`).
+   * Must be 'high-performance' | 'low-power' when provided; unknown values
+   * throw `IncompatibleOptionError` fail-closed (even on CPU-only paths and
+   * when `device` is injected — validation always applies, though no adapter
+   * request is made when `device` is injected).
+   */
+  powerPreference?: GPUPowerPreference;
   slotBytes?: number;             // throw-on-use (IncompatibleOptionError; dynamic indexing replaced fixed slots)
   textProfile?: TextProfileId;    // index-level immutable profile (default 'unicode-default'; unknown values throw ProfileMismatchError at create())
   caseSensitive?: boolean;        // pack-time normalization control (default false = normalized)
@@ -124,8 +126,6 @@ export interface IndexStats {
   scoringVersion: typeof SCORING_VERSION;
   tokenCount: number;             // exact post-normalization code-point total
   normalized: boolean;
-  /** @deprecated Use normalized. */
-  folded: boolean;
   formatVersion: typeof DATASET_FORMAT_VERSION | typeof LEGACY_SNAPSHOT_VERSION | typeof SNAPSHOT_FORMAT_VERSION;
   fallbackReason?: FallbackReason;
   memory?: {
@@ -181,8 +181,6 @@ export interface DocumentIndexOptions<TDoc = Record<string, unknown>> extends In
   filterFields?: Array<DocumentFilterField<TDoc>>;
   /** Search hooks for custom tokenization, scoring boosts, or predicates */
   hooks?: SearchHooks<TDoc>;
-  /** @deprecated Use hooks. */
-  extensions?: SearchHooks<TDoc>;
 }
 
 export interface HighlightRange {
@@ -235,8 +233,6 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
   ranking?: DeterministicRankingOptions;
   /** Per-query search hook overrides */
   hooks?: SearchHooks<TDoc>;
-  /** @deprecated Use hooks. */
-  extensions?: SearchHooks<TDoc>;
   /** Autocomplete / did-you-mean suggestion configuration if requested alongside search.
    * `true` uses defaults; an object customizes; `false`/omitted disables.
    * Inline suggestions cost a second O(docs x fields) scan (~2x query cost)
@@ -248,8 +244,6 @@ export interface DocumentSearchOptions<TDoc = any> extends SearchOptions {
    * `fuzzy` yields `type:'did-you-mean'`.
    */
   autocomplete?: AutocompleteOptions | boolean;
-  /** @deprecated Use autocomplete. */
-  suggest?: AutocompleteOptions | boolean;
 }
 
 export interface DocumentSearchResultItem<TDoc = any> {
@@ -295,8 +289,6 @@ export interface DocumentSearchResponse<TDoc = any> {
   profileId: TextProfileId;
   scoringVersion: typeof SCORING_VERSION;
   cpuScorer: CpuScorer;
-  /** @deprecated Use cpuScorer. Mirrors the requested scorer ('parity' preserved on echo). */
-  cpuAlgorithm: CpuAlgorithm;
   fallbackReason?: FallbackReason;
   /** Facet aggregation results keyed by facet name or field name */
   facets?: Record<string, FacetResult>;
@@ -433,7 +425,7 @@ export interface RestoreDocumentIndexOptions<TDoc = Record<string, unknown>> {
    * Optional custom DocumentIndex options to override or extend schema options
    * (e.g. custom getters, device, preferGpu, threshold).
    *
-   * `options.extensions` (when supplied to `restore` /
+   * `options.hooks` (when supplied to `restore` /
    * `fromSnapshotData` / instance `restore()`) replaces live index hooks
    * wholesale (not per-key merged); the merged set must then satisfy the
    * snapshot `hookIds` via `assertHooksSatisfied` or `IncompatibleHookError`
@@ -464,8 +456,6 @@ export interface DocumentSnapshotHeader {
   rowCount: number;
   tokenCount: number;
   normalized: boolean;
-  /** @deprecated Use normalized. */
-  folded: boolean;
   schemaByteLength: number;
   docsByteLength: number;
   columnarByteLength?: number;
@@ -751,10 +741,10 @@ export interface ExtensionHookIds {
  *
  * Persistence: closures are never serialized. `serialize()` records only
  * `ExtensionHookIds`; `restore` requires matching handlers via
- * `options.options.extensions` or throws `IncompatibleHookError`.
+ * `options.options.hooks` or throws `IncompatibleHookError`.
  * Restore-supplied handlers replace (not merge with) live index hooks.
  * Hooks cannot cross the Web Worker boundary — `SearchWorkerClient`
- * `init` / `search` / `restore` reject `extensions` fail-closed with
+ * `init` / `search` / `restore` reject `hooks` fail-closed with
  * `IncompatibleHookError` (empty `{}` is a no-op and allowed).
  */
 export interface SearchHooks<TDoc = any> {
@@ -794,8 +784,6 @@ export interface QueryDiagnosticsTimings {
   facetingMs?: number;            // Time spent aggregating facet buckets (absent when facets unrequested; string index never emits)
   /** Time spent in inline autocomplete scan (absent when autocomplete unrequested). */
   autocompleteMs?: number;
-  /** @deprecated Use autocompleteMs. */
-  suggestMs?: number;
   /** End-to-end query latency (filtering + scoring + highlight + faceting + autocomplete). */
   totalMs: number;                // End-to-end query latency
 }
@@ -813,11 +801,6 @@ export interface QueryDiagnostics {
   timings: QueryDiagnosticsTimings;
   warnings?: string[];              // Non-fatal advisory notices (e.g. broad-query fallback)
 }
-
-/** @deprecated Use AutocompleteOptions. */
-export type SuggestOptions = AutocompleteOptions;
-/** @deprecated Use SearchHooks. */
-export type SearchExtensionHooks<TDoc = any> = SearchHooks<TDoc>;
 
 /** Canonical alias for SuggestionItem. */
 export type AutocompleteItem<TDoc = any> = SuggestionItem<TDoc>;

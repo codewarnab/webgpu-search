@@ -30,7 +30,7 @@ import {
   scoreTokenTokens,
   normalizePrefixOptions,
   scorePrefixTokens,
-  searchCpuReference,
+  scoreExactMatches,
   alignHighlights,
   IncompatibleOptionError,
   ProfileMismatchError,
@@ -226,22 +226,22 @@ describe('cpu-reference: token/prefix/typo wiring', () => {
   test('flat search serves all four modes; unknown mode throws', () => {
     const records = [toks('hello world'), toks('auth controller'), toks('xyz')];
     const texts = ['hello world', 'auth controller', 'xyz'];
-    const tok = searchCpuReference(records, toks('hello world'), 'token', 10, texts);
+    const tok = scoreExactMatches(records, toks('hello world'), 'token', 10, texts);
     expect(tok.totalMatches).toBe(1);
-    const pre = searchCpuReference(records, toks('auth'), 'prefix', 10, texts);
+    const pre = scoreExactMatches(records, toks('auth'), 'prefix', 10, texts);
     expect(pre.totalMatches).toBe(1);
     expect(pre.results[0]?.index).toBe(1);
-    const typoHit = searchCpuReference(records, toks('helo'), 'substring', 10, texts, { typoTolerance: true });
+    const typoHit = scoreExactMatches(records, toks('helo'), 'substring', 10, texts, { typoTolerance: true });
     expect(typoHit.totalMatches).toBe(1);
-    const exactMiss = searchCpuReference(records, toks('helo'), 'substring', 10, texts);
+    const exactMiss = scoreExactMatches(records, toks('helo'), 'substring', 10, texts);
     expect(exactMiss.totalMatches).toBe(0);
-    expect(() => searchCpuReference(records, toks('x'), 'regex' as never, 10, texts)).toThrow(IncompatibleOptionError);
+    expect(() => scoreExactMatches(records, toks('x'), 'regex' as never, 10, texts)).toThrow(IncompatibleOptionError);
   });
 
   test('invalid mode options throw even on empty corpora (fail-closed)', () => {
-    expect(() => searchCpuReference([], toks('x'), 'token', 10, [], { tokenMatch: { operator: 'xor' } as never })).toThrow(TypeError);
-    expect(() => searchCpuReference([], toks('x'), 'prefix', 10, [], { prefixMatch: { prefixLength: 0 } })).toThrow(RangeError);
-    expect(() => searchCpuReference([], toks('x'), 'substring', 10, [], { typoTolerance: { enabled: true, maxDistance: 5 } as never })).toThrow(RangeError);
+    expect(() => scoreExactMatches([], toks('x'), 'token', 10, [], { tokenMatch: { operator: 'xor' } as never })).toThrow(TypeError);
+    expect(() => scoreExactMatches([], toks('x'), 'prefix', 10, [], { prefixMatch: { prefixLength: 0 } })).toThrow(RangeError);
+    expect(() => scoreExactMatches([], toks('x'), 'substring', 10, [], { typoTolerance: { enabled: true, maxDistance: 5 } as never })).toThrow(RangeError);
   });
 
   test('all-delimiter token query matches nothing but echoes the query', async () => {
@@ -365,14 +365,14 @@ describe('DocumentIndex M4 integration', () => {
 
   test('ufuzzy rejects token/prefix/typo fail-closed', async () => {
     const index = await DocumentIndex.create(SYMBOLS, symbolIndexOpts());
-    await expect(index.search('Auth', { mode: 'token', cpuAlgorithm: 'ufuzzy' })).rejects.toBeInstanceOf(
+    await expect(index.search('Auth', { mode: 'token', cpuScorer: 'ufuzzy' })).rejects.toBeInstanceOf(
       IncompatibleOptionError
     );
-    await expect(index.search('Auth', { mode: 'prefix', cpuAlgorithm: 'ufuzzy' })).rejects.toBeInstanceOf(
+    await expect(index.search('Auth', { mode: 'prefix', cpuScorer: 'ufuzzy' })).rejects.toBeInstanceOf(
       IncompatibleOptionError
     );
     await expect(
-      index.search('Auth', { mode: 'substring', cpuAlgorithm: 'ufuzzy', typoTolerance: true })
+      index.search('Auth', { mode: 'substring', cpuScorer: 'ufuzzy', typoTolerance: true })
     ).rejects.toBeInstanceOf(IncompatibleOptionError);
     index.destroy();
   });
@@ -532,13 +532,13 @@ describe('M4 review hardening: parity pins + per-mode highlight gates', () => {
 
   test('highlight prefix exactCase polarity mirrors the index', () => {
     expect(() =>
-      alignHighlights('Auth', 'auth', { mode: 'prefix', prefixMatch: { exactCase: true }, folded: true })
+      alignHighlights('Auth', 'auth', { mode: 'prefix', prefixMatch: { exactCase: true }, normalized: true })
     ).toThrow(ProfileMismatchError);
   });
 
   test('prefixLength over-length throws even on empty corpora', () => {
     expect(() =>
-      searchCpuReference([], toks('hi'), 'prefix', 10, [], { prefixMatch: { prefixLength: 99 } })
+      scoreExactMatches([], toks('hi'), 'prefix', 10, [], { prefixMatch: { prefixLength: 99 } })
     ).toThrow(RangeError);
   });
 

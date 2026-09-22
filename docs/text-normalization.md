@@ -70,7 +70,7 @@ identity is pinned at the `SearchIndex` level in the mock harness instead
 | `RESULT_LIMIT_MAX` | `8192` | Clamp, tested |
 | `TextProfileId` | `'unicode-default'` | Only text profile |
 | `normalized` | index-construction-time | `IndexOptions.caseSensitive` (default `false`); per-query mismatch → `ProfileMismatchError` (build one index per mode) |
-| `CpuScorer` | `'exact' \| 'ufuzzy'`, default `'exact'` | uFuzzy explicit opt-in only (CPU-only, explicitly non-conforming scores, skips GPU, excluded from differential matrix); default and GPU-failure fallback serve the exact `exact-scorer.ts` (legacy `'parity'` value maps to `'exact'`). `preferGpu:true + cpuScorer:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
+| `CpuScorer` | `'exact' \| 'ufuzzy'`, default `'exact'` | uFuzzy explicit opt-in only (CPU-only, explicitly non-conforming scores, skips GPU, excluded from differential matrix); default and GPU-failure fallback serve the exact `exact-scorer.ts` (`cpuAlgorithm` / `'parity'` were removed — unknown scorers throw `IncompatibleOptionError`). `preferGpu:true + cpuScorer:'ufuzzy'` → `IncompatibleOptionError` (enforced in `SearchIndex.search()`). |
 | `onQueryTooLong` | `'throw' \| 'cpu-fallback'`, default `'throw'` | Over-limit → `QueryTooLongError extends RangeError {limit, actual, profileId}`. Enforced on the exact post-normalization token count (`normalizeText(query, normalized)` vs `QUERY_TOKENS_MAX`), with a cheap raw-length pre-gate before NFC+folding. `'cpu-fallback'` forces the CPU path for that query. |
 
 **Differential status (exact matching on both paths):** comparator, exact scorer,

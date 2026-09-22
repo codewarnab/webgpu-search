@@ -130,24 +130,4 @@ export class CPUEngine {
       durationMs
     };
   }
-
-  /** @deprecated Use searchWithUFuzzy (explicit vendor name). */
-  searchUFuzzy(
-    strings: string[],
-    query: string,
-    maxResults: number = 1000,
-    caseSensitive: boolean = false
-  ): CPUSearchResult {
-    return this.searchWithUFuzzy(strings, query, maxResults, caseSensitive);
-  }
-
-  /** @deprecated Use searchNaiveScan. */
-  searchNative(
-    strings: string[],
-    query: string,
-    maxResults: number = 1000,
-    caseSensitive: boolean = false
-  ): CPUSearchResult {
-    return this.searchNaiveScan(strings, query, maxResults, caseSensitive);
-  }
 }

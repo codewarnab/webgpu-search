@@ -86,7 +86,7 @@
  * Budget: 72 KB gzip total per file (dist/index.js + dist/index.cjs).
  *
  * (extensibility pipeline + safe hook architecture) expansion:
- * Adds extensions.ts (default/code tokenizers, hook validation + per-key
+ * Adds hooks.ts (default/code tokenizers, hook validation + per-key
  * merge, Top-K scoring/postProcess pipeline, declarative hookIds + fail-closed
  * restore guard), tokenTermsOverride threading in exact-scorer/highlight/
  * DocumentIndex, hookIds persistence schema, and worker-client fail-closed
@@ -97,7 +97,7 @@
  * (query diagnostics, cost budgets & broad-query safeguards):
  * Adds diagnostics.ts (budget validation, phase-boundary enforcement,
  * selectivity + broad-query heuristics, warning builders), per-phase timing
- * + suggestMs telemetry in DocumentIndex/HybridIndex, worker predicate
+ * + autocompleteMs telemetry in DocumentIndex/HybridIndex, worker predicate
  * diagnostics drop, and fail-closed unknown max* keys (+~1.6 KB gzip;
  * delta +31,011 B exceeds the 30 KB cap, total 80,257 B exceeds 78 KB).
  * Total bumped 78 KB -> 82 KB and delta cap 30 KB -> 32 KB with this

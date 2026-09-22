@@ -15,7 +15,7 @@ import {
   DocumentIndex,
   defaultTokenizer,
   codeTokenizer,
-  normalizeSearchExtensionHooks,
+  normalizeSearchHooks,
   resolveEffectiveHooks,
   hasAnyHook,
   getHookId,
@@ -28,9 +28,9 @@ import {
   normalizeText,
   deserializeDocumentSnapshot,
   deserializeDocumentSnapshotHeader,
-  U2D4_MAGIC,
-  U2D4_HEADER_BYTES,
-  SERIALIZED_DOC_HEADER_BYTES,
+  SNAPSHOT_MAGIC,
+  SNAPSHOT_HEADER_BYTES,
+  LEGACY_SNAPSHOT_HEADER_BYTES,
   IncompatibleHookError,
   type DocumentIndexOptions,
 } from '../src/index';
@@ -114,14 +114,14 @@ describe('tokenizers: default + code-aware', () => {
 });
 
 describe('hook validation + resolution', () => {
-  test('normalizeSearchExtensionHooks validates shapes fail-closed', () => {
-    expect(normalizeSearchExtensionHooks(undefined)).toBeUndefined();
-    expect(normalizeSearchExtensionHooks({})).toBeUndefined();
+  test('normalizeSearchHooks validates shapes fail-closed', () => {
+    expect(normalizeSearchHooks(undefined)).toBeUndefined();
+    expect(normalizeSearchHooks({})).toBeUndefined();
     const tok = (s: string) => [s];
-    expect(normalizeSearchExtensionHooks({ tokenizer: tok })?.tokenizer).toBe(tok);
-    expect(() => normalizeSearchExtensionHooks(42 as never)).toThrow(TypeError);
-    expect(() => normalizeSearchExtensionHooks({ tokenizer: 'x' } as never)).toThrow(TypeError);
-    expect(() => normalizeSearchExtensionHooks({ bogus: () => {} } as never)).toThrow(TypeError);
+    expect(normalizeSearchHooks({ tokenizer: tok })?.tokenizer).toBe(tok);
+    expect(() => normalizeSearchHooks(42 as never)).toThrow(TypeError);
+    expect(() => normalizeSearchHooks({ tokenizer: 'x' } as never)).toThrow(TypeError);
+    expect(() => normalizeSearchHooks({ bogus: () => {} } as never)).toThrow(TypeError);
   });
 
   test('resolveEffectiveHooks merges index + query (query wins per key)', () => {
@@ -222,16 +222,16 @@ describe('hook validation + resolution', () => {
 describe('DocumentIndex extension integration', () => {
   test('constructor rejects malformed extensions fail-closed', async () => {
     await expect(
-      DocumentIndex.create(DOCS, baseOpts({ extensions: { tokenizer: 'x' } as never }))
+      DocumentIndex.create(DOCS, baseOpts({ hooks: { tokenizer: 'x' } as never }))
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      DocumentIndex.create(DOCS, baseOpts({ extensions: { bogus: () => {} } as never }))
+      DocumentIndex.create(DOCS, baseOpts({ hooks: { bogus: () => {} } as never }))
     ).rejects.toBeInstanceOf(TypeError);
   });
 
   test('custom tokenizer splits camelCase for token mode', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { tokenizer: codeTokenizer },
+      hooks: { tokenizer: codeTokenizer },
     }));
     // 'UserAuth' -> ['User','Auth']: doc 2 contains both in title/body row.
     const res = await index.search('UserAuth', { mode: 'token' });
@@ -248,11 +248,11 @@ describe('DocumentIndex extension integration', () => {
 
   test('per-query tokenizer overrides index tokenizer', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { tokenizer: defaultTokenizer },
+      hooks: { tokenizer: defaultTokenizer },
     }));
     const res = await index.search('UserAuth', {
       mode: 'token',
-      extensions: { tokenizer: codeTokenizer },
+      hooks: { tokenizer: codeTokenizer },
     });
     expect(res.results.map((r) => r.id)).toContain('2');
     index.destroy();
@@ -260,7 +260,7 @@ describe('DocumentIndex extension integration', () => {
 
   test('tokenizer ignored for non-token modes (fuzzy/substring)', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { tokenizer: codeTokenizer },
+      hooks: { tokenizer: codeTokenizer },
     }));
     const fuzzy = await index.search('Auth', { mode: 'fuzzy' });
     expect(fuzzy.totalMatches).toBeGreaterThan(0);
@@ -280,7 +280,7 @@ describe('DocumentIndex extension integration', () => {
     const res = await index.search('Auth', {
       mode: 'substring',
       limit: 2,
-      extensions: { scoringHook },
+      hooks: { scoringHook },
     });
     expect(res.results.length).toBeLessThanOrEqual(2);
     expect(calls).toBe(res.results.length);
@@ -291,7 +291,7 @@ describe('DocumentIndex extension integration', () => {
     const res2 = await index.search('Auth', {
       mode: 'substring',
       limit: 2,
-      extensions: { scoringHook },
+      hooks: { scoringHook },
     });
     expect(res2.results.map((r) => [r.id, r.score])).toEqual(res.results.map((r) => [r.id, r.score]));
     index.destroy();
@@ -300,14 +300,14 @@ describe('DocumentIndex extension integration', () => {
   test('scoringHook returning non-finite throws fail-closed', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
     await expect(
-      index.search('Auth', { extensions: { scoringHook: (() => Number.NaN) as never } })
+      index.search('Auth', { hooks: { scoringHook: (() => Number.NaN) as never } })
     ).rejects.toBeInstanceOf(TypeError);
     index.destroy();
   });
 
   test('filterPredicate composes conjunctively with options.filter', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { filterPredicate: (d: Doc) => d.kind === 'symbol' },
+      hooks: { filterPredicate: (d: Doc) => d.kind === 'symbol' },
     }));
     // Query 'pool' matches infra doc 3, but extension predicate excludes infra.
     const res = await index.search('pool', { mode: 'substring' });
@@ -331,7 +331,7 @@ describe('DocumentIndex extension integration', () => {
     const res = await index.search('Auth', {
       mode: 'substring',
       limit: 10,
-      extensions: {
+      hooks: {
         postProcess: (results) => results.filter((r) => r.id !== '1').slice(0, 1),
       },
     });
@@ -339,21 +339,21 @@ describe('DocumentIndex extension integration', () => {
     expect(res.results[0]?.id).not.toBe('1');
     // postProcess returning non-array throws.
     await expect(
-      index.search('Auth', { extensions: { postProcess: (() => 42) as never } })
+      index.search('Auth', { hooks: { postProcess: (() => 42) as never } })
     ).rejects.toBeInstanceOf(TypeError);
     index.destroy();
   });
 
   test('index-level + per-query hooks merge (query wins per key)', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: {
+      hooks: {
         scoringHook: ((doc: Doc, s: number) => s + 1) as never,
         filterPredicate: ((d: Doc) => d.kind === 'symbol') as never,
       },
     }));
     // Per-query scoringHook replaces index scoringHook; filterPredicate stays.
     const res = await index.search('Auth', {
-      extensions: { scoringHook: ((doc: Doc, s: number) => s + 100) as never },
+      hooks: { scoringHook: ((doc: Doc, s: number) => s + 100) as never },
     });
     expect(res.results.length).toBeGreaterThan(0);
     expect(res.results.every((r) => (r.doc as Doc).kind === 'symbol')).toBe(true);
@@ -363,11 +363,11 @@ describe('DocumentIndex extension integration', () => {
   test('extensions validation fail-closed on empty query/corpus', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
     await expect(
-      index.search('Auth', { extensions: { tokenizer: 1 as never } })
+      index.search('Auth', { hooks: { tokenizer: 1 as never } })
     ).rejects.toBeInstanceOf(TypeError);
     const empty = await DocumentIndex.create([], baseOpts());
     await expect(
-      empty.search('Auth', { extensions: { scoringHook: 1 as never } })
+      empty.search('Auth', { hooks: { scoringHook: 1 as never } })
     ).rejects.toBeInstanceOf(TypeError);
     index.destroy();
     empty.destroy();
@@ -378,7 +378,7 @@ describe('persistence safety: hookIds + fail-closed restore', () => {
   test('serialize records hookIds, restore requires handlers', async () => {
     function recencyBoost(doc: Doc, s: number) { return doc.year >= 2024 ? s + 100 : s; }
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { scoringHook: recencyBoost as never },
+      hooks: { scoringHook: recencyBoost as never },
     }));
     const buf = index.serialize();
     const snap = deserializeDocumentSnapshot(buf);
@@ -389,7 +389,7 @@ describe('persistence safety: hookIds + fail-closed restore', () => {
     await expect(restoreDocumentIndex(buf)).rejects.toBeInstanceOf(IncompatibleHookError);
     // Restore with matching handler succeeds and preserves behavior.
     const restored = await restoreDocumentIndex<Doc>(buf, {
-      options: { extensions: { scoringHook: recencyBoost as never } },
+      options: { hooks: { scoringHook: recencyBoost as never } },
     });
     const r1 = await index.search('Auth', { mode: 'substring' });
     const r2 = await restored.search('Auth', { mode: 'substring' });
@@ -402,12 +402,12 @@ describe('persistence safety: hookIds + fail-closed restore', () => {
     function scorerA(doc: Doc, s: number) { return s + 1; }
     function scorerB(doc: Doc, s: number) { return s + 2; }
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { scoringHook: scorerA as never },
+      hooks: { scoringHook: scorerA as never },
     }));
     const buf = index.serialize();
     const { restoreDocumentIndex } = await import('../src/index');
     await expect(
-      restoreDocumentIndex<Doc>(buf, { options: { extensions: { scoringHook: scorerB as never } } })
+      restoreDocumentIndex<Doc>(buf, { options: { hooks: { scoringHook: scorerB as never } } })
     ).rejects.toBeInstanceOf(IncompatibleHookError);
     index.destroy();
   });
@@ -427,20 +427,20 @@ describe('persistence safety: hookIds + fail-closed restore', () => {
   test('instance restore() enforces hook guard', async () => {
     function tok(s: string) { return [s]; }
     const src = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { tokenizer: tok },
+      hooks: { tokenizer: tok },
     }));
     const buf = src.serialize();
     const dst = await DocumentIndex.create(DOCS, baseOpts());
     await expect(dst.restore(buf)).rejects.toBeInstanceOf(IncompatibleHookError);
-    await dst.restore(buf, { options: { extensions: { tokenizer: tok } } });
-    expect(dst.getExtensions()?.tokenizer).toBe(tok as never);
+    await dst.restore(buf, { options: { hooks: { tokenizer: tok } } });
+    expect(dst.getHooks()?.tokenizer).toBe(tok as never);
     src.destroy();
     dst.destroy();
   });
 
   test('closures never serialized (schema contains IDs, not functions)', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: {
+      hooks: {
         tokenizer: codeTokenizer,
         scoringHook: ((d: Doc, s: number) => s) as never,
         filterPredicate: ((d: Doc) => true) as never,
@@ -449,7 +449,7 @@ describe('persistence safety: hookIds + fail-closed restore', () => {
     }));
     const buf = index.serialize();
     const header = deserializeDocumentSnapshotHeader(buf);
-    const headerBytes = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+    const headerBytes = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
     const dv = new DataView(buf, 0, headerBytes);
     const schemaLen = dv.getUint32(36, true);
     const schemaStr = new TextDecoder().decode(new Uint8Array(buf, headerBytes, schemaLen));
@@ -468,7 +468,7 @@ describe('worker boundary + portability', () => {
     const client = new SearchWorkerClient<Doc>({ worker: (() => { throw new Error('no worker'); }) as never });
     // init path validates before touching the worker.
     await expect(
-      client.init(DOCS, baseOpts({ extensions: { tokenizer: codeTokenizer } as never }) as never)
+      client.init(DOCS, baseOpts({ hooks: { tokenizer: codeTokenizer } as never }) as never)
     ).rejects.toBeInstanceOf(IncompatibleHookError);
     await client.destroy();
   });
@@ -520,7 +520,7 @@ describe('M6 review fixes: edge cases + contracts', () => {
     const terms = getTokenTermsForQuery('UserAuth', normalizeText('UserAuth', true).tokens, true, emptyTok);
     expect(terms).toEqual([]);
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { tokenizer: emptyTok },
+      hooks: { tokenizer: emptyTok },
     }));
     const res = await index.search('UserAuth', { mode: 'token' });
     expect(res.totalMatches).toBe(0);
@@ -557,20 +557,20 @@ describe('M6 review fixes: edge cases + contracts', () => {
   test('scoringHook float / non-finite throws fail-closed via search', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
     await expect(
-      index.search('Auth', { extensions: { scoringHook: (() => Number.POSITIVE_INFINITY) as never } })
+      index.search('Auth', { hooks: { scoringHook: (() => Number.POSITIVE_INFINITY) as never } })
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      index.search('Auth', { extensions: { scoringHook: (() => 10.5) as never } })
+      index.search('Auth', { hooks: { scoringHook: (() => 10.5) as never } })
     ).rejects.toBeInstanceOf(TypeError);
     await expect(
-      index.search('Auth', { extensions: { scoringHook: (() => '100') as never } })
+      index.search('Auth', { hooks: { scoringHook: (() => '100') as never } })
     ).rejects.toBeInstanceOf(TypeError);
     index.destroy();
   });
 
   test('filterPredicate throw propagates fail-closed (no silent fallback)', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { filterPredicate: (() => { throw new Error('pred-boom'); }) as never },
+      hooks: { filterPredicate: (() => { throw new Error('pred-boom'); }) as never },
     }));
     await expect(index.search('Auth')).rejects.toThrow('pred-boom');
     index.destroy();
@@ -578,12 +578,12 @@ describe('M6 review fixes: edge cases + contracts', () => {
 
   test('filterPredicate truthiness-coerced (non-boolean returns)', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { filterPredicate: ((() => 1) as unknown) as never },
+      hooks: { filterPredicate: ((() => 1) as unknown) as never },
     }));
     const res = await index.search('Auth', { mode: 'substring' });
     expect(res.totalMatches).toBeGreaterThan(0);
     const indexFalsy = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { filterPredicate: ((() => 0) as unknown) as never },
+      hooks: { filterPredicate: ((() => 0) as unknown) as never },
     }));
     const resFalsy = await indexFalsy.search('Auth', { mode: 'substring' });
     expect(resFalsy.totalMatches).toBe(0);
@@ -593,10 +593,10 @@ describe('M6 review fixes: edge cases + contracts', () => {
 
   test('per-query filterPredicate overrides index predicate', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { filterPredicate: ((d: Doc) => d.kind === 'symbol') as never },
+      hooks: { filterPredicate: ((d: Doc) => d.kind === 'symbol') as never },
     }));
     const res = await index.search('Auth', {
-      extensions: { filterPredicate: ((d: Doc) => d.year >= 2025) as never },
+      hooks: { filterPredicate: ((d: Doc) => d.year >= 2025) as never },
     });
     // Query wins per key: only year>=2025 applies (doc 4), kind filter dropped.
     expect(res.results.length).toBeGreaterThan(0);
@@ -607,13 +607,13 @@ describe('M6 review fixes: edge cases + contracts', () => {
   test('postProcess throwing propagates + runs after scoring re-sort', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
     await expect(
-      index.search('Auth', { extensions: { postProcess: (() => { throw new Error('pp-boom'); }) as never } })
+      index.search('Auth', { hooks: { postProcess: (() => { throw new Error('pp-boom'); }) as never } })
     ).rejects.toThrow('pp-boom');
     // Ordering: scoringHook boosts doc 4 first, postProcess sees re-sorted order.
     const seen: string[] = [];
     const res = await index.search('Auth', {
       mode: 'substring',
-      extensions: {
+      hooks: {
         scoringHook: ((doc: Doc, s: number) => (doc.year === 2025 ? s + 5000 : s)) as never,
         postProcess: ((results) => { seen.push(...results.map((r) => r.id)); return results; }) as never,
       },
@@ -630,7 +630,7 @@ describe('M6 review fixes: edge cases + contracts', () => {
     const filtered = await index.search('Auth', {
       mode: 'substring',
       facets: facetReq,
-      extensions: { postProcess: ((r) => r.slice(0, 1)) as never },
+      hooks: { postProcess: ((r) => r.slice(0, 1)) as never },
     });
     expect(filtered.results.length).toBe(1);
     expect(filtered.totalMatches).toBe(base.totalMatches);
@@ -642,10 +642,10 @@ describe('M6 review fixes: edge cases + contracts', () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
     let calls = 0;
     const postProcess = ((r: never[]) => { calls++; return r; }) as never;
-    await index.search('', { extensions: { postProcess } });
+    await index.search('', { hooks: { postProcess } });
     expect(calls).toBe(0);
     const empty = await DocumentIndex.create([], baseOpts());
-    await empty.search('Auth', { extensions: { postProcess } });
+    await empty.search('Auth', { hooks: { postProcess } });
     expect(calls).toBe(0);
     index.destroy();
     empty.destroy();
@@ -653,9 +653,9 @@ describe('M6 review fixes: edge cases + contracts', () => {
 
   test('invalid hook shapes throw on empty query/corpus (fail-closed)', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts());
-    await expect(index.search('', { extensions: { tokenizer: 1 as never } })).rejects.toBeInstanceOf(TypeError);
+    await expect(index.search('', { hooks: { tokenizer: 1 as never } })).rejects.toBeInstanceOf(TypeError);
     const empty = await DocumentIndex.create([], baseOpts());
-    await expect(empty.search('', { extensions: { scoringHook: 1 as never } })).rejects.toBeInstanceOf(TypeError);
+    await expect(empty.search('', { hooks: { scoringHook: 1 as never } })).rejects.toBeInstanceOf(TypeError);
     index.destroy();
     empty.destroy();
   });
@@ -664,7 +664,7 @@ describe('M6 review fixes: edge cases + contracts', () => {
     let calls = 0;
     const tok = (s: string) => { calls++; return [s]; };
     const index = await DocumentIndex.create(DOCS, baseOpts({
-      extensions: { tokenizer: tok as never },
+      hooks: { tokenizer: tok as never },
     }));
     await index.search('', { mode: 'token' });
     expect(calls).toBe(0);
@@ -683,7 +683,7 @@ describe('M6 review fixes: edge cases + contracts', () => {
     expect(customTerms.length).toBe(2);
     const ranges = alignHighlights('UserAuthManager', 'UserAuth', {
       mode: 'token',
-      folded: true,
+      normalized: true,
       queryTokens: norm('UserAuth', true).tokens,
       tokenTermsOverride: customTerms,
     });
@@ -697,7 +697,7 @@ describe('M6 review fixes: edge cases + contracts', () => {
   test('hook errors preserve type (no GPU fallback swallowing)', async () => {
     const index = await DocumentIndex.create(DOCS, baseOpts({ preferGpu: true }));
     await expect(
-      index.search('Auth', { extensions: { scoringHook: (() => Number.NaN) as never } })
+      index.search('Auth', { hooks: { scoringHook: (() => Number.NaN) as never } })
     ).rejects.toBeInstanceOf(TypeError);
     index.destroy();
   });
@@ -708,7 +708,7 @@ describe('worker boundary review fixes', () => {
     const { SearchWorkerClient } = await import('../src/index');
     const client = new SearchWorkerClient<Doc>({ worker: (() => { throw new Error('no worker'); }) as never });
     await expect(
-      client.search('Auth', { extensions: { tokenizer: codeTokenizer } as never })
+      client.search('Auth', { hooks: { tokenizer: codeTokenizer } as never })
     ).rejects.toBeInstanceOf(IncompatibleHookError);
     await client.destroy();
   });
@@ -719,22 +719,22 @@ describe('worker boundary review fixes', () => {
     const buf = index.serialize();
     const client = new SearchWorkerClient<Doc>({ worker: (() => { throw new Error('no worker'); }) as never });
     await expect(
-      client.restore(buf, { options: { extensions: { tokenizer: codeTokenizer } as never } })
+      client.restore(buf, { options: { hooks: { tokenizer: codeTokenizer } as never } })
     ).rejects.toBeInstanceOf(IncompatibleHookError);
     index.destroy();
     await client.destroy();
   });
 
-  test('SearchWorkerClient allows empty {} extensions (no-op)', async () => {
+  test('SearchWorkerClient allows empty {} hooks (no-op)', async () => {
     const { SearchWorkerClient } = await import('../src/index');
     const client = new SearchWorkerClient<Doc>({ worker: (() => { throw new Error('no worker'); }) as never });
     // Empty {} normalizes to undefined: init proceeds past the guard to the
     // worker touchpoint (throws 'no worker', not IncompatibleHookError).
     await expect(
-      client.init(DOCS, baseOpts({ extensions: {} }) as never)
+      client.init(DOCS, baseOpts({ hooks: {} }) as never)
     ).rejects.not.toBeInstanceOf(IncompatibleHookError);
     await expect(
-      client.search('Auth', { extensions: {} } as never)
+      client.search('Auth', { hooks: {} } as never)
     ).rejects.not.toBeInstanceOf(IncompatibleHookError);
     await client.destroy();
   });
@@ -748,9 +748,9 @@ describe('persistence + highlight review fixes', () => {
     const snap = deser(buf);
     // Inject blank hookId and re-serialize path via direct validation:
     // deserialize must reject blank strings if present in schema JSON.
-    // Header width is version-aware (U2D4 canonical 56 B, U2D3 legacy 48 B).
+    // Header width is version-aware (SNAPSHOT canonical 56 B, LEGACY 48 B).
     const header = deserializeDocumentSnapshotHeader(buf);
-    const headerBytes = header.magic === U2D4_MAGIC ? U2D4_HEADER_BYTES : SERIALIZED_DOC_HEADER_BYTES;
+    const headerBytes = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
     const dv = new DataView(buf, 0, headerBytes);
     const schemaLen = dv.getUint32(36, true);
     const schemaStr = new TextDecoder().decode(new Uint8Array(buf, headerBytes, schemaLen));
