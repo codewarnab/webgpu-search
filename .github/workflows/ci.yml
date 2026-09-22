@@ -47,6 +47,12 @@ jobs:
       - name: Check Bundle Size Budget
         run: bun run check:bundle-size
 
+      - name: Check Public API Surface (Phase 0 freeze)
+        run: bun run check:public-api
+
+      - name: Resolve Package Types (attw)
+        run: bunx --bun @arethetypeswrong/cli --pack ./packages/webgpu-search
+
       - name: Validate Snapshot Benchmark Matrix (headless)
         run: bun scripts/bench-snapshot-matrix.ts --out /tmp/benchmark_snapshot_matrix.json
 
@@ -101,6 +107,9 @@ jobs:
 
       - name: Run Token/Prefix/Typo Search-Mode Tests
         run: bun run test:search-modes
+
+      - name: Run CPU Baseline Pin (support-matrix reference contract)
+        run: bun run test:cpu-baseline
 
       - name: Setup Chrome (browser regression gate)
         id: setup-chrome

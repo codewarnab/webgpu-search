@@ -209,6 +209,8 @@ The deprecated aliases were removed. Update call sites before upgrading:
 ## 📄 Documentation
 
 - [**Snapshot format (`docs/snapshot-format.md`)**](./docs/snapshot-format.md): Versioned binary persistence, compatibility, and IndexedDB notes.
+- [**Public API freeze (`docs/public-api.md`)**](./docs/public-api.md): Frozen 1.x contract — entry points, class contracts, result ordering, response echoes, errors, versioning, and deprecation policy.
+- [**Support matrix + CPU baseline (`docs/support-matrix.md`)**](./docs/support-matrix.md): Browser/OS/runtime support, tested CPU-only baseline, `ufuzzy` opt-in rules, and the named compatibility suite.
 - [**Text normalization (`docs/text-normalization.md`)**](./docs/text-normalization.md): Normative specification for preprocessing pipeline, version caps, delimiter sets, and scoring formulas.
 - [**Naming conventions (`docs/naming-conventions.md`)**](./docs/naming-conventions.md): Domain-first naming rules enforced by `lint:naming`.
 

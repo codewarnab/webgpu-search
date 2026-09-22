@@ -247,6 +247,56 @@ export class GpuDevicePool {
     return () => this.deviceLostListeners.delete(listener);
   }
 
+  /**
+   * Introspection for reliability proofs (Phase 2): number of live
+   * `onDeviceLost` subscriptions. Leak tests assert this returns to
+   * baseline after create/destroy cycles (no unguarded DOM — safe in
+   * workers/Node/SSR).
+   */
+  static getListenerCount(): number {
+    return this.deviceLostListeners.size;
+  }
+
+  /**
+   * Introspection for reliability proofs (Phase 2): current shared-device
+   * reference count. Injected (non-shared) devices never touch this counter.
+   */
+  static getRefCount(): number {
+    return this.refCount;
+  }
+
+  /**
+   * True while a shared device is held by the pool.
+   */
+  static hasSharedDevice(): boolean {
+    return this.sharedDevice !== null;
+  }
+
+  /**
+   * Deterministic device-loss simulation for headless reliability proofs.
+   *
+   * Clears the shared device/adapter, zeroes the refcount, and notifies
+   * every `onDeviceLost` subscriber — the same fan-out the real
+   * `device.lost.then` handler performs. Indexes holding injected (mock)
+   * devices still observe the transition via their subscription and fall
+   * back to CPU with `fallbackReason: 'device-lost'`, so rebuild semantics
+   * (`rebuildGpu`) can be proven without executing hardware.
+   *
+   * Portable: no DOM / `navigator` access — safe in workers/Node/SSR.
+   */
+  static simulateDeviceLoss(reason: string = 'Simulated device loss'): void {
+    this.sharedDevice = null;
+    this.sharedAdapter = null;
+    this.refCount = 0;
+    for (const listener of [...this.deviceLostListeners]) {
+      try {
+        listener(reason);
+      } catch (e) {
+        console.error('Error in device lost listener:', e);
+      }
+    }
+  }
+
   static getAdapterInfo(): AdapterInfo | null {
     return this.sharedAdapterInfo;
   }

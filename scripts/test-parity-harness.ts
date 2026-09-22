@@ -1246,6 +1246,53 @@ async function main(): Promise<void> {
     }
   }
 
+  // ============================================================ Part 7: deterministic fallback (Phase 2)
+  console.log('Part 7. Deterministic fallback (GPU-unavailable + GPU-lost == CPU contract)');
+  {
+    const { GpuDevicePool } = await import('../packages/webgpu-search/src/index');
+    // GPU-unavailable (explicit CPU) matches the exact oracle.
+    const cpuIdx = await SearchIndex.create(['hello', 'world', 'helper'], { preferGpu: false });
+    try {
+      const res = await cpuIdx.search('hello', { mode: 'substring', cpuScorer: 'exact' });
+      const rt = (cpuIdx as unknown as { recordTokens: Uint32Array[] }).recordTokens;
+      const direct = scoreExactMatches(rt, normalizeText('hello', true).tokens, 'substring', 50, ['hello', 'world', 'helper']);
+      ok(
+        'fallback unavailable matches exact oracle',
+        res.engine === 'cpu' && res.totalMatches === direct.totalMatches &&
+          JSON.stringify(res.results.map((r) => [r.index, r.score])) ===
+            JSON.stringify(direct.results.map((r) => [r.index, r.score])),
+      );
+      ok('fallback unavailable reason prefer-cpu', res.fallbackReason === 'prefer-cpu', String(res.fallbackReason));
+    } finally {
+      cpuIdx.destroy();
+    }
+    // GPU-lost serves the identical CPU contract with device-lost, then rebuilds.
+    const gpuIdx = await SearchIndex.create(['hello', 'world', 'helper'], { device: mockDevice, preferGpu: true });
+    try {
+      GpuDevicePool.simulateDeviceLoss('parity-part7');
+      ok('fallback lost transitions to cpu/device-lost', gpuIdx.getStats().engine === 'cpu' && gpuIdx.getStats().fallbackReason === 'device-lost');
+      const lost = await gpuIdx.search('hello', { mode: 'substring', cpuScorer: 'exact' });
+      const refIdx = await SearchIndex.create(['hello', 'world', 'helper'], { preferGpu: false });
+      try {
+        const ref = await refIdx.search('hello', { mode: 'substring', cpuScorer: 'exact' });
+        ok(
+          'fallback lost matches cpu contract',
+          lost.totalMatches === ref.totalMatches &&
+            JSON.stringify(lost.results.map((r) => [r.index, r.score])) ===
+              JSON.stringify(ref.results.map((r) => [r.index, r.score])) &&
+            lost.profileId === ref.profileId && lost.scoringVersion === ref.scoringVersion,
+        );
+      } finally {
+        refIdx.destroy();
+      }
+      ok('fallback lost reason device-lost', lost.fallbackReason === 'device-lost', String(lost.fallbackReason));
+      const rebuilt = await gpuIdx.rebuildGpu({ device: mockDevice });
+      ok('fallback rebuildGpu recovers webgpu', rebuilt === true && gpuIdx.getStats().engine === 'webgpu');
+    } finally {
+      gpuIdx.destroy();
+    }
+  }
+
   // ---------------------------------------------------------------- report
   console.log(`\n---  harness: ${passed} passed, ${failed} failed, ${pending} pending-hardware ---`);
   if (pendingNotes.length > 0) {

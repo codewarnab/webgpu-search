@@ -527,14 +527,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             this.vramAllocatedBytes = gpu.vramAllocatedBytes;
             gpu = null; // Ownership transferred
 
-            this.unsubscribeDeviceLost = GpuDevicePool.onDeviceLost(() => {
-              console.warn('[webgpu-search] GPU device lost, falling back to CPU.');
-              if (this.gpuEngine) {
-                this.gpuEngine.destroy();
-                this.gpuEngine = null;
-              }
-              this.engineState = transitionEngineState(this.engineState, 'cpu', 'device-lost');
-            });
+            this.subscribeDeviceLost();
           } else {
             this.engineState = transitionEngineState(
               this.engineState,
@@ -3048,13 +3041,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               this.engineState = transitionEngineState(this.engineState, 'webgpu');
               this.vramAllocatedBytes = gpu.vramAllocatedBytes;
 
-              this.unsubscribeDeviceLost = GpuDevicePool.onDeviceLost(() => {
-                if (this.gpuEngine) {
-                  this.gpuEngine.destroy();
-                  this.gpuEngine = null;
-                }
-                this.engineState = transitionEngineState(this.engineState, 'cpu', 'device-lost');
-              });
+              this.subscribeDeviceLost();
             } else {
               this.engineState = transitionEngineState(this.engineState, 'cpu', 'device-request-failed');
             }
@@ -3072,6 +3059,75 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
 
     this.generation++;
+  }
+
+  /**
+   * Single device-loss subscription (re-subscribes replace the old one so
+   * rebuild cycles never leak listeners). On loss the GPU engine is torn
+   * down, VRAM accounting is zeroed, and the state moves to CPU with
+   * `fallbackReason: 'device-lost'` — CPU corpora (`rowTokens`,
+   * `records`) are retained so `rebuildGpu()` can re-upload identically.
+   */
+  private subscribeDeviceLost(): void {
+    if (this.unsubscribeDeviceLost) {
+      this.unsubscribeDeviceLost();
+      this.unsubscribeDeviceLost = undefined;
+    }
+    this.unsubscribeDeviceLost = GpuDevicePool.onDeviceLost(() => {
+      console.warn('[webgpu-search] GPU device lost, falling back to CPU.');
+      if (this.gpuEngine) {
+        this.gpuEngine.destroy();
+        this.gpuEngine = null;
+      }
+      this.vramAllocatedBytes = 0;
+      this.engineState = transitionEngineState(this.engineState, 'cpu', 'device-lost');
+    });
+  }
+
+  /**
+   * Explicit device-loss rebuild path (Phase 2 reliability proof).
+   *
+   * After a `fallbackReason: 'device-lost'` (or `gpu-execution-error`)
+   * transition, attempts to re-acquire a GPU device and re-upload the
+   * retained in-memory corpus. On success the engine returns to `'webgpu'`
+   * with identical match semantics; on failure the index stays on CPU with
+   * an explicit `fallbackReason` and returns `false` (never throws for
+   * GPU-unavailable).
+   *
+   * - `preferGpu: false` indexes are CPU-by-design: rebuild is a no-op
+   *   returning `false`.
+   * - Pass a fresh injected `device` after loss (e.g. a new mock device
+   *   in headless tests); otherwise the creation-time `options.device` is
+   *   reused, else the shared pool is tried. A supplied device is persisted
+   *   into `options.device` for subsequent rebuilds.
+   * - Throws only when the index itself is destroyed.
+   */
+  async rebuildGpu(options?: { device?: GPUDevice; powerPreference?: GPUPowerPreference }): Promise<boolean> {
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] DocumentIndex has been destroyed.');
+    }
+    if (this.gpuEngine !== null && this.gpuEngine.isReady && this.engineState.engine === 'webgpu') {
+      return true;
+    }
+    if (this.options.preferGpu === false) {
+      return false;
+    }
+    if (this.idToDocIndex.size === 0) {
+      return false;
+    }
+    if (options?.device !== undefined) {
+      (this.options as { device?: GPUDevice }).device = options.device;
+    }
+    if (options?.powerPreference !== undefined) {
+      (this.options as { powerPreference?: GPUPowerPreference }).powerPreference = options.powerPreference;
+    }
+    if (this.gpuEngine) {
+      try { this.gpuEngine.destroy(); } catch {}
+      this.gpuEngine = null;
+    }
+    this.vramAllocatedBytes = 0;
+    await this.tryInitializeGpuEngine();
+    return this.engineState.engine === 'webgpu';
   }
 
   private async tryInitializeGpuEngine(): Promise<void> {
@@ -3122,13 +3178,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.gpuEngine = gpu;
         this.engineState = transitionEngineState(this.engineState, 'webgpu');
         this.vramAllocatedBytes = gpu.vramAllocatedBytes;
-        this.unsubscribeDeviceLost = GpuDevicePool.onDeviceLost(() => {
-          if (this.gpuEngine) {
-            this.gpuEngine.destroy();
-            this.gpuEngine = null;
-          }
-          this.engineState = transitionEngineState(this.engineState, 'cpu', 'device-lost');
-        });
+        this.subscribeDeviceLost();
       } else {
         this.engineState = transitionEngineState(
           this.engineState,
@@ -3191,6 +3241,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
   }
 
   destroy(): void {
+    if (this.isDestroyed) {
+      return;
+    }
     this.isDestroyed = true;
     this.generation++;
     if (this.unsubscribeDeviceLost) {

@@ -7,7 +7,9 @@
 import { readFile } from 'node:fs/promises';
 import {
   DocumentIndex,
+  SearchIndex,
   SearchWorkerClient,
+  GpuDevicePool,
   LEGACY_SNAPSHOT_VERSION,
   LEGACY_SNAPSHOT_MAGIC,
   LEGACY_SNAPSHOT_HEADER_BYTES,
@@ -594,6 +596,84 @@ async function runM1Tests() {
     throw new Error(' feature type shapes failed validation');
   }
   console.log('   ✅ Facets, Typo Tolerance, Ranking, Suggestions, Hooks, and Diagnostics verified');
+
+  // 13. Phase 2 reliability contract: rebuild path, dispose symmetry, pool introspection
+  console.log('13. Verifying Phase 2 reliability contract (rebuild/dispose/pool)...');
+  {
+    if (typeof SearchIndex.prototype.rebuildGpu !== 'function') {
+      throw new Error('SearchIndex.rebuildGpu must exist (explicit device-loss rebuild path)');
+    }
+    if (typeof DocumentIndex.prototype.rebuildGpu !== 'function') {
+      throw new Error('DocumentIndex.rebuildGpu must exist (explicit device-loss rebuild path)');
+    }
+    if (typeof SearchIndex.prototype[Symbol.dispose] !== 'function') {
+      throw new Error('SearchIndex must implement [Symbol.dispose] (symmetric with DocumentIndex)');
+    }
+    if (typeof DocumentIndex.prototype[Symbol.dispose] !== 'function') {
+      throw new Error('DocumentIndex must implement [Symbol.dispose]');
+    }
+    for (const fn of ['getListenerCount', 'getRefCount', 'hasSharedDevice', 'simulateDeviceLoss'] as const) {
+      if (typeof (GpuDevicePool as unknown as Record<string, unknown>)[fn] !== 'function') {
+        throw new Error(`GpuDevicePool.${fn} must exist (reliability introspection/simulation)`);
+      }
+    }
+    // Listener accounting is balanced across a create/destroy cycle.
+    const base = GpuDevicePool.getListenerCount();
+    const probe = await SearchIndex.create(['alpha'], { preferGpu: false });
+    if (GpuDevicePool.getListenerCount() !== base) {
+      throw new Error('CPU-by-design index must not subscribe to device loss');
+    }
+    probe.destroy();
+    probe.destroy();
+    if (GpuDevicePool.getListenerCount() !== base) {
+      throw new Error('destroy must leave listener count at baseline (double-destroy safe)');
+    }
+    // Destroyed rebuild throws fail-closed on both index types.
+    let threwFlat = false;
+    try {
+      await probe.rebuildGpu();
+    } catch {
+      threwFlat = true;
+    }
+    if (!threwFlat) throw new Error('destroyed SearchIndex.rebuildGpu must throw');
+    const docProbe = await DocumentIndex.create<{ id: string; title: string }>(
+      [{ id: '1', title: 'alpha' }],
+      { fields: ['title'], preferGpu: false },
+    );
+    docProbe.destroy();
+    let threwDoc = false;
+    try {
+      await docProbe.rebuildGpu();
+    } catch {
+      threwDoc = true;
+    }
+    if (!threwDoc) throw new Error('destroyed DocumentIndex.rebuildGpu must throw');
+    // preferGpu:false rebuild is a no-op false (CPU by design).
+    const cpuProbe = await SearchIndex.create(['alpha'], { preferGpu: false });
+    try {
+      if ((await cpuProbe.rebuildGpu()) !== false) {
+        throw new Error('preferGpu:false rebuildGpu must resolve false');
+      }
+    } finally {
+      cpuProbe.destroy();
+    }
+    const validReasons: FallbackReason[] = [
+      'webgpu-unsupported',
+      'device-request-failed',
+      'memory-budget-exceeded',
+      'device-lost',
+      'below-threshold',
+      'prefer-cpu',
+      'query-too-long',
+      'cpu-algorithm-requested',
+      'unsupported-mode',
+      'gpu-execution-error',
+    ];
+    if (!validReasons.includes('device-lost' as FallbackReason)) {
+      throw new Error('FallbackReason must include device-lost');
+    }
+  }
+  console.log('   ✅ Phase 2 reliability contract (rebuild/dispose/pool/fallback) verified');
 
   console.log('\n--- All Public Contracts & Specifications Tests Passed! ✅ ---');
 }

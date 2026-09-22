@@ -75,6 +75,8 @@ export class SearchIndex {
   private readonly preferGpu: boolean;
   private tokenCount: number = 0;
   private recordTokens: Uint32Array[] = [];
+  private creationDevice?: GPUDevice;
+  private creationPowerPreference?: GPUPowerPreference;
 
   private constructor(
     items: string[],
@@ -87,6 +89,22 @@ export class SearchIndex {
     this.preferGpu = preferGpu;
     this.recordTokens = recordTokens;
     this.cpuEngine = new CPUEngine();
+  }
+
+  private subscribeDeviceLost(): void {
+    if (this.unsubscribeDeviceLost) {
+      this.unsubscribeDeviceLost();
+      this.unsubscribeDeviceLost = undefined;
+    }
+    this.unsubscribeDeviceLost = GpuDevicePool.onDeviceLost(() => {
+      console.warn('[webgpu-search] GPU device lost, falling back to CPU.');
+      if (this.gpuEngine) {
+        this.gpuEngine.destroy();
+        this.gpuEngine = null;
+      }
+      this.vramAllocatedBytes = 0;
+      this.engineState = transitionEngineState(this.engineState, 'cpu', 'device-lost');
+    });
   }
 
   /**
@@ -131,6 +149,8 @@ export class SearchIndex {
     }
     const index = new SearchIndex(ownedItems, normalized, preferGpu, recordTokens);
     index.tokenCount = corpusTokens;
+    index.creationDevice = options.device;
+    index.creationPowerPreference = options.powerPreference;
 
     // Empty dataset fast path: zero allocation, route immediately to CPU
     if (ownedItems.length === 0) {
@@ -191,15 +211,10 @@ export class SearchIndex {
           index.engineState = transitionEngineState(index.engineState, 'webgpu');
           index.vramAllocatedBytes = packed.recordsByteLength + packed.offsetsByteLength;
 
-          // Subscribe to device loss for automatic graceful fallback
-          index.unsubscribeDeviceLost = GpuDevicePool.onDeviceLost(() => {
-            console.warn('[webgpu-search] GPU device lost, falling back to CPU.');
-            if (index.gpuEngine) {
-              index.gpuEngine.destroy();
-              index.gpuEngine = null;
-            }
-            index.engineState = transitionEngineState(index.engineState, 'cpu', 'device-lost');
-          });
+          // Subscribe to device loss for automatic graceful fallback.
+          // Single subscription (re-subscribes replace the old one) so
+          // rebuild cycles never leak listeners.
+          index.subscribeDeviceLost();
 
           return index;
         } else {
@@ -687,11 +702,98 @@ export class SearchIndex {
   }
 
   /**
+   * Explicit device-loss rebuild path (Phase 2 reliability proof).
+   *
+   * After a `fallbackReason: 'device-lost'` (or `gpu-execution-error`)
+   * transition, attempts to re-acquire a GPU device and re-upload the
+   * in-memory corpus (`recordTokens` are retained across loss — only GPU
+   * buffers are torn down). On success the engine returns to `'webgpu'`
+   * with identical match semantics (same packed tokens, same scorer);
+   * on failure the index stays on CPU with an explicit `fallbackReason`
+   * and returns `false` (never throws for GPU-unavailable).
+   *
+   * - `preferGpu: false` indexes are CPU-by-design: rebuild is a no-op
+   *   returning `false`.
+   * - Pass a fresh injected `device` after loss (e.g. a new mock device
+   *   in headless tests); otherwise the creation-time device (if any) is
+   *   reused, else the shared pool is tried.
+   * - Re-subscribes the single device-loss listener (no leak on cycles).
+   * - Throws only when the index itself is destroyed.
+   */
+  async rebuildGpu(options?: { device?: GPUDevice; powerPreference?: GPUPowerPreference }): Promise<boolean> {
+    if (this.isDestroyed) {
+      throw new Error('[webgpu-search] SearchIndex has been destroyed.');
+    }
+    if (this.gpuEngine !== null && this.gpuEngine.isReady && this.engineState.engine === 'webgpu') {
+      return true;
+    }
+    if (this.preferGpu === false) {
+      return false;
+    }
+    if (this.items.length === 0) {
+      return false;
+    }
+    const deviceToUse = options?.device ?? this.creationDevice;
+    const powerPreference = options?.powerPreference ?? this.creationPowerPreference;
+    assertValidPowerPreference(powerPreference);
+    if (this.gpuEngine) {
+      try { this.gpuEngine.destroy(); } catch {}
+      this.gpuEngine = null;
+    }
+    this.vramAllocatedBytes = 0;
+    try {
+      const gpu = new WebGPUEngine();
+      const initialized = await gpu.init(
+        deviceToUse !== undefined || powerPreference !== undefined
+          ? { device: deviceToUse, powerPreference }
+          : undefined
+      );
+      if (!initialized || !gpu.isReady) {
+        this.engineState = transitionEngineState(
+          this.engineState,
+          'cpu',
+          typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+            ? 'webgpu-unsupported'
+            : 'device-request-failed',
+        );
+        try { gpu.destroy(); } catch {}
+        return false;
+      }
+      const packed = packDataset(this.recordTokens, { normalized: this.normalized, totalTokens: this.tokenCount });
+      await gpu.loadDataset(packed);
+      this.gpuEngine = gpu;
+      this.engineState = transitionEngineState(this.engineState, 'webgpu');
+      this.vramAllocatedBytes = packed.recordsByteLength + packed.offsetsByteLength;
+      if (deviceToUse !== undefined) {
+        this.creationDevice = deviceToUse;
+      }
+      if (powerPreference !== undefined) {
+        this.creationPowerPreference = powerPreference;
+      }
+      this.subscribeDeviceLost();
+      return true;
+    } catch {
+      this.engineState = transitionEngineState(
+        this.engineState,
+        'cpu',
+        typeof navigator === 'undefined' || !('gpu' in navigator) || !navigator.gpu
+          ? 'webgpu-unsupported'
+          : 'device-request-failed',
+      );
+      return false;
+    }
+  }
+
+  /**
    * Release all GPU and context resources. Fail-closed: clears CPU residency
    * (`items`/`recordTokens`/`tokenCount` reset, engine drops to cpu) and
    * subsequent `search()` throws; post-destroy `getStats()` reads 0/empty.
+   * Idempotent: double-destroy is safe and unsubscribes exactly once.
    */
   destroy(): void {
+    if (this.isDestroyed) {
+      return;
+    }
     this.isDestroyed = true;
     if (this.unsubscribeDeviceLost) {
       this.unsubscribeDeviceLost();
@@ -708,6 +810,10 @@ export class SearchIndex {
     this.tokenCount = 0;
     this.engineState = transitionEngineState(this.engineState, 'cpu', this.engineState.fallbackReason);
     this.vramAllocatedBytes = 0;
+  }
+
+  [Symbol.dispose](): void {
+    this.destroy();
   }
 }
 
