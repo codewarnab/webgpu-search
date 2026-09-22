@@ -46,7 +46,8 @@ import {
   clampLimit,
   throwIfAborted,
   abortError,
-  nowMs
+  nowMs,
+  assertValidMode
 } from './guard';
 import {
   normalizeCostBudgetOptions,
@@ -578,12 +579,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         "cpuScorer:'ufuzzy' is CPU-only; use preferGpu:false or cpuScorer:'exact'."
       );
     }
-    if (mode !== 'fuzzy' && mode !== 'substring' && mode !== 'token' && mode !== 'prefix') {
-      throw new IncompatibleOptionError(
-        'mode',
-        `Unknown search mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
-      );
-    }
+    assertValidMode(mode);
     // fail-closed option validation up front so malformed
     // token/prefix/typo shapes throw identically on GPU and CPU paths.
     // 'fuzzy' validates typo shape but ignores it (subsequence matching is

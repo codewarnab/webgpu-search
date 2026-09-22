@@ -1,6 +1,7 @@
 import uFuzzy from '@leeoniya/ufuzzy';
 import type { SearchResultItem } from './types';
 import { nowMs } from './guard';
+import { WebGPUSearchError } from './errors';
 
 export interface CPUSearchResult {
   query: string;
@@ -41,7 +42,10 @@ export class CPUEngine {
     try {
       [idxs, info, order] = this.ufuzzyInstance.search(strings, cleanQuery);
     } catch (err) {
-      console.warn('uFuzzy search error:', err);
+      const detail = err instanceof Error ? err.message : String(err);
+      const wrapped = new WebGPUSearchError(`[webgpu-search] uFuzzy search failed: ${detail}`);
+      (wrapped as unknown as { cause?: unknown }).cause = err;
+      throw wrapped;
     }
 
     const durationMs = nowMs() - t0;

@@ -15,8 +15,7 @@
  */
 
 import type { SearchResultItem, SearchMode, TieBreakerCriterion, TokenMatchOptions, PrefixSearchOptions, TypoToleranceOptions } from './types';
-import { clampLimit, nowMs } from './guard';
-import { IncompatibleOptionError } from './errors';
+import { assertValidMode, clampLimit, nowMs } from './guard';
 import {
   compareRanked,
   isExactTokenMatch,
@@ -262,12 +261,7 @@ export function scoreExactMatches(
   modeOptions?: CpuModeOptions
 ): ExactScorerOutput {
   const t0: number = nowMs();
-  if (mode !== 'substring' && mode !== 'fuzzy' && mode !== 'token' && mode !== 'prefix') {
-    throw new IncompatibleOptionError(
-      'mode',
-      `CPU reference encountered unknown mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
-    );
-  }
+  assertValidMode(mode);
   // Fail-closed option validation before scanning (invalid token/prefix/
   // typo shapes throw even when the corpus is empty).
   const opts: NormalizedModeOptions = normalizeModeOptions(modeOptions);
@@ -392,12 +386,7 @@ export function scoreExactMatchesMultiField(
   rankingOptions?: MultiFieldRankingOptions
 ): MultiFieldExactScorerOutput {
   const t0: number = nowMs();
-  if (mode !== 'substring' && mode !== 'fuzzy' && mode !== 'token' && mode !== 'prefix') {
-    throw new IncompatibleOptionError(
-      'mode',
-      `CPU reference encountered unknown mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
-    );
-  }
+  assertValidMode(mode);
   const opts: NormalizedModeOptions = normalizeModeOptions(modeOptions);
   if (mode === 'prefix' && queryTokens.length > 0) {
     assertPrefixLengthForQuery(opts.prefixOpts, queryTokens.length);

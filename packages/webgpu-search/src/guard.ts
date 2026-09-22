@@ -1,14 +1,43 @@
 /**
  * shared runtime guards.
  *
- * Single source of truth for limit clamping, abort errors, and wall-clock
- * reads so `search-index.ts`, `exact-scorer.ts`, and `webgpu-engine.ts`
+ * Single source of truth for limit clamping, abort errors, wall-clock
+ * reads, and search-mode validation so `search-index.ts`,
+ * `document-index.ts`, `exact-scorer.ts`, and `webgpu-engine.ts`
  * cannot drift. Portable: no DOM refs (Worker/Node/SSR safe).
  */
 
 import { RESULT_LIMIT_MAX } from './text-profile';
+import { IncompatibleOptionError } from './errors';
+import type { SearchMode } from './types';
 
 export const DEFAULT_LIMIT = 50;
+
+/**
+ * Shared set of valid search modes. Single source of truth for
+ * `assertValidMode()` so `search-index.ts`, `document-index.ts`,
+ * `webgpu-engine.ts`, and `exact-scorer.ts` cannot drift.
+ */
+export const VALID_SEARCH_MODES: ReadonlySet<SearchMode> = new Set<SearchMode>([
+  'fuzzy',
+  'substring',
+  'token',
+  'prefix',
+]);
+
+/**
+ * Throw `IncompatibleOptionError('mode')` unless `mode` is a valid search mode.
+ * Centralizes the `mode !== ...` chain previously duplicated across
+ * search-index, document-index, webgpu-engine, and exact-scorer.
+ */
+export function assertValidMode(mode: unknown): asserts mode is SearchMode {
+  if (!VALID_SEARCH_MODES.has(mode as SearchMode)) {
+    throw new IncompatibleOptionError(
+      'mode',
+      `Unknown search mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
+    );
+  }
+}
 
 /**
  * Clamp a caller-supplied limit to 1..RESULT_LIMIT_MAX.

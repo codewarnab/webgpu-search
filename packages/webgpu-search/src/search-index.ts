@@ -21,6 +21,7 @@ import {
   clampLimit,
   throwIfAborted,
   nowMs,
+  assertValidMode,
 } from './guard';
 import {
   normalizeCostBudgetOptions,
@@ -235,12 +236,7 @@ export class SearchIndex {
         `[webgpu-search] search expects query: string, got ${typeof query}.`,
       );
     }
-    if (mode !== 'fuzzy' && mode !== 'substring' && mode !== 'token' && mode !== 'prefix') {
-      throw new IncompatibleOptionError(
-        'mode',
-        `Unknown search mode '${String(mode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
-      );
-    }
+    assertValidMode(mode);
     // fail-closed option validation up front so malformed
     // token/prefix/typo shapes throw identically on GPU and CPU paths.
     // 'fuzzy' validates typo shape but ignores it (subsequence matching is

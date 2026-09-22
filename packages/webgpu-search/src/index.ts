@@ -180,6 +180,8 @@ export {
 export {
   clampLimit,
   DEFAULT_LIMIT,
+  VALID_SEARCH_MODES,
+  assertValidMode,
   abortError,
   nowMs,
   throwIfAborted,

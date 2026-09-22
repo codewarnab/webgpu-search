@@ -11,7 +11,7 @@ import {
 } from './dataset-packing';
 import { normalizeText } from './text-normalization';
 import { compareExactResults } from './exact-scorer';
-import { clampLimit, nowMs, throwIfAborted, abortError } from './guard';
+import { clampLimit, nowMs, throwIfAborted, abortError, assertValidMode } from './guard';
 import {
   PROFILE_TO_ENUM,
   QUERY_TOKENS_MAX,
@@ -635,16 +635,9 @@ export class WebGPUEngine {
 
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
     const rawMode = options.mode ?? 'fuzzy';
-    if (rawMode !== 'fuzzy' && rawMode !== 'substring' && rawMode !== 'token' && rawMode !== 'prefix') {
-      // Unified with hybrid/document/exact-scorer: unknown modes throw
-      // IncompatibleOptionError('mode'). Note: direct-engine callers that
-      // previously caught TypeError for mode:'token' now see
-      // IncompatibleOptionError (breaking detail, documented).
-      throw new IncompatibleOptionError(
-        'mode',
-        `Unknown search mode '${String(rawMode)}'. Expected 'fuzzy', 'substring', 'token', or 'prefix'.`
-      );
-    }
+    // Unified with hybrid/document/exact-scorer: unknown modes throw
+    // IncompatibleOptionError('mode') via the shared guard.
+    assertValidMode(rawMode);
     // WGSL shaders are exact-only ('fuzzy'/'substring'). Token and
     // prefix modes route to the CPU reference engine — the hybrid/document
     // indexes catch this and fall back with fallbackReason 'unsupported-mode'
