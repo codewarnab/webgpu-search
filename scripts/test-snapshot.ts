@@ -11,12 +11,20 @@ import {
   deleteIndexFromIDB,
   restoreIndexFromIDB,
   IncompatibleIndexError,
+  IncompatibleHookError,
+  ProfileMismatchError,
   LEGACY_SNAPSHOT_MAGIC,
   LEGACY_SNAPSHOT_VERSION,
   LEGACY_SNAPSHOT_HEADER_BYTES,
   SNAPSHOT_MAGIC,
   SNAPSHOT_FORMAT_VERSION,
   SNAPSHOT_HEADER_BYTES,
+  MAX_SNAPSHOT_SCHEMA_BYTES,
+  MAX_SNAPSHOT_COLUMNAR_BYTES,
+  MAX_SNAPSHOT_DOCS_BYTES,
+  MAX_SNAPSHOT_BYTES,
+  MAX_SNAPSHOT_DOC_COUNT,
+  MAX_SNAPSHOT_TOKEN_COUNT,
   DEFAULT_IDB_DATABASE_NAME,
   DEFAULT_SNAPSHOT_STORE_NAME,
   DEFAULT_DOCUMENT_STORE_NAME,
@@ -1237,6 +1245,330 @@ async function runSnapshotTests() {
       small.destroy();
     }
     console.log('   ✅ Size caps & JSON-safe encoding confirmed');
+  }
+
+  // =========================================================================
+  // 14. HookIds Restore Guard via Snapshot Path (missing / mismatched)
+  // =========================================================================
+  console.log('14. Testing hookIds restore guard (missing + mismatched → IncompatibleHookError)...');
+  {
+    function recencyBoost(doc: any, s: number) { return s + 1; }
+    (recencyBoost as any).hookId = 'recency-v1';
+    function otherBoost(doc: any, s: number) { return s + 2; }
+    (otherBoost as any).hookId = 'other-v1';
+    const hookDocs = [
+      { id: 'h-1', title: 'timeout alpha' },
+      { id: 'h-2', title: 'timeout beta' }
+    ];
+    const hookIndex = await DocumentIndex.create(hookDocs, {
+      fields: ['title'],
+      hooks: { scoringHook: recencyBoost as never }
+    });
+    const hookSnap = hookIndex.serialize();
+    const hookDecoded = decodeSnapshot(hookSnap);
+    assert.strictEqual(hookDecoded.schema.hookIds?.scoringHook, 'recency-v1');
+
+    // Missing handler → IncompatibleHookError (never IncompatibleIndexError).
+    await assert.rejects(
+      async () => restoreSnapshot(hookSnap),
+      (err: any) => err instanceof IncompatibleHookError && err.hookId === 'recency-v1'
+    );
+    // Mismatched hookId → IncompatibleHookError.
+    await assert.rejects(
+      async () => restoreSnapshot(hookSnap, {
+        options: { hooks: { scoringHook: otherBoost as never } }
+      }),
+      (err: any) => err instanceof IncompatibleHookError
+    );
+    // Matching handler restores with identical matches.
+    const hookRestored = await restoreSnapshot<typeof hookDocs[0]>(hookSnap, {
+      options: { hooks: { scoringHook: recencyBoost as never } }
+    });
+    assert.strictEqual(hookRestored.getStats().docCount, 2);
+    const hookRes = await hookRestored.search('timeout');
+    assert.strictEqual(hookRes.totalMatches, 2);
+    // Instance restore() enforces the same guard.
+    const hookDst = await DocumentIndex.create(hookDocs, { fields: ['title'] });
+    await assert.rejects(
+      async () => hookDst.restore(hookSnap),
+      (err: any) => err instanceof IncompatibleHookError
+    );
+    await hookDst.restore(hookSnap, {
+      options: { hooks: { scoringHook: recencyBoost as never } }
+    });
+    assert.strictEqual(hookDst.getStats().docCount, 2);
+    hookIndex.destroy();
+    hookRestored.destroy();
+    hookDst.destroy();
+    console.log('   ✅ hookIds restore guard confirmed');
+  }
+
+  // =========================================================================
+  // 15. Worker Serialize / Restore Version Guard (rehydrated errors)
+  // =========================================================================
+  console.log('15. Testing worker serialize/restore version guard...');
+  {
+    const { clientWorker } = createMockWorkerScope();
+    const workerClient = new SearchWorkerClient<{ id: string; title: string }>({
+      worker: clientWorker
+    });
+    await workerClient.init(
+      [
+        { id: 'w-1', title: 'worker version guard alpha' },
+        { id: 'w-2', title: 'worker version guard beta' }
+      ],
+      { fields: ['title'] }
+    );
+    const workerSnap = await workerClient.serialize();
+    assert(workerSnap instanceof ArrayBuffer);
+    assert.strictEqual(decodeSnapshotHeader(workerSnap).formatVersion, SNAPSHOT_FORMAT_VERSION);
+
+    // Corrupt magic across the worker boundary → rehydrated IncompatibleIndexError.
+    const badMagic = workerSnap.slice(0);
+    new DataView(badMagic).setUint32(0, 0x11223344, true);
+    const { clientWorker: cwBad } = createMockWorkerScope();
+    const badClient = new SearchWorkerClient({ worker: cwBad });
+    await assert.rejects(
+      async () => badClient.restore(badMagic),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Corrupt version across the worker boundary → rehydrated IncompatibleIndexError.
+    const badVer = workerSnap.slice(0);
+    new DataView(badVer).setUint32(4, 999, true);
+    await assert.rejects(
+      async () => badClient.restore(badVer),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Corrupt CRC payload across the worker boundary → IncompatibleIndexError.
+    const badCrc = workerSnap.slice(0);
+    new Uint8Array(badCrc)[60] ^= 0xff;
+    await assert.rejects(
+      async () => badClient.restore(badCrc),
+      (err: any) => err instanceof IncompatibleIndexError
+    );
+    // Oversize guard on the client (no worker round-trip): >512 MiB rejects.
+    assert.strictEqual(MAX_SNAPSHOT_BYTES, 512 << 20);
+    await assert.rejects(
+      async () => badClient.restore({ byteLength: MAX_SNAPSHOT_BYTES + 1 } as any),
+      (err: any) => err instanceof TypeError || err instanceof IncompatibleIndexError
+    );
+    await workerClient.destroy();
+    await badClient.destroy();
+    console.log('   ✅ Worker version guard confirmed');
+  }
+
+  // =========================================================================
+  // 16. Oversize Caps Across All MAX_SNAPSHOT_* (fail-closed, no OOM)
+  // =========================================================================
+  console.log('16. Testing oversize caps across all MAX_SNAPSHOT_*...');
+  {
+    assert.strictEqual(MAX_SNAPSHOT_SCHEMA_BYTES, 16 << 20);
+    assert.strictEqual(MAX_SNAPSHOT_COLUMNAR_BYTES, 64 << 20);
+    assert.strictEqual(MAX_SNAPSHOT_DOCS_BYTES, 256 << 20);
+    assert.strictEqual(MAX_SNAPSHOT_BYTES, 512 << 20);
+    assert.strictEqual(MAX_SNAPSHOT_DOC_COUNT, 10_000_000);
+    assert.strictEqual(MAX_SNAPSHOT_TOKEN_COUNT, 256_000_000);
+
+    const capIndex = await DocumentIndex.create([{ id: 'c-1', title: 'caps' }], { fields: ['title'] });
+    const capSnap = capIndex.serialize();
+    const DV = (b: ArrayBuffer) => new DataView(b);
+    // docsBytes cap (word@40): claim 300 MiB docs.
+    {
+      const buf = capSnap.slice(0);
+      DV(buf).setUint32(40, 300 << 20, true);
+      await assert.rejects(
+        async () => restoreSnapshot(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+    // docCount cap (word@20): claim 20M docs.
+    {
+      const buf = capSnap.slice(0);
+      DV(buf).setUint32(20, 20_000_000, true);
+      await assert.rejects(
+        async () => restoreSnapshot(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+    // tokenCount cap (word@28): claim 300M tokens.
+    {
+      const buf = capSnap.slice(0);
+      DV(buf).setUint32(28, 300_000_000, true);
+      await assert.rejects(
+        async () => restoreSnapshot(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+    // schema cap (word@36): claim 20 MiB schema (re-pins §13 via header word).
+    {
+      const buf = capSnap.slice(0);
+      DV(buf).setUint32(36, 20 << 20, true);
+      await assert.rejects(
+        async () => restoreSnapshot(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+    capIndex.destroy();
+    console.log('   ✅ All MAX_SNAPSHOT_* caps fail closed');
+  }
+
+  // =========================================================================
+  // 17. Profile Guards + Live-Format Semantics (never read under wrong profile)
+  // =========================================================================
+  console.log('17. Testing profile guards + live-format semantics...');
+  {
+    const { crc32Parts } = await import('../packages/webgpu-search/src/index');
+    const profDocs = [
+      { id: 'p-1', title: 'Profile guard alpha' },
+      { id: 'p-2', title: 'Profile guard beta' }
+    ];
+    const profIndex = await DocumentIndex.create(profDocs, { fields: ['title'] });
+    const profSnap = profIndex.serialize();
+
+    // Canonical restore reports live format 4.
+    const profRestored = await DocumentIndex.fromSnapshot(profSnap);
+    assert.strictEqual(profRestored.getStats().formatVersion, SNAPSHOT_FORMAT_VERSION);
+    assert.strictEqual(profRestored.getStats().formatVersion, 4);
+
+    // Explicit caseSensitive override disagreeing with the snapshot → ProfileMismatchError.
+    // Snapshot built case-insensitive (normalized true) → override true mismatches.
+    await assert.rejects(
+      async () => DocumentIndex.fromSnapshot(profSnap, { options: { caseSensitive: true } as any }),
+      (err: any) => err instanceof ProfileMismatchError && (err as any).property === 'caseSensitive'
+    );
+    // Matching override succeeds.
+    const profMatch = await DocumentIndex.fromSnapshot(profSnap, { options: { caseSensitive: false } as any });
+    assert.strictEqual(profMatch.getStats().docCount, 2);
+    profMatch.destroy();
+
+    // textProfile override mismatch → ProfileMismatchError.
+    await assert.rejects(
+      async () => DocumentIndex.fromSnapshot(profSnap, { options: { textProfile: 'other-profile' as any } as any }),
+      (err: any) => err instanceof ProfileMismatchError && (err as any).property === 'textProfile'
+    );
+
+    // Instance restore() cross-polarity → ProfileMismatchError (never reinterpret tokens).
+    const sensitiveLive = await DocumentIndex.create(profDocs, { fields: ['title'], caseSensitive: true });
+    await assert.rejects(
+      async () => sensitiveLive.restore(profSnap),
+      (err: any) => err instanceof ProfileMismatchError
+    );
+    // Instance restore() with agreeing polarity succeeds.
+    const insensitiveLive = await DocumentIndex.create(profDocs, { fields: ['title'], caseSensitive: false });
+    await insensitiveLive.restore(profSnap);
+    assert.strictEqual(insensitiveLive.getStats().docCount, 2);
+
+    // schema.caseSensitive / header.normalized disagreement → IncompatibleIndexError.
+    {
+      const header = decodeSnapshotHeader(profSnap);
+      const schemaLen = header.schemaByteLength;
+      const schemaBytes = new Uint8Array(profSnap, SNAPSHOT_HEADER_BYTES, schemaLen);
+      const schema = JSON.parse(new TextDecoder().decode(schemaBytes));
+      schema.caseSensitive = !schema.caseSensitive;
+      let schemaStr = JSON.stringify(schema);
+      // Length-preserving rewrite: flipping false<->true changes JSON length
+      // by 1, so pad with JSON-whitespace before the final `}` (parser-ignored).
+      if (schemaStr.length < schemaLen) {
+        const pad = ' '.repeat(schemaLen - schemaStr.length);
+        schemaStr = schemaStr.slice(0, -1) + pad + '}';
+      }
+      const rewritten = new TextEncoder().encode(schemaStr);
+      assert.strictEqual(rewritten.length, schemaLen, 'polarity flip must preserve schema length');
+      const buf = profSnap.slice(0);
+      new Uint8Array(buf, SNAPSHOT_HEADER_BYTES, schemaLen).set(rewritten);
+      const tBytes = header.tokenCount * 4;
+      const oBytes = (header.rowCount + 1) * 4;
+      const cLen = header.columnarByteLength ?? 0;
+      const crc = crc32Parts([
+        new Uint8Array(buf, 0, 52),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES, schemaLen),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + schemaLen, tBytes),
+        new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + schemaLen + tBytes, oBytes),
+        cLen > 0
+          ? new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + schemaLen + tBytes + oBytes, cLen)
+          : new Uint8Array(0),
+        header.docsByteLength > 0
+          ? new Uint8Array(buf, SNAPSHOT_HEADER_BYTES + schemaLen + tBytes + oBytes + cLen, header.docsByteLength)
+          : new Uint8Array(0)
+      ]);
+      new DataView(buf).setUint32(52, crc, true);
+      await assert.rejects(
+        async () => restoreSnapshot(buf),
+        (err: any) => err instanceof IncompatibleIndexError
+      );
+    }
+
+    // Legacy restore still reports live format 4 (not source version 3).
+    {
+      const legacyIndex = await DocumentIndex.create(profDocs, { fields: ['title'] });
+      const legacySnap = legacyIndex.serialize();
+      const snapHeader = decodeSnapshotHeader(legacySnap);
+      const snapDv = new DataView(legacySnap);
+      const profileEnum = snapDv.getUint32(8, true);
+      const unicodeEnum = snapDv.getUint32(12, true);
+      const scoringEnum = snapDv.getUint32(16, true);
+      const docCount = snapDv.getUint32(20, true);
+      const rowCount = snapDv.getUint32(24, true);
+      const tokenCount = snapDv.getUint32(28, true);
+      const normalizedVal = snapDv.getUint32(32, true);
+      const schemaLenL = snapDv.getUint32(36, true);
+      const docsLenL = snapDv.getUint32(40, true);
+      const schemaBytesL = new Uint8Array(legacySnap, SNAPSHOT_HEADER_BYTES, schemaLenL);
+      const tokensBytesL = new Uint8Array(legacySnap, SNAPSHOT_HEADER_BYTES + schemaLenL, tokenCount * 4);
+      const offsetsBytesL = new Uint8Array(
+        legacySnap,
+        SNAPSHOT_HEADER_BYTES + schemaLenL + tokenCount * 4,
+        (rowCount + 1) * 4
+      );
+      const docsBytesL = new Uint8Array(
+        legacySnap,
+        SNAPSHOT_HEADER_BYTES + schemaLenL + tokenCount * 4 + (rowCount + 1) * 4,
+        docsLenL
+      );
+      const legacyTotal = LEGACY_SNAPSHOT_HEADER_BYTES + schemaLenL + tokenCount * 4 + (rowCount + 1) * 4 + docsLenL;
+      const legacyBuf = new ArrayBuffer(legacyTotal);
+      const legacyDv = new DataView(legacyBuf);
+      legacyDv.setUint32(0, LEGACY_SNAPSHOT_MAGIC, true);
+      legacyDv.setUint32(4, LEGACY_SNAPSHOT_VERSION, true);
+      legacyDv.setUint32(8, profileEnum, true);
+      legacyDv.setUint32(12, unicodeEnum, true);
+      legacyDv.setUint32(16, scoringEnum, true);
+      legacyDv.setUint32(20, docCount, true);
+      legacyDv.setUint32(24, rowCount, true);
+      legacyDv.setUint32(28, tokenCount, true);
+      legacyDv.setUint32(32, normalizedVal, true);
+      legacyDv.setUint32(36, schemaLenL, true);
+      legacyDv.setUint32(40, docsLenL, true);
+      new Uint8Array(legacyBuf, LEGACY_SNAPSHOT_HEADER_BYTES, schemaLenL).set(schemaBytesL);
+      new Uint8Array(legacyBuf, LEGACY_SNAPSHOT_HEADER_BYTES + schemaLenL, tokensBytesL.length).set(tokensBytesL);
+      new Uint8Array(
+        legacyBuf,
+        LEGACY_SNAPSHOT_HEADER_BYTES + schemaLenL + tokensBytesL.length,
+        offsetsBytesL.length
+      ).set(offsetsBytesL);
+      new Uint8Array(
+        legacyBuf,
+        LEGACY_SNAPSHOT_HEADER_BYTES + schemaLenL + tokensBytesL.length + offsetsBytesL.length,
+        docsBytesL.length
+      ).set(docsBytesL);
+      const legacyCrc = crc32Parts([
+        new Uint8Array(legacyBuf, 0, 44),
+        new Uint8Array(legacyBuf, LEGACY_SNAPSHOT_HEADER_BYTES)
+      ]);
+      legacyDv.setUint32(44, legacyCrc, true);
+      const legacyRestored = await restoreSnapshot(legacyBuf);
+      assert.strictEqual(decodeSnapshotHeader(legacyBuf).formatVersion, LEGACY_SNAPSHOT_VERSION);
+      assert.strictEqual(legacyRestored.getStats().formatVersion, SNAPSHOT_FORMAT_VERSION);
+      assert.strictEqual(legacyRestored.getStats().formatVersion, 4);
+      legacyIndex.destroy();
+      legacyRestored.destroy();
+    }
+
+    profIndex.destroy();
+    profRestored.destroy();
+    sensitiveLive.destroy();
+    insensitiveLive.destroy();
+    console.log('   ✅ Profile guards + live-format semantics confirmed');
   }
 
   console.log('\n--- All Persistence Tests Passed Successfully! ✅ ---');

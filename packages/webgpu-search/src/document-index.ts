@@ -228,6 +228,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     }
     // Fail-closed: unknown powerPreference throws even on CPU-only paths.
     assertValidPowerPreference(options.powerPreference);
+    if (options.textProfile !== undefined && options.textProfile !== 'unicode-default') {
+      throw new ProfileMismatchError('unicode-default', options.textProfile, 'textProfile');
+    }
     this.options = options;
     this.normalized = !(options.caseSensitive ?? false);
     this.preferGpu = options.preferGpu ?? false;
@@ -2663,6 +2666,19 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
     options?: RestoreDocumentIndexOptions<TDoc>
   ): Promise<DocumentIndex<TDoc>> {
     const t0 = nowMs();
+    // Fail-closed profile guards (never read under the wrong profile).
+    // `textProfile` only admits 'unicode-default'; any other value throws
+    // `ProfileMismatchError`. An explicit `caseSensitive` override must agree
+    // with the snapshot polarity (`!header.normalized`); otherwise the
+    // retained token stream would be queried under the wrong normalization.
+    const rawTextProfile = (options?.options as { textProfile?: unknown } | undefined)?.textProfile;
+    if (rawTextProfile !== undefined && rawTextProfile !== 'unicode-default') {
+      throw new ProfileMismatchError('unicode-default', rawTextProfile, 'textProfile');
+    }
+    const overrideCase = options?.options?.caseSensitive;
+    if (overrideCase !== undefined && overrideCase === snapshot.header.normalized) {
+      throw new ProfileMismatchError(!snapshot.header.normalized, overrideCase, 'caseSensitive');
+    }
     // fail-closed custom filter-getter guard. Snapshot `hasGetter`
     // entries require a matching getter override; otherwise restore would
     // silently rebuild columnar via default `doc[name]` (presence cleared).
@@ -2794,6 +2810,24 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         'hooks',
         "[webgpu-search] extensions was removed; use hooks."
       );
+    }
+    // Fail-closed profile guards (never read under the wrong profile).
+    // The live index normalization is fixed at construction; a snapshot
+    // built under the opposite polarity must be rejected, not reinterpreted.
+    // An explicit `caseSensitive`/`textProfile` override must agree with both
+    // the live index and the snapshot.
+    const rawTextProfile = (options?.options as { textProfile?: unknown } | undefined)?.textProfile;
+    if (rawTextProfile !== undefined && rawTextProfile !== 'unicode-default') {
+      throw new ProfileMismatchError('unicode-default', rawTextProfile, 'textProfile');
+    }
+    const snapshotCaseSensitive = !snapshot.header.normalized;
+    const liveCaseSensitive = !this.normalized;
+    if (snapshotCaseSensitive !== liveCaseSensitive) {
+      throw new ProfileMismatchError(liveCaseSensitive, snapshotCaseSensitive, 'caseSensitive');
+    }
+    const overrideCaseApply = options?.options?.caseSensitive;
+    if (overrideCaseApply !== undefined && overrideCaseApply !== snapshotCaseSensitive) {
+      throw new ProfileMismatchError(snapshotCaseSensitive, overrideCaseApply, 'caseSensitive');
     }
     // fail-closed hook restore guard for instance `restore()`.
     // Restore-supplied handlers (if any) replace the live index hooks;

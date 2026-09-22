@@ -637,6 +637,17 @@ export function decodeSnapshot<TDoc = Record<string, unknown>>(
     }
   }
 
+  // Fail-closed schema/header profile agreement: `schema.caseSensitive`
+  // must be the inverse of `header.normalized` when present. Encode writes
+  // them consistently (`caseSensitive ?? !normalized`); a tampered or
+  // cross-profile snapshot claiming both polarities must never decode.
+  if (typeof (schema as { caseSensitive?: unknown }).caseSensitive === 'boolean') {
+    const schemaCase = (schema as { caseSensitive: boolean }).caseSensitive;
+    if (schemaCase !== !header.normalized) {
+      throw new IncompatibleIndexError(!header.normalized, schemaCase);
+    }
+  }
+
   // Fail-closed hookIds validation (declarative IDs only).
   if (schema.hookIds !== undefined) {
     if (typeof schema.hookIds !== 'object' || schema.hookIds === null || Array.isArray(schema.hookIds)) {
