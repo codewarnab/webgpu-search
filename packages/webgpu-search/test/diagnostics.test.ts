@@ -5,7 +5,7 @@
  * Covers budget validation (fail-closed), time/candidate enforcement
  * (`CostBudgetExceededError`), diagnostics telemetry shape and timing
  * buckets, filter selectivity, broad-query heuristic routing + warnings,
- * candidate overflow warnings, hybrid-index parity, and cross-platform
+ * candidate overflow warnings, search-index parity, and cross-platform
  * portability (zero unguarded DOM references).
  *
  * Run: bun test packages/webgpu-search/test/diagnostics.test.ts
@@ -544,7 +544,7 @@ describe('M7 portability', () => {
   test('zero unguarded DOM references in M7 modules', async () => {
     const files = [
       'packages/webgpu-search/src/diagnostics.ts',
-      'packages/webgpu-search/src/hybrid-index.ts',
+      'packages/webgpu-search/src/search-index.ts',
       'packages/webgpu-search/src/document-index.ts',
     ];
     for (const f of files) {
@@ -563,7 +563,7 @@ describe('M7 portability', () => {
       expect(stripped).not.toMatch(/(^|[^\w$.])window\s*[\.\[]/);
       expect(code.includes('localStorage')).toBe(false);
       expect(code.includes('sessionStorage')).toBe(false);
-      // hybrid-index.ts has pre-existing guarded `navigator.gpu` fallback
+      // search-index.ts has pre-existing guarded `navigator.gpu` fallback
       // detection (outside M7); assert every remaining navigator reference
       // is that guarded gpu probe, never unguarded DOM access.
       const navLines = stripped.split('\n').filter((line) => line.includes('navigator.'));

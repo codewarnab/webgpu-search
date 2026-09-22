@@ -651,10 +651,10 @@ async function runTests() {
   console.log('10. Auditing facet files for DOM references (window, document)...');
   {
     const filesToAudit = [
-      'packages/webgpu-search/src/facets/facet-engine.ts',
+      'packages/webgpu-search/src/faceting/facet-engine.ts',
       'packages/webgpu-search/src/document-index.ts',
       'packages/webgpu-search/src/exact-scorer.ts',
-      'packages/webgpu-search/src/filter/columnar-store.ts',
+      'packages/webgpu-search/src/filtering/columnar-store.ts',
     ];
     for (const filePath of filesToAudit) {
       const code = await readFile(filePath, 'utf-8');

@@ -427,9 +427,9 @@ async function runTests() {
   console.log('7. Auditing filter files for DOM references (window, document)...');
   {
     const filesToAudit = [
-      'packages/webgpu-search/src/filter/bitset.ts',
-      'packages/webgpu-search/src/filter/columnar-store.ts',
-      'packages/webgpu-search/src/filter/filter-evaluator.ts'
+      'packages/webgpu-search/src/filtering/doc-bitset.ts',
+      'packages/webgpu-search/src/filtering/columnar-store.ts',
+      'packages/webgpu-search/src/filtering/compile-filter.ts'
     ];
 
     for (const filePath of filesToAudit) {

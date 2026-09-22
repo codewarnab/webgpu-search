@@ -456,9 +456,9 @@ describe('M4 determinism + highlights + portability', () => {
 
   test('zero unguarded DOM references in M4 modules', async () => {
     const files = [
-      'packages/webgpu-search/src/modes/typo-distance.ts',
-      'packages/webgpu-search/src/modes/token-search.ts',
-      'packages/webgpu-search/src/modes/prefix-search.ts',
+      'packages/webgpu-search/src/search/typo-tolerance.ts',
+      'packages/webgpu-search/src/search/token-search.ts',
+      'packages/webgpu-search/src/search/prefix-search.ts',
       'packages/webgpu-search/src/cpu-reference.ts',
       'packages/webgpu-search/src/highlight.ts',
     ];

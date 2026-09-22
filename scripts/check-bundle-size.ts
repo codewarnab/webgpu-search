@@ -45,8 +45,8 @@
  * sourcemaps are excluded from the gate but must not ship to npm.
  *
  * (structured pre-filtering) columnar filter engine expansion:
- * Adds filter/bitset.ts (DocumentBitset), filter/columnar-store.ts (typed
- * columns + inverted indexes), filter/filter-evaluator.ts (AST compiler),
+ * Adds filtering/doc-bitset.ts (DocumentBitset), filtering/columnar-store.ts (typed
+ * columns + inverted indexes), filtering/compile-filter.ts (AST compiler),
  * plus filterFields plumbing in DocumentIndex, persistence schema, and
  * worker-client forwarding.
  * Baseline re-based to post- main (dist/index.js 234,907 B raw /
