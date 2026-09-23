@@ -139,6 +139,12 @@ code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums;
 .metric-sub { color: var(--faint); }
 #qb-chart { display: block; width: calc(100% - 36px); height: auto; margin: 4px 18px 14px; border: 1px solid #eeeee9; border-radius: 4px; background: #fff; }
 .qb-data-link-row { padding: 2px 18px 14px; font-size: 12px; }
+.qb-history { margin: 0 18px 14px; border: 1px solid #eeeee9; border-radius: 4px; background: #fcfcfa; }
+.qb-history[hidden] { display: none; }
+.qb-history summary { padding: 8px 10px; font-size: 12px; }
+.qb-history-count { color: var(--faint); font-family: var(--mono); font-size: 11px; }
+.qb-history-actions { padding: 0 10px 8px; }
+.qb-history .qb-list { margin: 0 10px 10px; }
 .qb-list { margin: 0 12px 12px; padding: 0; list-style: none; border: 1px solid #eeeee9; border-radius: 4px; background: #fff; }
 .qb-list li { overflow: hidden; padding: 7px 10px; border-bottom: 1px solid #f0f0ec; font: 11px var(--mono); color: #30343a; text-overflow: ellipsis; white-space: nowrap; }
 .qb-list li:last-child { border-bottom: 0; }

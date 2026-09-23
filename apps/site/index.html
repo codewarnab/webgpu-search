@@ -71,6 +71,11 @@
           <div id="qb-results" hidden>
             <svg id="qb-chart" role="img" aria-label="Median search latency comparison"></svg>
             <div class="qb-data-link-row"><a id="qb-data-link" href="corpus.html" target="_blank" rel="noopener">View generated data &amp; matches ↗</a></div>
+          <details id="qb-history-wrap" class="qb-history" hidden>
+            <summary>Past runs on this browser <span id="qb-history-count" class="qb-history-count"></span></summary>
+            <div class="qb-history-actions"><button id="qb-history-clear" class="button button-small" type="button">Clear history</button></div>
+            <ul id="qb-history-list" class="qb-list"></ul>
+          </details>
           </div>
           <div class="playground-bottom">
             <div class="metrics"><span id="qb-device">WebGPU has setup costs, so it may not win on every device.</span></div>

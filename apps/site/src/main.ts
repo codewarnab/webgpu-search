@@ -19,6 +19,41 @@ const qbFields = {
 const qbShareRow = document.querySelector<HTMLElement>('#qb-share-row');
 const qbShareStatus = document.querySelector<HTMLElement>('#qb-share-status');
 const qbGpuFlag = document.querySelector<HTMLElement>('#qb-gpu-flag');
+const qbHistoryWrap = document.querySelector<HTMLElement>('#qb-history-wrap');
+const qbHistoryList = document.querySelector<HTMLElement>('#qb-history-list');
+const qbHistoryCount = document.querySelector<HTMLElement>('#qb-history-count');
+const qbHistoryClear = document.querySelector<HTMLButtonElement>('#qb-history-clear');
+
+function renderHistory(): void {
+  if (!qbHistoryWrap || !qbHistoryList || !qbHistoryCount) return;
+  qbHistoryList.replaceChildren();
+  void import('./benchmark-history').then(history => {
+    const entries = history.loadHistory();
+    if (entries.length === 0) {
+      qbHistoryWrap!.hidden = true;
+      return;
+    }
+    qbHistoryWrap!.hidden = false;
+    qbHistoryCount!.textContent = `(${entries.length})`;
+    for (const entry of entries) {
+      const li = document.createElement('li');
+      const when = new Date(entry.at).toLocaleString();
+      li.textContent = entry.gpuRan
+        ? `${when} · ${(entry.corpusSize / 1000).toLocaleString()}k · GPU ${formatMs(entry.gpuMedianMs)} · CPU ${formatMs(entry.cpuMedianMs)} · ${entry.gpuTier}`
+        : `${when} · ${(entry.corpusSize / 1000).toLocaleString()}k · CPU-only ${formatMs(entry.cpuMedianMs)}`;
+      qbHistoryList!.append(li);
+    }
+  }).catch(() => {
+    // history chunk failed: benchmark itself is unaffected
+  });
+}
+
+qbHistoryClear?.addEventListener('click', () => {
+  void import('./benchmark-history').then(history => {
+    history.clearHistory();
+    renderHistory();
+  }).catch(() => {});
+});
 
 function renderGpuFlag(
   tier: { tier: string; confidence: string },
@@ -166,6 +201,12 @@ async function runHomepageBenchmark(): Promise<void> {
       `corpus.html?query=${encodeURIComponent(result.query)}&size=${result.corpusSize}`;
     qbPanel.hidden = false;
     qbStatus.textContent = 'Completed 7 timed searches per available engine.';
+    void import('./benchmark-history').then(history => {
+      history.saveRun(result);
+      renderHistory();
+    }).catch(() => {
+      renderHistory();
+    });
   } catch (error) {
     qbStatus.textContent = `Benchmark failed: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
@@ -176,6 +217,7 @@ async function runHomepageBenchmark(): Promise<void> {
 }
 
 qbRun?.addEventListener('click', () => { void runHomepageBenchmark(); });
+renderHistory();
 
 // Prefetch the benchmark chunk when its section scrolls into view so the
 // first Run click feels instant. Initial page load stays lean regardless.
