@@ -30,7 +30,7 @@
         <h1 id="hero-title">Find the right thing.<br /><span>Keep the UI fast.</span></h1>
         <p class="hero-copy">A small, portable search engine for large collections. Run fuzzy and substring search on WebGPU when it helps, with a CPU fallback when it doesn’t.</p>
         <div class="hero-actions">
-          <a class="button button-primary" href="#demo">Try the live demo <span aria-hidden="true">↗</span></a>
+          <a class="button button-primary" href="#benchmark">Try the live benchmark <span aria-hidden="true">↗</span></a>
           <a class="button" href="#examples">Explore example apps <span aria-hidden="true">↓</span></a>
         </div>
         <div class="hero-facts" aria-label="Product highlights">
@@ -51,33 +51,9 @@
         <p class="intro-note">Use the same API in browser apps, Web Workers, Node.js, and SSR. The library selects an execution path based on the device and search workload.</p>
       </section>
 
-      <section id="demo" class="section" aria-labelledby="demo-title">
-        <div class="section-head">
-          <div><div class="section-kicker">01 / Demo</div><h2 id="demo-title">Try a real search</h2></div>
-          <p>Runs locally in your browser on sample data — not a speed test.</p>
-        </div>
-        <div class="playground">
-          <div class="playground-top"><div class="playground-title">Sample file search</div><span class="preview-label">live</span></div>
-          <div class="search-controls demo-controls">
-            <div class="search-input-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input id="demo-query" class="search-input" type="search" value="auth" placeholder="Try auth, worker, or profile" aria-label="Search sample files" autocomplete="off" /></div>
-          </div>
-          <div class="result-summary"><span id="demo-status" aria-live="polite">Preparing local sample…</span><span>Top results · score high to low</span></div>
-          <div id="demo-results" class="result-list" aria-live="polite"></div>
-          <details class="corpus-note">
-            <summary>What am I searching? <span id="demo-corpus-count">18 sample project files</span></summary>
-            <ul id="demo-corpus"></ul>
-          </details>
-          <div class="playground-bottom">
-            <div class="metrics"><span>ENGINE <strong>CPU</strong></span><span>DATASET <strong>18 files</strong></span><span>WHERE <strong>This browser</strong></span></div>
-            <a class="button button-small" href="#benchmark">Run the benchmark ↓</a>
-          </div>
-          <div class="mock-footnote">Sample data — timings here are illustrative. The benchmark below measures real performance.</div>
-        </div>
-      </section>
-
       <section id="benchmark" class="section" aria-labelledby="benchmark-title">
         <div class="section-head">
-          <div><div class="section-kicker">02 / Benchmark</div><h2 id="benchmark-title">How fast is it here?</h2></div>
+          <div><div class="section-kicker">01 / Benchmark</div><h2 id="benchmark-title">How fast is it here?</h2></div>
           <p>Same generated records, same query — WebGPU against exact CPU. Nothing is uploaded.</p>
         </div>
         <div class="playground">
@@ -120,7 +96,7 @@ ProfileView renders user settings</textarea>
 
       <section id="examples" class="section" aria-labelledby="examples-title">
         <div class="section-head">
-          <div><div class="section-kicker">03 / Example apps</div><h2 id="examples-title">Try it in real interfaces</h2></div>
+          <div><div class="section-kicker">02 / Example apps</div><h2 id="examples-title">Try it in real interfaces</h2></div>
           <p>Three focused demos show how search can fit into familiar app patterns.</p>
         </div>
         <div class="app-grid">
@@ -147,7 +123,7 @@ ProfileView renders user settings</textarea>
 
       <section id="features" class="section" aria-labelledby="features-title">
         <div class="section-head">
-          <div><div class="section-kicker">04 / Built for product search</div><h2 id="features-title">Fast where it counts</h2></div>
+          <div><div class="section-kicker">03 / Built for product search</div><h2 id="features-title">Fast where it counts</h2></div>
           <p>GPU acceleration is one part of a practical search API — not a requirement for every query.</p>
         </div>
         <div class="feature-grid">
