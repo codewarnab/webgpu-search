@@ -75,6 +75,11 @@
           <div class="playground-bottom">
             <div class="metrics"><span id="qb-device">WebGPU has setup costs, so it may not win on every device.</span></div>
           </div>
+          <div id="qb-gpu-flag" class="gpu-flag" hidden></div>
+          <div id="qb-share-row" class="qb-share-row" hidden>
+            <button id="qb-share" class="button button-small" type="button">Share this untested result</button>
+            <span id="qb-share-status" class="qb-share-status" role="status" aria-live="polite"></span>
+          </div>
           <div class="mock-footnote" id="qb-note">CPU route: scoreExactMatches (webgpu-search exact scorer); uFuzzy via CPUEngine, Fuse.js defaults. Setup is excluded from warm-search timing.</div>
         </div>
       </section>

@@ -16,6 +16,115 @@ const qbFields = {
   dataLink: document.querySelector<HTMLAnchorElement>('#qb-data-link')
 };
 
+const qbShareRow = document.querySelector<HTMLElement>('#qb-share-row');
+const qbShareButton = document.querySelector<HTMLButtonElement>('#qb-share');
+const qbShareStatus = document.querySelector<HTMLElement>('#qb-share-status');
+const qbGpuFlag = document.querySelector<HTMLElement>('#qb-gpu-flag');
+
+function renderGpuFlag(
+  tier: { tier: string; confidence: string },
+  deviceLabel: string,
+  gpuRan: boolean
+): void {
+  if (!qbGpuFlag) return;
+  qbGpuFlag.hidden = true;
+  qbGpuFlag.replaceChildren();
+  qbGpuFlag.className = 'gpu-flag';
+  if (!gpuRan) return;
+  if (tier.tier === 'integrated') {
+    qbGpuFlag.hidden = false;
+    qbGpuFlag.classList.add('is-warn');
+    const title = document.createElement('strong');
+    title.textContent = '⚠ Integrated GPU — these numbers reflect the iGPU, not a discrete GPU.';
+    const hint = document.createElement('span');
+    hint.textContent =
+      'This device reported an integrated adapter. If you have a discrete GPU, Chrome likely used the same adapter as page compositing (powerPreference is only a hint).';
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'How to switch to the discrete GPU';
+    const list = document.createElement('ol');
+    for (const step of [
+      'Windows: Settings → System → Display → Graphics → add Chrome → High performance, then relaunch Chrome.',
+      'Verify at chrome://gpu that the discrete GPU is listed for WebGPU/Graphics.',
+      'Optional: enable chrome://flags/#force-high-performance-gpu and relaunch.',
+      'Run on AC power with Battery Saver off, update GPU drivers, then re-run.',
+      `Adapter: ${deviceLabel}`
+    ]) {
+      const li = document.createElement('li');
+      li.textContent = step;
+      list.append(li);
+    }
+    details.append(summary, list);
+    qbGpuFlag.append(title, hint, details);
+  } else if (tier.tier === 'software') {
+    qbGpuFlag.hidden = false;
+    qbGpuFlag.classList.add('is-warn');
+    const title = document.createElement('strong');
+    title.textContent = '⚠ Software renderer — not dedicated-GPU performance.';
+    qbGpuFlag.append(title);
+  } else if (tier.tier === 'unknown') {
+    qbGpuFlag.hidden = false;
+    const note = document.createElement('span');
+    note.textContent = 'GPU type could not be identified — treat this run as unqualified.';
+    qbGpuFlag.append(note);
+  }
+}
+
+async function armShareButton(result: {
+  adapter: unknown;
+  corpusSize: number;
+  mode: string;
+  gpuRan: boolean;
+}): Promise<void> {
+  if (!qbShareRow || !qbShareButton || !qbShareStatus) return;
+  qbShareRow.hidden = true;
+  qbShareStatus.textContent = '';
+  qbShareButton.disabled = false;
+  qbShareButton.textContent = 'Share this untested result';
+  if (!result.gpuRan) return; // CPU-only runs are not crowdsourced
+  try {
+    const share = await import('./benchmark-share');
+    const full = share.buildSharePayload(result as never);
+    if (share.alreadyShared(full.fingerprint)) {
+      qbShareRow.hidden = false;
+      qbShareStatus.textContent = 'Already shared from this browser. Thanks!';
+      qbShareButton.disabled = true;
+      return;
+    }
+    const known = await share.checkKnown(full.fingerprint);
+    if (known === true) return; // tested config: stay quiet
+    // known === false (untested) or null (backend unknown): offer opt-in share
+    qbShareRow.hidden = false;
+    if (known === false) {
+      qbShareStatus.textContent = 'Untested hardware — consider sharing it.';
+    }
+    qbShareButton.onclick = async () => {
+      qbShareButton.disabled = true;
+      qbShareStatus.textContent = 'Sharing…';
+      const res = await share.submitSharedResult(full);
+      if (res.unconfigured) {
+        qbShareStatus.textContent = 'Sharing is not enabled on this deployment yet.';
+        qbShareButton.disabled = false;
+        return;
+      }
+      if (res.ok && res.duplicate) {
+        qbShareStatus.textContent = 'Already in the dataset. Thanks!';
+        share.markShared(full.fingerprint);
+        return;
+      }
+      if (res.ok) {
+        qbShareStatus.textContent = 'Shared. Thanks!';
+        share.markShared(full.fingerprint);
+        return;
+      }
+      qbShareStatus.textContent = `Share failed: ${res.error ?? 'unknown error'}`;
+      qbShareButton.disabled = false;
+    };
+  } catch {
+    // share chunk failed to load: benchmark itself is unaffected
+  }
+}
+
 function renderQbChart(
   chart: SVGSVGElement,
   entries: Array<{ label: string; medianMs: number; matches: number }>
@@ -69,6 +178,8 @@ async function runHomepageBenchmark(): Promise<void> {
       if (qbStatus) qbStatus.textContent = message;
     });
     if (qbFields.device) qbFields.device.textContent = result.deviceLabel;
+    renderGpuFlag(result.gpuTier, result.deviceLabel, result.gpuRan);
+    void armShareButton(result);
     if (qbFields.chart) {
       const entries = [
         ...(result.gpuRan ? [{ label: 'WebGPU', medianMs: result.gpuMedianMs, matches: result.gpuMatches }] : []),

@@ -143,6 +143,8 @@ export class GpuDevicePool {
       let vendor = info.vendor || '';
       let device = info.device || '';
       let architecture = info.architecture || '';
+      const rawAdapterType =
+        typeof info.type === 'string' && info.type ? String(info.type) : undefined;
 
       if (!device && unmaskedRenderer) device = unmaskedRenderer;
       if (!vendor) {
@@ -168,6 +170,7 @@ export class GpuDevicePool {
         device,
         description: info.description || unmaskedRenderer || (typeof navigator !== 'undefined' ? navigator.userAgent : 'WebGPU Device'),
         renderer: unmaskedRenderer || device,
+        ...(rawAdapterType ? { adapterType: rawAdapterType } : {}),
         maxBufferSizeMB: Math.round(limits.maxBufferSize / (1024 * 1024)),
         maxStorageBindingSizeMB: Math.round(limits.maxStorageBufferBindingSize / (1024 * 1024)),
         maxComputeWorkgroupsPerDimension: limits.maxComputeWorkgroupsPerDimension,

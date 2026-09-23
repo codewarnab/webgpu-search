@@ -141,6 +141,13 @@ export interface AdapterInfo {
   device: string;
   description: string;
   renderer: string;
+  /**
+   * Raw `GPUAdapterInfo.type` passthrough when the browser exposes it
+   * ("discrete GPU" | "integrated GPU" | "CPU" | "unknown"). Absent on
+   * browsers that do not implement the non-standard attribute; use
+   * `classifyGpuTier` for a portable discrete/integrated/software verdict.
+   */
+  adapterType?: string;
   maxBufferSizeMB: number;
   maxStorageBindingSizeMB: number;
   maxComputeWorkgroupsPerDimension: number;

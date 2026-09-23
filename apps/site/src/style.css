@@ -153,6 +153,16 @@ code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums;
 .pager button:disabled { opacity: .45; cursor: default; }
 mark { background: #fff1b8; border-radius: 2px; padding: 0 1px; }
 .mock-footnote { padding: 9px 18px; background: #f8f7f3; color: #858890; font: 10px var(--mono); }
+.gpu-flag { display: flex; flex-direction: column; gap: 6px; margin: 0 18px 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; background: #fcfcfa; color: #555a62; font-size: 11px; }
+.gpu-flag[hidden] { display: none; }
+.gpu-flag.is-warn { border-color: #e8c547; background: #fff8e1; color: #5c4a00; }
+.gpu-flag strong { font-weight: 650; }
+.gpu-flag details { font-size: 11px; }
+.gpu-flag summary { cursor: pointer; color: var(--blue-dark); }
+.gpu-flag ol { margin: 6px 0 0; padding-left: 18px; }
+.qb-share-row { display: flex; align-items: center; gap: 10px; padding: 2px 18px 14px; }
+.qb-share-row[hidden] { display: none; }
+.qb-share-status { color: var(--muted); font: 11px var(--mono); }
 
 .feature-grid { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
 .feature-more-wrap { display: flex; justify-content: center; margin-top: 14px; }

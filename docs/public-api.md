@@ -199,7 +199,10 @@ contract. Prefer `SearchIndex` / `DocumentIndex` / `SearchWorkerClient`.
 (`scoreExactMatches`, `scoreFuzzyTokens`, `scoreSubstringTokens`,
 `scoreSubstringTypoTokens`, `scoreTokenTokens`, `scorePrefixTokens`, …),
 `transitionEngineState` / `initialEngineState` / `isWebGpuState`, worker
-protocol payloads (`Worker*Payload`, `SerializedWorkerError`).
+protocol payloads (`Worker*Payload`, `SerializedWorkerError`). GPU tier
+classification (`classifyGpuTier` + `GpuTier` / `GpuClassification`;
+portable string heuristics over `AdapterInfo`, prefers the native
+`adapterType` passthrough when present).
 
 Device acquisition must go through `WebGPUContextManager` / `GpuDevicePool`
 or an injected `options.device` — never bare `navigator.gpu.requestDevice()`

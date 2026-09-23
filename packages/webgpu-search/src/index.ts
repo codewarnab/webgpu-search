@@ -243,6 +243,14 @@ export {
   foldCodePoint,
 } from './case-fold-table';
 
+// GPU tier classification (discrete vs integrated vs software)
+export {
+  classifyGpuTier,
+  type GpuTier,
+  type GpuTierConfidence,
+  type GpuClassification,
+} from './gpu-classification';
+
 // Unicode-safe highlighting engine
 export {
   alignHighlights,

@@ -1,9 +1,12 @@
 import {
   CPUEngine,
+  classifyGpuTier,
   normalizeText,
   packDataset,
   scoreExactMatches,
   WebGPUEngine,
+  type AdapterInfo,
+  type GpuClassification,
   type SearchMode,
   type SearchResultItem
 } from 'webgpu-search';
@@ -29,6 +32,8 @@ export interface QuickBenchmarkResult {
   cpuMatches: number;
   agree: boolean;
   deviceLabel: string;
+  adapter: AdapterInfo | null;
+  gpuTier: GpuClassification;
   hits: SearchResultItem[];
   externals: ExternalEngineResult[];
   corpusSize: number;
@@ -200,6 +205,8 @@ export async function runQuickCompare(
       cpuMatches: cpuTotal,
       agree: gpuRan && resultsAgree(gpuLast, cpuLast, gpuTotal, cpuTotal),
       deviceLabel,
+      adapter: adapter ?? null,
+      gpuTier: classifyGpuTier(adapter ?? null),
       hits: (gpuRan ? gpuLast : cpuLast).slice(0, 6),
       externals,
       corpusSize: size,

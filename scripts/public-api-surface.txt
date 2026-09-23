@@ -99,6 +99,7 @@ broadSelectivityWarning
 candidateOverflowWarning
 checkMemoryBudget
 clampLimit
+classifyGpuTier
 codeTokenizer
 collectHookIds
 compareExactResults
