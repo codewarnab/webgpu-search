@@ -3,228 +3,248 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>High-Throughput 100k Log Viewer (WebGPU Search)</title>
+  <meta name="theme-color" content="#faf9f6" />
+  <meta name="description" content="Search structured logs instantly. Compare our fast search with popular libraries on the same logs." />
+  <title>Log search demo — webgpu-search</title>
   <link rel="stylesheet" href="./src/style.css" />
 </head>
 <body>
-  <header>
-    <div class="brand">
-      <span class="brand-icon">⚡</span>
-      <div class="brand-title">WebGPU High-Throughput Log Viewer</div>
-      <span id="engine-badge" class="badge-tag badge-gpu">WebGPU Ready</span>
-    </div>
-    <div class="header-actions">
-      <div class="dataset-presets">
-        <button id="btn-load-10k" class="btn">10k Logs</button>
-        <button id="btn-load-50k" class="btn">50k Logs</button>
-        <button id="btn-load-100k" class="btn btn-primary">100k Logs</button>
-      </div>
-      <div class="stream-actions">
-        <button id="btn-toggle-stream" class="btn">▶ Start Live Stream</button>
-      </div>
-      <div class="persistence-actions">
-        <button id="btn-save-idb" class="btn" title="Save snapshot to IndexedDB">💾 Save IDB</button>
-        <button id="btn-restore-idb" class="btn" title="Restore snapshot from IndexedDB">📂 Restore IDB</button>
-        <button id="btn-clear-idb" class="btn" title="Clear IndexedDB database">🗑️ Clear IDB</button>
-      </div>
-    </div>
+  <header class="topbar wrap">
+    <a class="brand" href="/" aria-label="webgpu-search home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3M8 10.8h5.6M10.8 8v5.6"></path></svg>
+      </span>
+      <span class="brand-name">webgpu-search</span><span class="brand-version">log demo</span>
+    </a>
+    <nav class="nav" aria-label="Main navigation">
+      <a href="/">Home</a>
+      <a href="/#benchmark">Benchmark</a>
+      <span id="engine-badge" class="badge badge-gpu">Fast mode on</span>
+    </nav>
   </header>
 
-  <!-- Telemetry HUD Cards -->
-  <div class="hud-bar">
-    <div class="hud-card">
-      <span class="hud-label">Logs Indexed</span>
-      <span id="hud-total-logs" class="hud-value">100,000</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">GPU Rows</span>
-      <span id="hud-gpu-rows" class="hud-value">400,000</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">Matches</span>
-      <span id="hud-matches" class="hud-value">0</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">Search Latency</span>
-      <span id="hud-latency" class="hud-value">0.00 ms</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">VRAM</span>
-      <span id="hud-vram" class="hud-value">0 MB</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">RAM (Tokens+Off)</span>
-      <span id="hud-ram" class="hud-value">0 MB</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">Mutation Epoch</span>
-      <span id="hud-epoch" class="hud-value">0</span>
-    </div>
-    <div class="hud-card">
-      <span class="hud-label">IDB Snapshot</span>
-      <span id="hud-idb" class="hud-value">None</span>
-    </div>
-  </div>
+  <main class="shell">
+    <section class="page-header">
+      <div class="eyebrow">Example · Log viewer</div>
+      <h1>Search 100k logs.</h1>
+      <p class="lede">Type to search structured logs. Switch the search engine to compare our fast search with popular libraries — same logs, same query, timed on your device.</p>
+    </section>
 
-  <!-- Search & Filter Controls -->
-  <div class="controls-bar">
-    <div class="search-input-wrap">
-      <span class="search-icon">🔍</span>
-      <input
-        type="text"
-        id="search-input"
-        class="search-input"
-        placeholder="Live search 100k logs across message, service, level, traceId (e.g. 'timeout', 'deadlock', 'auth')..."
-        autocomplete="off"
-        spellcheck="false"
-      />
+    <div class="toolbar" aria-label="Log actions">
+      <button id="btn-load-10k" class="btn" type="button">Show 10k logs</button>
+      <button id="btn-load-50k" class="btn" type="button">Show 50k logs</button>
+      <button id="btn-load-100k" class="btn btn-primary" type="button">Show 100k logs</button>
+      <button id="btn-toggle-stream" class="btn" type="button">Start live updates</button>
+      <button id="btn-save-idb" class="btn" type="button" title="Save a copy for offline use">Save for offline</button>
+      <button id="btn-restore-idb" class="btn" type="button" title="Open the saved offline copy">Open saved copy</button>
+      <button id="btn-clear-idb" class="btn" type="button" title="Delete the saved offline copy">Delete saved copy</button>
+      <p id="engine-hint" class="engine-hint">Our two modes return identical results. Popular libraries rank differently, so scores can’t be compared directly.</p>
     </div>
 
-    <div class="filter-group">
-      <div class="filter-item">
-        <label for="level-select">Level:</label>
-        <select id="level-select" class="select-ctrl">
-          <option value="ALL" selected>All Levels</option>
-          <option value="ERROR">ERROR</option>
-          <option value="WARN">WARN</option>
-          <option value="INFO">INFO</option>
-          <option value="DEBUG">DEBUG</option>
-        </select>
+    <div class="hud-bar" aria-label="Log statistics">
+      <div class="hud-card">
+        <span class="hud-label">Logs stored</span>
+        <span id="hud-total-logs" class="hud-value">10,000</span>
       </div>
-
-      <div class="filter-item">
-        <label for="service-select">Service:</label>
-        <select id="service-select" class="select-ctrl">
-          <option value="ALL" selected>All Services</option>
-          <option value="auth-service">auth-service</option>
-          <option value="api-gateway">api-gateway</option>
-          <option value="payment-gateway">payment-gateway</option>
-          <option value="gpu-indexer">gpu-indexer</option>
-          <option value="db-cluster">db-cluster</option>
-          <option value="cache-proxy">cache-proxy</option>
-          <option value="pipeline-worker">pipeline-worker</option>
-          <option value="search-engine">search-engine</option>
-        </select>
+      <div class="hud-card">
+        <span class="hud-label">Searchable rows</span>
+        <span id="hud-gpu-rows" class="hud-value">0</span>
       </div>
-
-      <div class="filter-item">
-        <label for="mode-select">Mode:</label>
-        <select id="mode-select" class="select-ctrl">
-          <option value="fuzzy" selected>Fuzzy (Weighted)</option>
-          <option value="substring">Substring (Exact)</option>
-          <option value="prefix">Prefix</option>
-          <option value="token">Token</option>
-        </select>
+      <div class="hud-card">
+        <span class="hud-label">Results found</span>
+        <span id="hud-matches" class="hud-value">0</span>
       </div>
-
-      <div class="filter-item">
-        <label for="engine-select">Target:</label>
-        <select id="engine-select" class="select-ctrl">
-          <option value="webgpu" selected>WebGPU</option>
-          <option value="cpu">CPU Reference</option>
-        </select>
+      <div class="hud-card">
+        <span class="hud-label">Search took</span>
+        <span id="hud-latency" class="hud-value">0.00 ms</span>
       </div>
-
-      <div class="filter-item">
-        <label for="worker-select">Thread:</label>
-        <select id="worker-select" class="select-ctrl">
-          <option value="worker" selected>Worker Client</option>
-          <option value="main">Main Thread</option>
-        </select>
+      <div class="hud-card">
+        <span class="hud-label">Graphics memory</span>
+        <span id="hud-vram" class="hud-value">0 B</span>
       </div>
-
-      <div class="filter-item">
-        <label for="latency-min">Lat ≥:</label>
-        <input type="number" id="latency-min" class="select-ctrl" placeholder="ms" min="0" style="width: 76px;" />
+      <div class="hud-card">
+        <span class="hud-label">Memory used</span>
+        <span id="hud-ram" class="hud-value">0 B</span>
       </div>
-
-      <div class="filter-item">
-        <label for="latency-max">Lat &lt;:</label>
-        <input type="number" id="latency-max" class="select-ctrl" placeholder="ms" min="0" style="width: 76px;" />
+      <div class="hud-card">
+        <span class="hud-label">Changes saved</span>
+        <span id="hud-epoch" class="hud-value">0</span>
       </div>
-
-      <div class="filter-item">
-        <label for="ts-from">From:</label>
-        <input type="datetime-local" id="ts-from" class="select-ctrl" />
-      </div>
-
-      <div class="filter-item">
-        <label for="ts-to">To:</label>
-        <input type="datetime-local" id="ts-to" class="select-ctrl" />
+      <div class="hud-card">
+        <span class="hud-label">Saved copy</span>
+        <span id="hud-idb" class="hud-value">No saved copy yet</span>
       </div>
     </div>
-  </div>
 
-  <!-- Facet Aggregation Panel -->
-  <div id="facet-bar" class="facet-bar" style="display: none;">
-    <div class="facet-group">
-      <span class="facet-title">Levels</span>
-      <div id="facet-levels" class="facet-chips"></div>
-    </div>
-    <div class="facet-group">
-      <span class="facet-title">Services</span>
-      <div id="facet-services" class="facet-chips"></div>
-    </div>
-    <div class="facet-group">
-      <span class="facet-title">Latency</span>
-      <div id="facet-latency" class="facet-chips"></div>
-    </div>
-  </div>
+    <div class="controls-bar">
+      <div class="search-input-wrap">
+        <span class="search-icon" aria-hidden="true">⌕</span>
+        <input
+          type="search"
+          id="search-input"
+          class="search-input"
+          placeholder="Search logs — try 'timeout', 'deadlock', or 'auth'…"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="Search logs"
+        />
+      </div>
 
-  <!-- Virtual Scrolling Data Grid -->
-  <div class="grid-container">
-    <div class="grid-header">
-      <div class="grid-cell col-id">ID</div>
-      <div class="grid-cell col-time">Timestamp</div>
-      <div class="grid-cell col-level">Level</div>
-      <div class="grid-cell col-service">Service</div>
-      <div class="grid-cell col-message">Message</div>
-      <div class="grid-cell col-trace">Trace ID</div>
-      <div class="grid-cell col-score">Score / Lat</div>
+      <div class="filter-group">
+        <div class="filter-item">
+          <label for="level-select">Severity</label>
+          <select id="level-select" class="select-ctrl">
+            <option value="ALL" selected>All severities</option>
+            <option value="ERROR">ERROR</option>
+            <option value="WARN">WARN</option>
+            <option value="INFO">INFO</option>
+            <option value="DEBUG">DEBUG</option>
+          </select>
+        </div>
+
+        <div class="filter-item">
+          <label for="service-select">Service</label>
+          <select id="service-select" class="select-ctrl">
+            <option value="ALL" selected>All services</option>
+            <option value="auth-service">auth-service</option>
+            <option value="api-gateway">api-gateway</option>
+            <option value="payment-gateway">payment-gateway</option>
+            <option value="gpu-indexer">gpu-indexer</option>
+            <option value="db-cluster">db-cluster</option>
+            <option value="cache-proxy">cache-proxy</option>
+            <option value="pipeline-worker">pipeline-worker</option>
+            <option value="search-engine">search-engine</option>
+          </select>
+        </div>
+
+        <div class="filter-item">
+          <label for="mode-select">How to match</label>
+          <select id="mode-select" class="select-ctrl">
+            <option value="fuzzy" selected>Forgiving — finds typos</option>
+            <option value="substring">Exact phrase — in order</option>
+            <option value="prefix">Starts with</option>
+            <option value="token">All words — any order</option>
+          </select>
+        </div>
+
+        <div class="filter-item">
+          <label for="engine-select">Search with</label>
+          <select id="engine-select" class="select-ctrl">
+            <option value="webgpu" selected>Our fast search (recommended)</option>
+            <option value="cpu">Our thorough search (same results)</option>
+            <option value="ufuzzy">uFuzzy — popular fuzzy library</option>
+            <option value="fuse">Fuse.js — popular fuzzy library</option>
+            <option value="native">Simple scan — slowest, for reference</option>
+          </select>
+        </div>
+
+        <div class="filter-item">
+          <label for="worker-select">Run search</label>
+          <select id="worker-select" class="select-ctrl">
+            <option value="worker" selected>In background — typing stays smooth</option>
+            <option value="main">On this page — may pause typing</option>
+          </select>
+        </div>
+
+        <div class="filter-item">
+          <label for="latency-min">Slowest (ms)</label>
+          <input type="number" id="latency-min" class="select-ctrl" placeholder="ms" min="0" style="width: 76px;" aria-label="Slowest response time in milliseconds" />
+        </div>
+
+        <div class="filter-item">
+          <label for="latency-max">Under (ms)</label>
+          <input type="number" id="latency-max" class="select-ctrl" placeholder="ms" min="0" style="width: 76px;" aria-label="Only show logs under this response time in milliseconds" />
+        </div>
+
+        <div class="filter-item">
+          <label for="ts-from">Start date</label>
+          <input type="datetime-local" id="ts-from" class="select-ctrl" aria-label="Start date" />
+        </div>
+
+        <div class="filter-item">
+          <label for="ts-to">End date</label>
+          <input type="datetime-local" id="ts-to" class="select-ctrl" aria-label="End date" />
+        </div>
+      </div>
     </div>
 
-    <div id="grid-viewport" class="grid-viewport">
-      <!-- Virtual rows rendered here -->
+    <div id="facet-bar" class="facet-bar" style="display: none;">
+      <div class="facet-group">
+        <span class="facet-title">Levels</span>
+        <div id="facet-levels" class="facet-chips"></div>
+      </div>
+      <div class="facet-group">
+        <span class="facet-title">Services</span>
+        <div id="facet-services" class="facet-chips"></div>
+      </div>
+      <div class="facet-group">
+        <span class="facet-title">Latency</span>
+        <div id="facet-latency" class="facet-chips"></div>
+      </div>
     </div>
-  </div>
 
-  <!-- Detail Drawer for Inspecting Log -->
-  <div id="detail-drawer" class="detail-drawer">
-    <div class="drawer-header">
-      <span class="brand-title">Log Record Details</span>
-      <button id="btn-close-drawer" class="btn">✕</button>
-    </div>
-    <div class="drawer-body">
-      <div class="meta-field">
-        <span class="meta-key">Log ID</span>
-        <span id="detail-id" class="meta-val">-</span>
+    <div class="grid-container">
+      <div class="grid-header" aria-hidden="true">
+        <div class="grid-cell col-id">ID</div>
+        <div class="grid-cell col-time">Time</div>
+        <div class="grid-cell col-level">Severity</div>
+        <div class="grid-cell col-service">Service</div>
+        <div class="grid-cell col-message">Message</div>
+        <div class="grid-cell col-trace">Trace</div>
+        <div class="grid-cell col-score">Relevance</div>
       </div>
-      <div class="meta-field">
-        <span class="meta-key">Timestamp</span>
-        <span id="detail-time" class="meta-val">-</span>
-      </div>
-      <div class="meta-field">
-        <span class="meta-key">Level</span>
-        <span id="detail-level" class="meta-val">-</span>
-      </div>
-      <div class="meta-field">
-        <span class="meta-key">Service</span>
-        <span id="detail-service" class="meta-val">-</span>
-      </div>
-      <div class="meta-field">
-        <span class="meta-key">Message</span>
-        <span id="detail-message" class="meta-val">-</span>
-      </div>
-      <div class="meta-field">
-        <span class="meta-key">Trace ID</span>
-        <span id="detail-trace" class="meta-val">-</span>
-      </div>
-      <div class="meta-field">
-        <span class="meta-key">Latency</span>
-        <span id="detail-latency" class="meta-val">-</span>
+
+      <div id="grid-viewport" class="grid-viewport" aria-live="polite">
       </div>
     </div>
-  </div>
+
+    <div id="detail-drawer" class="detail-drawer" role="dialog" aria-label="Log details">
+      <div class="drawer-header">
+        <span class="brand-title">Log details</span>
+        <button id="btn-close-drawer" class="btn" type="button">Close</button>
+      </div>
+      <div class="drawer-body">
+        <div class="meta-field">
+          <span class="meta-key">Log ID</span>
+          <span id="detail-id" class="meta-val">-</span>
+        </div>
+        <div class="meta-field">
+          <span class="meta-key">Timestamp</span>
+          <span id="detail-time" class="meta-val">-</span>
+        </div>
+        <div class="meta-field">
+          <span class="meta-key">Severity</span>
+          <span id="detail-level" class="meta-val">-</span>
+        </div>
+        <div class="meta-field">
+          <span class="meta-key">Service</span>
+          <span id="detail-service" class="meta-val">-</span>
+        </div>
+        <div class="meta-field">
+          <span class="meta-key">Message</span>
+          <span id="detail-message" class="meta-val">-</span>
+        </div>
+        <div class="meta-field">
+          <span class="meta-key">Trace ID</span>
+          <span id="detail-trace" class="meta-val">-</span>
+        </div>
+        <div class="meta-field">
+          <span class="meta-key">Response time</span>
+          <span id="detail-latency" class="meta-val">-</span>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="footer-inner wrap">
+      <span>webgpu-search · WebGPU when it helps, CPU when it should.</span>
+      <nav class="footer-links" aria-label="Footer navigation">
+        <a href="/">Home</a>
+        <a href="/#benchmark">Benchmark</a>
+      </nav>
+    </div>
+  </footer>
 
   <script type="module" src="./src/main.ts"></script>
 </body>

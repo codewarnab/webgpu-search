@@ -1,3 +1,5 @@
+import { CPUEngine } from 'webgpu-search';
+import Fuse from 'fuse.js';
 import { PaletteEngine } from './palette-engine';
 import { generateMonacoRecords, CORE_FILES } from './sample-data';
 import type { MonacoFileRecord, MonacoPaletteSearchResult } from './types';
@@ -17,6 +19,7 @@ const suggestList = document.getElementById('suggest-list') as HTMLDivElement;
 const facetBar = document.getElementById('facet-bar') as HTMLDivElement;
 const facetList = document.getElementById('facet-list') as HTMLDivElement;
 const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement;
+const engineHint = document.getElementById('engine-hint') as HTMLParagraphElement | null;
 
 // Preview Elements
 const previewTitle = document.getElementById('preview-title') as HTMLDivElement;
@@ -52,10 +55,30 @@ let activeResults: MonacoPaletteSearchResult[] = [];
 let selectedIndex = 0;
 let currentAbortController: AbortController | null = null;
 
+type EngineChoice = 'webgpu' | 'cpu' | 'ufuzzy' | 'fuse' | 'native';
+
 const engine = new PaletteEngine({
   useWorker: true,
   preferGpu: true
 });
+const cpuEngine = new CPUEngine();
+
+function currentEngine(): EngineChoice {
+  const value = engineSelect.value;
+  if (value === 'cpu' || value === 'ufuzzy' || value === 'fuse' || value === 'native') return value;
+  return 'webgpu';
+}
+
+function isCompetitor(choice: EngineChoice): boolean {
+  return choice === 'ufuzzy' || choice === 'fuse' || choice === 'native';
+}
+
+function competitorLabel(choice: EngineChoice): string {
+  if (choice === 'ufuzzy') return 'uFuzzy — popular library';
+  if (choice === 'fuse') return 'Fuse.js — popular library';
+  if (choice === 'native') return 'Simple scan — slowest';
+  return '';
+}
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
@@ -84,13 +107,45 @@ function sanitizeHighlighted(html: string): string {
     .replace(/&lt;\/mark&gt;/g, '</mark>');
 }
 
+/** Plain-English field names for "Found in …". */
+function friendlyField(raw: string): string {
+  const key = raw.trim().toLowerCase();
+  if (key === 'filename') return 'File name';
+  if (key === 'symbols') return 'Exported names';
+  if (key === 'path') return 'File location';
+  if (key === 'description') return 'Summary';
+  if (key === 'type') return 'File type';
+  if (key === 'language') return 'Language';
+  if (key === 'best match') return 'Best match';
+  return raw || 'File';
+}
+
 /** Guarded select assignment: unknown facet values reset to ALL. */
 function setSelectGuarded(sel: HTMLSelectElement, value: string): void {
   const exists = Array.from(sel.options).some((o) => o.value === value);
   sel.value = exists ? value : 'ALL';
 }
 
+function setBadgeForCompetitor(choice: EngineChoice): void {
+  engineBadge.textContent = competitorLabel(choice);
+  engineBadge.className = 'badge badge-cpu';
+}
+
 async function updateTelemetry(): Promise<void> {
+  const choice = currentEngine();
+  if (isCompetitor(choice)) {
+    const stats = await engine.getStats().catch(() => null);
+    if (stats) {
+      statRecords.textContent = stats.docCount.toLocaleString();
+      statRows.textContent = stats.rowCount.toLocaleString();
+      statVram.textContent = formatBytes(stats.memory.vramBytes);
+      statRam.textContent = formatBytes(stats.memory.ramBytes);
+      statEpoch.textContent = String(stats.mutationEpoch);
+    }
+    setBadgeForCompetitor(choice);
+    return;
+  }
+
   const stats = await engine.getStats();
   if (!stats) return;
 
@@ -101,21 +156,37 @@ async function updateTelemetry(): Promise<void> {
   statEpoch.textContent = String(stats.mutationEpoch);
 
   if (stats.engine === 'webgpu') {
-    engineBadge.textContent = 'WebGPU Active';
+    engineBadge.textContent = 'Fast mode on';
     engineBadge.className = 'badge badge-gpu';
   } else {
-    engineBadge.textContent = `CPU Fallback (${stats.fallbackReason || 'prefer-cpu'})`;
+    engineBadge.textContent = 'Standard mode — same results';
     engineBadge.className = 'badge badge-cpu';
   }
 }
 
+function updateEngineHint(): void {
+  if (!engineHint) return;
+  const choice = currentEngine();
+  if (choice === 'ufuzzy' || choice === 'fuse') {
+    engineHint.textContent = "Popular libraries use their own matching — “How to match” is ignored and scores can’t be compared with ours.";
+  } else if (choice === 'native') {
+    engineHint.textContent = "Simple scan looks for exact words only — it is the slowest option and ignores “How to match”.";
+  } else {
+    engineHint.textContent = "Our two modes return identical results. Popular libraries rank differently, so scores can’t be compared directly.";
+  }
+  workerSelect.disabled = isCompetitor(choice);
+  workerSelect.title = isCompetitor(choice)
+    ? 'Background mode only applies to our search, not popular libraries.'
+    : '';
+}
+
 function updatePreview(record: MonacoFileRecord | null): void {
   if (!record) {
-    previewTitle.textContent = 'Select a file to inspect';
-    previewMeta.textContent = 'Path and symbols overview';
+    previewTitle.textContent = 'Click a file to read more';
+    previewMeta.textContent = 'File, language and size appear here';
     previewDesc.textContent = '-';
     previewSymbols.textContent = '-';
-    previewCode.textContent = '// Select a file from the list';
+    previewCode.textContent = '// Code preview appears here';
     return;
   }
 
@@ -147,10 +218,10 @@ function renderResults(): void {
   if (activeResults.length === 0) {
     const li = document.createElement('li');
     li.className = 'result-item';
-    li.style.color = 'var(--text-muted)';
+    li.style.color = 'var(--muted)';
     li.style.textAlign = 'center';
     li.style.padding = '32px 16px';
-    li.textContent = searchInput.value.trim() ? 'No matching files or symbols found.' : 'Type to search...';
+    li.textContent = searchInput.value.trim() ? 'No files match. Try fewer or different words.' : 'Type above to search the files.';
     resultsList.appendChild(li);
     updatePreview(null);
     return;
@@ -174,8 +245,8 @@ function renderResults(): void {
           <span class="item-filename">${highlightedFilename}</span>
         </div>
         <div class="item-right">
-          <span class="field-badge">match: ${escapeHtml(res.matchedField)}</span>
-          <span class="score-badge">${res.score}</span>
+          <span class="field-badge">Found in ${escapeHtml(friendlyField(res.matchedField))}</span>
+          <span class="score-badge">Relevance ${res.score}</span>
         </div>
       </div>
       <div class="item-path">${highlightedPath}</div>
@@ -214,11 +285,13 @@ function renderSuggestions(suggestions: Array<{ text: string; score: number }>):
     suggestBar.style.display = 'none';
     return;
   }
-  suggestBar.style.display = 'block';
+  suggestBar.style.display = 'flex';
   for (const s of suggestions) {
     const chip = document.createElement('button');
     chip.className = 'suggest-chip';
-    chip.textContent = `${s.text} (${s.score})`;
+    chip.type = 'button';
+    chip.textContent = s.text;
+    chip.title = 'Click to search this suggestion';
     chip.addEventListener('click', () => {
       searchInput.value = s.text;
       performSearch();
@@ -234,17 +307,131 @@ function renderFacets(facets: Record<string, any> | undefined): void {
     facetBar.style.display = 'none';
     return;
   }
-  facetBar.style.display = 'block';
+  facetBar.style.display = 'flex';
   for (const b of byType.buckets) {
     const chip = document.createElement('button');
     chip.className = 'facet-chip';
-    chip.textContent = `${String(b.value)} · ${b.count}`;
+    chip.type = 'button';
+    chip.textContent = `${String(b.value)} · ${Number(b.count).toLocaleString()} files`;
+    chip.title = `Show only ${String(b.value)} files`;
     chip.addEventListener('click', () => {
       setSelectGuarded(typeSelect, String(b.value));
       performSearch();
     });
     facetList.appendChild(chip);
   }
+}
+
+function getFilteredRecords(typeFilter: string, languageFilter: string): MonacoFileRecord[] {
+  return engine.getRecords().filter((r) =>
+    (typeFilter === 'ALL' || r.type === typeFilter) &&
+    (languageFilter === 'ALL' || r.language === languageFilter)
+  );
+}
+
+function facetsForRecords(docs: MonacoFileRecord[]): Record<string, any> | undefined {
+  const counts = new Map<string, number>();
+  for (const d of docs) counts.set(d.type, (counts.get(d.type) ?? 0) + 1);
+  const buckets = [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+  if (buckets.length === 0) return undefined;
+  return { byType: { type: 'terms', buckets } };
+}
+
+/** Popular-library search over the same files. Scores use each library's own ranking. */
+async function searchCompetitor(
+  query: string,
+  choice: EngineChoice,
+  typeFilter: string,
+  languageFilter: string,
+  limit: number
+): Promise<{ results: MonacoPaletteSearchResult[]; totalMatches: number; durationMs: number; facets: Record<string, any> | undefined }> {
+  const filtered = getFilteredRecords(typeFilter, languageFilter);
+  const clean = query.trim();
+  if (!clean) {
+    const docs = filtered.slice(0, limit);
+    return {
+      results: docs.map((doc, i) => ({ id: doc.id, score: Math.max(1, 50 - i), matchedField: 'Best match', doc })),
+      totalMatches: filtered.length,
+      durationMs: 0,
+      facets: facetsForRecords(filtered)
+    };
+  }
+
+  if (choice === 'ufuzzy') {
+    const strings = filtered.map((r) => `${r.filename} ${r.symbols} ${r.path} ${r.description}`);
+    const t0 = performance.now();
+    const out = cpuEngine.searchWithUFuzzy(strings, clean, limit);
+    const durationMs = performance.now() - t0;
+    const results: MonacoPaletteSearchResult[] = out.results
+      .map((item) => filtered[item.index])
+      .filter((doc): doc is MonacoFileRecord => Boolean(doc))
+      .map((doc) => ({
+        id: doc.id,
+        score: 0,
+        matchedField: 'Best match',
+        doc
+      }));
+    // Reuse uFuzzy's own order; keep its rank scores for display honesty.
+    out.results.forEach((item, i) => {
+      if (results[i]) results[i].score = item.score;
+    });
+    const matchedDocs = out.results
+      .map((item) => filtered[item.index])
+      .filter((doc): doc is MonacoFileRecord => Boolean(doc));
+    return { results, totalMatches: out.totalMatches, durationMs, facets: facetsForRecords(matchedDocs) };
+  }
+
+  if (choice === 'fuse') {
+    const fuse = new Fuse(filtered, {
+      keys: [
+        { name: 'filename', weight: 2 },
+        { name: 'symbols', weight: 1.5 },
+        { name: 'path', weight: 1 }
+      ],
+      threshold: 0.4,
+      ignoreLocation: true,
+      includeScore: true
+    });
+    const t0 = performance.now();
+    const found = fuse.search(clean);
+    const durationMs = performance.now() - t0;
+    const results: MonacoPaletteSearchResult[] = found.slice(0, limit).map((hit, i) => {
+      const relevance = hit.score === undefined
+        ? Math.max(1, 90 - i)
+        : Math.max(1, Math.round((1 - Math.min(1, hit.score)) * 100));
+      return {
+        id: hit.item.id,
+        score: relevance,
+        matchedField: 'Best match',
+        doc: hit.item
+      };
+    });
+    return {
+      results,
+      totalMatches: found.length,
+      durationMs,
+      facets: facetsForRecords(found.map((hit) => hit.item))
+    };
+  }
+
+  // native: simple exact-word scan for reference
+  const t0 = performance.now();
+  const q = clean.toLowerCase();
+  const matched = filtered.filter((r) =>
+    `${r.filename} ${r.symbols} ${r.path} ${r.description}`.toLowerCase().includes(q)
+  );
+  const durationMs = performance.now() - t0;
+  const results: MonacoPaletteSearchResult[] = matched.slice(0, limit).map((doc, i) => {
+    const hayFilename = doc.filename.toLowerCase();
+    const haySymbols = doc.symbols.toLowerCase();
+    const hayPath = doc.path.toLowerCase();
+    const field = hayFilename.includes(q) ? 'File name' : haySymbols.includes(q) ? 'Exported names' : hayPath.includes(q) ? 'File location' : 'Summary';
+    return { id: doc.id, score: Math.max(1, 80 - i), matchedField: field, doc };
+  });
+  return { results, totalMatches: matched.length, durationMs, facets: facetsForRecords(matched) };
 }
 
 async function performSearch(): Promise<void> {
@@ -260,6 +447,26 @@ async function performSearch(): Promise<void> {
   const withSuggest = suggestToggle.checked;
   const typeFilter = typeSelect.value;
   const languageFilter = langSelect.value;
+  const choice = currentEngine();
+  updateEngineHint();
+
+  if (isCompetitor(choice)) {
+    setBadgeForCompetitor(choice);
+    try {
+      const res = await searchCompetitor(query, choice, typeFilter, languageFilter, 50);
+      activeResults = res.results;
+      selectedIndex = 0;
+      statMatches.textContent = res.totalMatches.toLocaleString();
+      statLatency.textContent = `${res.durationMs.toFixed(2)} ms`;
+      renderSuggestions([]);
+      renderFacets(res.facets);
+      renderResults();
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return;
+      console.error('[Search Error]', err);
+    }
+    return;
+  }
 
   try {
     const searchRes = await engine.search(query, {
@@ -280,6 +487,7 @@ async function performSearch(): Promise<void> {
     renderSuggestions(searchRes.suggestions ?? []);
     renderFacets(searchRes.facets);
     renderResults();
+    await updateTelemetry();
   } catch (err: any) {
     if (err?.name === 'AbortError') return;
     console.error('[Search Error]', err);
@@ -329,9 +537,15 @@ typeSelect.addEventListener('change', () => performSearch());
 langSelect.addEventListener('change', () => performSearch());
 
 engineSelect.addEventListener('change', async () => {
-  const preferGpu = engineSelect.value === 'webgpu';
-  await engine.setPreferGpu(preferGpu);
-  await updateTelemetry();
+  const choice = currentEngine();
+  updateEngineHint();
+  if (choice === 'webgpu' || choice === 'cpu') {
+    await engine.setPreferGpu(choice === 'webgpu');
+    await updateTelemetry();
+  } else {
+    setBadgeForCompetitor(choice);
+    await updateTelemetry();
+  }
   await performSearch();
 });
 
@@ -343,13 +557,20 @@ workerSelect.addEventListener('change', async () => {
 });
 
 // Modal Actions
+function closeModal(): void {
+  addModal.style.display = 'none';
+}
 btnAddModal.addEventListener('click', () => {
   addModal.style.display = 'flex';
   formFilename.focus();
 });
 
-btnModalCancel.addEventListener('click', () => {
-  addModal.style.display = 'none';
+btnModalCancel.addEventListener('click', closeModal);
+addModal.addEventListener('click', (e) => {
+  if (e.target === addModal) closeModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && addModal.style.display === 'flex') closeModal();
 });
 
 btnModalSave.addEventListener('click', async () => {
@@ -373,7 +594,7 @@ btnModalSave.addEventListener('click', async () => {
     };
 
     await engine.addRecord(newDoc);
-    addModal.style.display = 'none';
+    closeModal();
     formFilename.value = '';
     formPath.value = '';
     formSymbols.value = '';
@@ -387,14 +608,19 @@ btnModalSave.addEventListener('click', async () => {
 });
 
 btnBatchAdd.addEventListener('click', async () => {
-  const newRecords = generateMonacoRecords(200).map((r, i) => ({
-    ...r,
-    id: `batch-${Date.now()}-${i}`
-  }));
+  btnBatchAdd.disabled = true;
+  try {
+    const newRecords = generateMonacoRecords(200).map((r, i) => ({
+      ...r,
+      id: `batch-${Date.now()}-${i}`
+    }));
 
-  await engine.batchAdd(newRecords);
-  await updateTelemetry();
-  await performSearch();
+    await engine.batchAdd(newRecords);
+    await updateTelemetry();
+    await performSearch();
+  } finally {
+    btnBatchAdd.disabled = false;
+  }
 });
 
 btnReset.addEventListener('click', async () => {
@@ -406,6 +632,7 @@ btnReset.addEventListener('click', async () => {
 
 // Initialize
 async function bootstrap(): Promise<void> {
+  updateEngineHint();
   await engine.init(records);
   await updateTelemetry();
   await performSearch();

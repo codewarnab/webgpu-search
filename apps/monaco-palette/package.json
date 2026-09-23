@@ -11,6 +11,7 @@
     "test": "tsc --noEmit"
   },
   "dependencies": {
+    "fuse.js": "^7.5.0",
     "webgpu-search": "workspace:*"
   },
   "devDependencies": {

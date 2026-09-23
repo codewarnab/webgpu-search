@@ -139,7 +139,7 @@ export class VirtualGrid {
     if (totalCount === 0) {
       this.topSpacer.style.height = '0px';
       this.bottomSpacer.style.height = '0px';
-      this.rowsContainer.innerHTML = '<div class="grid-empty-state">No matching log entries found.</div>';
+      this.rowsContainer.innerHTML = '<div class="grid-empty-state">No logs match. Try fewer or different words.</div>';
       return;
     }
 

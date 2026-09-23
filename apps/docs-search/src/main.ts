@@ -1,3 +1,5 @@
+import { CPUEngine } from 'webgpu-search';
+import Fuse from 'fuse.js';
 import { DocsEngine } from './docs-engine';
 import { generateDocsRecords, CORE_DOCS } from './docs-data';
 import type { DocPageRecord, DocsSearchResult } from './types';
@@ -17,6 +19,7 @@ const suggestList = document.getElementById('suggest-list') as HTMLDivElement;
 const facetBar = document.getElementById('facet-bar') as HTMLDivElement;
 const facetList = document.getElementById('facet-list') as HTMLDivElement;
 const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement;
+const engineHint = document.getElementById('engine-hint') as HTMLParagraphElement | null;
 const idbStatus = document.getElementById('idb-status') as HTMLSpanElement;
 
 // Preview Elements
@@ -59,10 +62,30 @@ let activeResults: DocsSearchResult[] = [];
 let selectedIndex = 0;
 let currentAbortController: AbortController | null = null;
 
+type EngineChoice = 'webgpu' | 'cpu' | 'ufuzzy' | 'fuse' | 'native';
+
 const engine = new DocsEngine({
   useWorker: true,
   preferGpu: true
 });
+const cpuEngine = new CPUEngine();
+
+function currentEngine(): EngineChoice {
+  const value = engineSelect.value;
+  if (value === 'cpu' || value === 'ufuzzy' || value === 'fuse' || value === 'native') return value;
+  return 'webgpu';
+}
+
+function isCompetitor(choice: EngineChoice): boolean {
+  return choice === 'ufuzzy' || choice === 'fuse' || choice === 'native';
+}
+
+function competitorLabel(choice: EngineChoice): string {
+  if (choice === 'ufuzzy') return 'uFuzzy — popular library';
+  if (choice === 'fuse') return 'Fuse.js — popular library';
+  if (choice === 'native') return 'Simple scan — slowest';
+  return '';
+}
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';
@@ -91,13 +114,44 @@ function sanitizeHighlighted(html: string): string {
     .replace(/&lt;\/mark&gt;/g, '</mark>');
 }
 
+/** Plain-English field names for "Found in …". */
+function friendlyField(raw: string): string {
+  const key = raw.trim().toLowerCase();
+  if (key === 'title') return 'Title';
+  if (key === 'content') return 'Summary';
+  if (key === 'tags') return 'Keywords';
+  if (key === 'section') return 'Topic';
+  if (key === 'path') return 'File location';
+  if (key === 'fuzzy match') return 'Best match';
+  return raw || 'Page';
+}
+
 /** Guarded select assignment: unknown facet values reset to ALL. */
 function setSelectGuarded(sel: HTMLSelectElement, value: string): void {
   const exists = Array.from(sel.options).some((o) => o.value === value);
   sel.value = exists ? value : 'ALL';
 }
 
+function setBadgeForCompetitor(choice: EngineChoice): void {
+  engineBadge.textContent = competitorLabel(choice);
+  engineBadge.className = 'badge badge-cpu';
+}
+
 async function updateTelemetry(): Promise<void> {
+  const choice = currentEngine();
+  if (isCompetitor(choice)) {
+    const stats = await engine.getStats().catch(() => null);
+    if (stats) {
+      statRecords.textContent = stats.docCount.toLocaleString();
+      statRows.textContent = stats.rowCount.toLocaleString();
+      statVram.textContent = formatBytes(stats.memory.vramBytes);
+      statRam.textContent = formatBytes(stats.memory.ramBytes);
+      statEpoch.textContent = String(stats.mutationEpoch);
+    }
+    setBadgeForCompetitor(choice);
+    return;
+  }
+
   const stats = await engine.getStats();
   if (!stats) return;
 
@@ -108,21 +162,37 @@ async function updateTelemetry(): Promise<void> {
   statEpoch.textContent = String(stats.mutationEpoch);
 
   if (stats.engine === 'webgpu') {
-    engineBadge.textContent = 'WebGPU Active';
+    engineBadge.textContent = 'Fast mode on';
     engineBadge.className = 'badge badge-gpu';
   } else {
-    engineBadge.textContent = `CPU Fallback (${stats.fallbackReason || 'prefer-cpu'})`;
+    engineBadge.textContent = 'Standard mode — same results';
     engineBadge.className = 'badge badge-cpu';
   }
 }
 
+function updateEngineHint(): void {
+  if (!engineHint) return;
+  const choice = currentEngine();
+  if (choice === 'ufuzzy' || choice === 'fuse') {
+    engineHint.textContent = 'Popular libraries use their own matching — “How to match” is ignored and scores can’t be compared with ours.';
+  } else if (choice === 'native') {
+    engineHint.textContent = 'Simple scan looks for exact words only — it is the slowest option and ignores “How to match”.';
+  } else {
+    engineHint.textContent = 'Our two modes return identical results. Popular libraries rank differently, so scores can’t be compared directly.';
+  }
+  workerSelect.disabled = isCompetitor(choice);
+  workerSelect.title = isCompetitor(choice)
+    ? 'Background mode only applies to our search, not popular libraries.'
+    : '';
+}
+
 function updatePreview(record: DocPageRecord | null): void {
   if (!record) {
-    previewTitle.textContent = 'Select a page to inspect';
-    previewMeta.textContent = 'Section and version overview';
+    previewTitle.textContent = 'Click a result to read more';
+    previewMeta.textContent = 'Title, topic and version appear here';
     previewContent.textContent = '-';
     previewTags.textContent = '-';
-    previewPath.textContent = '// Path will appear here';
+    previewPath.textContent = '// File location appears here';
     return;
   }
 
@@ -139,10 +209,12 @@ function renderResults(): void {
   if (activeResults.length === 0) {
     const li = document.createElement('li');
     li.className = 'result-item';
-    li.style.color = 'var(--text-muted)';
+    li.style.color = 'var(--muted)';
     li.style.textAlign = 'center';
     li.style.padding = '32px 16px';
-    li.textContent = searchInput.value.trim() ? 'No matching pages found.' : 'Type to search...';
+    li.textContent = searchInput.value.trim()
+      ? 'No pages match. Try fewer or different words.'
+      : 'Type above to search the docs.';
     resultsList.appendChild(li);
     updatePreview(null);
     return;
@@ -166,8 +238,8 @@ function renderResults(): void {
           <span class="item-filename">${highlightedTitle}</span>
         </div>
         <div class="item-right">
-          <span class="field-badge">match: ${escapeHtml(res.matchedField)}</span>
-          <span class="score-badge">${res.score}</span>
+          <span class="field-badge">Found in ${escapeHtml(friendlyField(res.matchedField))}</span>
+          <span class="score-badge">Relevance ${res.score}</span>
         </div>
       </div>
       <div class="item-path">${highlightedPath}</div>
@@ -206,11 +278,13 @@ function renderSuggestions(suggestions: Array<{ text: string; score: number }>):
     suggestBar.style.display = 'none';
     return;
   }
-  suggestBar.style.display = 'block';
+  suggestBar.style.display = 'flex';
   for (const s of suggestions) {
     const chip = document.createElement('button');
     chip.className = 'suggest-chip';
-    chip.textContent = `${s.text} (${s.score})`;
+    chip.type = 'button';
+    chip.textContent = s.text;
+    chip.title = 'Click to search this suggestion';
     chip.addEventListener('click', () => {
       searchInput.value = s.text;
       performSearch();
@@ -226,17 +300,131 @@ function renderFacets(facets: Record<string, any> | undefined): void {
     facetBar.style.display = 'none';
     return;
   }
-  facetBar.style.display = 'block';
+  facetBar.style.display = 'flex';
   for (const b of bySection.buckets) {
     const chip = document.createElement('button');
     chip.className = 'facet-chip';
-    chip.textContent = `${String(b.value)} · ${b.count}`;
+    chip.type = 'button';
+    chip.textContent = `${String(b.value)} · ${Number(b.count).toLocaleString()} pages`;
+    chip.title = `Show only ${String(b.value)} pages`;
     chip.addEventListener('click', () => {
       setSelectGuarded(sectionSelect, String(b.value));
       performSearch();
     });
     facetList.appendChild(chip);
   }
+}
+
+function getFilteredRecords(sectionFilter: string, versionFilter: string): DocPageRecord[] {
+  return engine.getRecords().filter((r) =>
+    (sectionFilter === 'ALL' || r.section === sectionFilter) &&
+    (versionFilter === 'ALL' || r.version === versionFilter)
+  );
+}
+
+function facetsForDocs(docs: DocPageRecord[]): Record<string, any> | undefined {
+  const counts = new Map<string, number>();
+  for (const d of docs) counts.set(d.section, (counts.get(d.section) ?? 0) + 1);
+  const buckets = [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 10);
+  if (buckets.length === 0) return undefined;
+  return { bySection: { type: 'terms', buckets } };
+}
+
+/** Popular-library search over the same pages. Scores use each library's own ranking. */
+async function searchCompetitor(
+  query: string,
+  choice: EngineChoice,
+  sectionFilter: string,
+  versionFilter: string,
+  limit: number
+): Promise<{ results: DocsSearchResult[]; totalMatches: number; durationMs: number; facets: Record<string, any> | undefined }> {
+  const filtered = getFilteredRecords(sectionFilter, versionFilter);
+  const clean = query.trim();
+  if (!clean) {
+    const docs = filtered.slice(0, limit);
+    return {
+      results: docs.map((doc, i) => ({ id: doc.id, score: Math.max(1, 50 - i), matchedField: 'Page', doc })),
+      totalMatches: filtered.length,
+      durationMs: 0,
+      facets: facetsForDocs(filtered)
+    };
+  }
+
+  if (choice === 'ufuzzy') {
+    const strings = filtered.map((r) => `${r.title} ${r.tags} ${r.content}`);
+    const t0 = performance.now();
+    const out = cpuEngine.searchWithUFuzzy(strings, clean, limit);
+    const durationMs = performance.now() - t0;
+    const results: DocsSearchResult[] = out.results
+      .map((item) => filtered[item.index])
+      .filter((doc): doc is DocPageRecord => Boolean(doc))
+      .map((doc) => ({
+        id: doc.id,
+        score: 0,
+        matchedField: 'Best match',
+        doc
+      }));
+    // Reuse uFuzzy's own order; keep its rank scores for display honesty.
+    out.results.forEach((item, i) => {
+      if (results[i]) results[i].score = item.score;
+    });
+    const matchedDocs = out.results
+      .map((item) => filtered[item.index])
+      .filter((doc): doc is DocPageRecord => Boolean(doc));
+    return { results, totalMatches: out.totalMatches, durationMs, facets: facetsForDocs(matchedDocs) };
+  }
+
+  if (choice === 'fuse') {
+    const fuse = new Fuse(filtered, {
+      keys: [
+        { name: 'title', weight: 2 },
+        { name: 'tags', weight: 1.5 },
+        { name: 'content', weight: 1 }
+      ],
+      threshold: 0.4,
+      ignoreLocation: true,
+      includeScore: true
+    });
+    const t0 = performance.now();
+    const found = fuse.search(clean);
+    const durationMs = performance.now() - t0;
+    const results: DocsSearchResult[] = found.slice(0, limit).map((hit, i) => {
+      const relevance = hit.score === undefined
+        ? Math.max(1, 90 - i)
+        : Math.max(1, Math.round((1 - Math.min(1, hit.score)) * 100));
+      return {
+        id: hit.item.id,
+        score: relevance,
+        matchedField: 'Best match',
+        doc: hit.item
+      };
+    });
+    return {
+      results,
+      totalMatches: found.length,
+      durationMs,
+      facets: facetsForDocs(found.map((hit) => hit.item))
+    };
+  }
+
+  // native: simple exact-word scan for reference
+  const t0 = performance.now();
+  const q = clean.toLowerCase();
+  const matched = filtered.filter((r) =>
+    `${r.title} ${r.content} ${r.tags} ${r.path}`.toLowerCase().includes(q)
+  );
+  const durationMs = performance.now() - t0;
+  const results: DocsSearchResult[] = matched.slice(0, limit).map((doc, i) => {
+    const hayTitle = doc.title.toLowerCase();
+    const hayTags = doc.tags.toLowerCase();
+    const hayContent = doc.content.toLowerCase();
+    const field = hayTitle.includes(q) ? 'Title' : hayTags.includes(q) ? 'Keywords' : hayContent.includes(q) ? 'Summary' : 'Page';
+    return { id: doc.id, score: Math.max(1, 80 - i), matchedField: field, doc };
+  });
+  return { results, totalMatches: matched.length, durationMs, facets: facetsForDocs(matched) };
 }
 
 async function performSearch(): Promise<void> {
@@ -252,6 +440,26 @@ async function performSearch(): Promise<void> {
   const withSuggest = suggestToggle.checked;
   const sectionFilter = sectionSelect.value;
   const versionFilter = versionSelect.value;
+  const choice = currentEngine();
+  updateEngineHint();
+
+  if (isCompetitor(choice)) {
+    setBadgeForCompetitor(choice);
+    try {
+      const res = await searchCompetitor(query, choice, sectionFilter, versionFilter, 50);
+      activeResults = res.results;
+      selectedIndex = 0;
+      statMatches.textContent = res.totalMatches.toLocaleString();
+      statLatency.textContent = `${res.durationMs.toFixed(2)} ms`;
+      renderSuggestions([]);
+      renderFacets(res.facets);
+      renderResults();
+    } catch (err: any) {
+      if (err?.name === 'AbortError') return;
+      console.error('[Search Error]', err);
+    }
+    return;
+  }
 
   try {
     const searchRes = await engine.search(query, {
@@ -272,6 +480,7 @@ async function performSearch(): Promise<void> {
     renderSuggestions(searchRes.suggestions ?? []);
     renderFacets(searchRes.facets);
     renderResults();
+    await updateTelemetry();
   } catch (err: any) {
     if (err?.name === 'AbortError') return;
     console.error('[Search Error]', err);
@@ -321,9 +530,15 @@ sectionSelect.addEventListener('change', () => performSearch());
 versionSelect.addEventListener('change', () => performSearch());
 
 engineSelect.addEventListener('change', async () => {
-  const preferGpu = engineSelect.value === 'webgpu';
-  await engine.setPreferGpu(preferGpu);
-  await updateTelemetry();
+  const choice = currentEngine();
+  updateEngineHint();
+  if (choice === 'webgpu' || choice === 'cpu') {
+    await engine.setPreferGpu(choice === 'webgpu');
+    await updateTelemetry();
+  } else {
+    setBadgeForCompetitor(choice);
+    await updateTelemetry();
+  }
   await performSearch();
 });
 
@@ -335,22 +550,31 @@ workerSelect.addEventListener('change', async () => {
 });
 
 // Modal Actions
+function closeModal(): void {
+  addModal.style.display = 'none';
+}
 btnAddModal.addEventListener('click', () => {
   addModal.style.display = 'flex';
   formTitle.focus();
 });
 
-btnModalCancel.addEventListener('click', () => {
-  addModal.style.display = 'none';
+btnModalCancel.addEventListener('click', closeModal);
+addModal.addEventListener('click', (e) => {
+  if (e.target === addModal) closeModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && addModal.style.display === 'flex') closeModal();
 });
 
 btnModalSave.addEventListener('click', async () => {
   btnModalSave.disabled = true;
   try {
-    const title = formTitle.value.trim() || 'Untitled offline page';
-    const section = formSection.value.trim() || 'Guide';
-    const tags = formTags.value.trim() || 'offline-docs';
-    const content = formContent.value.trim() || 'User created offline documentation page';
+    const title = formTitle.value.trim() || 'Untitled page';
+    const rawSection = formSection.value.trim() || 'Guide';
+    const allowed = ['Guide', 'API', 'Storage', 'Reliability', 'Reference'];
+    const section = allowed.includes(rawSection) ? rawSection : 'Guide';
+    const tags = formTags.value.trim() || 'docs';
+    const content = formContent.value.trim() || 'A new doc page added from the demo.';
 
     const newDoc: DocPageRecord = {
       id: `custom-${Date.now()}`,
@@ -364,12 +588,13 @@ btnModalSave.addEventListener('click', async () => {
     };
 
     await engine.addRecord(newDoc);
-    addModal.style.display = 'none';
+    closeModal();
     formTitle.value = '';
     formSection.value = '';
     formTags.value = '';
     formContent.value = '';
 
+    idbStatus.textContent = `Added “${title.slice(0, 40)}” to this session`;
     await updateTelemetry();
     await performSearch();
   } finally {
@@ -378,19 +603,26 @@ btnModalSave.addEventListener('click', async () => {
 });
 
 btnBatchAdd.addEventListener('click', async () => {
-  const newRecords = generateDocsRecords(200).map((r, i) => ({
-    ...r,
-    id: `batch-${Date.now()}-${i}`
-  }));
+  btnBatchAdd.disabled = true;
+  try {
+    const newRecords = generateDocsRecords(200).map((r, i) => ({
+      ...r,
+      id: `batch-${Date.now()}-${i}`
+    }));
 
-  await engine.batchAdd(newRecords);
-  await updateTelemetry();
-  await performSearch();
+    await engine.batchAdd(newRecords);
+    idbStatus.textContent = `Added 200 sample pages`;
+    await updateTelemetry();
+    await performSearch();
+  } finally {
+    btnBatchAdd.disabled = false;
+  }
 });
 
 btnReset.addEventListener('click', async () => {
   records = [...CORE_DOCS];
   await engine.init(records);
+  idbStatus.textContent = 'Back to starter docs';
   await updateTelemetry();
   await performSearch();
 });
@@ -400,10 +632,10 @@ btnSaveIdb.addEventListener('click', async () => {
   btnSaveIdb.disabled = true;
   try {
     const res = await engine.saveSnapshotToIDB();
-    idbStatus.textContent = `Saved ${(res.byteLength / 1024).toFixed(1)} KB in ${res.durationMs.toFixed(1)}ms`;
+    idbStatus.textContent = `Saved ${(res.byteLength / 1024).toFixed(1)} KB · ready offline`;
   } catch (err) {
     console.error('[Save IDB Error]', err);
-    idbStatus.textContent = 'Save failed — see console';
+    idbStatus.textContent = 'Couldn’t save — please try again';
   } finally {
     btnSaveIdb.disabled = false;
   }
@@ -413,12 +645,12 @@ btnRestoreIdb.addEventListener('click', async () => {
   btnRestoreIdb.disabled = true;
   try {
     const res = await engine.restoreSnapshotFromIDB();
-    idbStatus.textContent = `Restored ${res.recordCount.toLocaleString()} pages in ${res.durationMs.toFixed(1)}ms`;
+    idbStatus.textContent = `Opened ${res.recordCount.toLocaleString()} pages · ready`;
     await updateTelemetry();
     await performSearch();
   } catch (err) {
     console.error('[Restore IDB Error]', err);
-    idbStatus.textContent = 'Restore failed — see console';
+    idbStatus.textContent = 'No saved copy found yet';
   } finally {
     btnRestoreIdb.disabled = false;
   }
@@ -426,19 +658,19 @@ btnRestoreIdb.addEventListener('click', async () => {
 
 btnClearIdb.addEventListener('click', async () => {
   await engine.clearIDB();
-  idbStatus.textContent = 'Snapshot cleared';
+  idbStatus.textContent = 'Saved copy deleted';
 });
 
 btnRebuildGpu.addEventListener('click', async () => {
   btnRebuildGpu.disabled = true;
   try {
     const rebuilt = await engine.rebuildGpu();
-    idbStatus.textContent = rebuilt ? 'GPU pipeline rebuilt' : 'Rebuild skipped (worker path restores via snapshot)';
+    idbStatus.textContent = rebuilt ? 'Fast search restarted' : 'Background mode restores from a saved copy instead';
     await updateTelemetry();
     await performSearch();
   } catch (err) {
     console.error('[Rebuild GPU Error]', err);
-    idbStatus.textContent = 'Rebuild failed — see console';
+    idbStatus.textContent = 'Couldn’t restart fast search';
   } finally {
     btnRebuildGpu.disabled = false;
   }
@@ -453,6 +685,7 @@ window.addEventListener('pagehide', () => {
 
 // Initialize
 async function bootstrap(): Promise<void> {
+  updateEngineHint();
   await engine.init(records);
   await updateTelemetry();
   await performSearch();
