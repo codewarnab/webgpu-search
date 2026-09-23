@@ -8,7 +8,7 @@ An ultra-fast fuzzy and substring search engine powered by parallel **WebGPU com
 
 > ℹ️ **Text pipeline:** every string is normalized through a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, dataset container). See [`docs/text-normalization.md`](./docs/text-normalization.md) and [`docs/snapshot-format.md`](./docs/snapshot-format.md).
 
-👉 **[Product site](https://webgpu-fuzzy-search.vercel.app)** · [Try the browser comparison](https://webgpu-fuzzy-search.vercel.app/compare/) · [Run the full benchmark](https://webgpu-fuzzy-search.vercel.app/benchmark/)
+👉 **[Product site](https://webgpu-fuzzy-search.vercel.app)** · [Try the homepage benchmark](https://webgpu-fuzzy-search.vercel.app/#benchmark) · [Run the full benchmark](https://webgpu-fuzzy-search.vercel.app/benchmark/)
 
 ---
 

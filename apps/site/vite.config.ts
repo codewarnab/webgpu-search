@@ -35,8 +35,7 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        home: path.resolve(currentDir, 'index.html'),
-        compare: path.resolve(currentDir, 'compare/index.html')
+        home: path.resolve(currentDir, 'index.html')
       }
     }
   }

@@ -4,10 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="Run the full webgpu-search benchmark locally in your browser." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Full benchmark — webgpu-search</title>
   </head>
   <body>
-    <header class="page-nav shell"><a class="wordmark" href="/">⌕ webgpu-search</a><nav aria-label="Page navigation"><a href="/">Home</a><a href="/compare/">Simple comparison</a></nav></header>
+    <header class="page-nav shell"><a class="wordmark" href="/">⌕ webgpu-search</a><nav aria-label="Page navigation"><a href="/">Home</a><a href="/#benchmark">Quick benchmark</a></nav></header>
     <main class="shell">
       <section class="page-header"><p class="eyebrow">FULL BENCHMARK</p><h1>Measure the whole search path.</h1><p>Run the benchmark locally across search modes, text corpora, and dataset sizes. Results stay in your browser.</p></section>
       <section class="result-panel" aria-label="Benchmark setup">
@@ -46,7 +47,7 @@
       </section>
       <section class="result-panel"><h2>Measurement notes</h2><p class="fine-print">Warm retained-query latency is separate from corpus normalization, packing, and GPU upload. Median and p95 summarize repeated searches. “Pending hardware” means the adapter could not be identified as a physical GPU; treat those numbers as software/mock results, not dedicated-GPU performance. GPU and CPU match totals are shown so correctness is visible alongside speed.</p></section>
     </main>
-    <footer class="site-footer shell"><a href="/">webgpu-search</a><span>All work runs on this device.</span><nav><a href="/compare/">Simple comparison</a><a href="/examples/docs-search/">Examples</a></nav></footer>
+    <footer class="site-footer shell"><a href="/">webgpu-search</a><span>All work runs on this device.</span><nav><a href="/#benchmark">Quick benchmark</a><a href="/examples/docs-search/">Examples</a></nav></footer>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

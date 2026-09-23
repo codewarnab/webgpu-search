@@ -5,70 +5,104 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#ffffff" />
     <meta name="description" content="Browser-native fuzzy search with WebGPU when it helps and CPU fallback when it should." />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>webgpu-search — Search at the speed of your browser</title>
   </head>
   <body>
     <header class="site-header shell">
-      <a class="wordmark" href="/" aria-label="webgpu-search home"><span class="wordmark-icon" aria-hidden="true">⌕</span>webgpu-search</a>
+      <a class="wordmark" href="/" aria-label="webgpu-search home"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3M8 10.8h5.6M10.8 8v5.6"></path></svg></span>webgpu-search</a>
       <nav class="main-nav" aria-label="Main navigation">
         <a href="#features">Features</a><a href="#examples">Examples</a>
-        <a href="https://github.com/codewarnab/webgpu-fuzzy-search/tree/main/docs" target="_blank" rel="noreferrer">Docs ↗</a>
         <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noreferrer">GitHub ↗</a>
-        <a class="nav-button" href="/compare/">Try it in your browser ↗</a>
+        <a class="nav-cta" href="/benchmark/">Open benchmark ↗</a>
       </nav>
     </header>
     <main>
-      <section class="hero shell">
-        <div class="hero-copy">
-          <p class="eyebrow">SEARCH THAT STAYS IN YOUR APP</p>
-          <h1>Find it fast.<br />Keep the interface <span>smooth.</span></h1>
-          <p class="hero-description">A small, browser-native search engine for large collections. WebGPU when it helps. A reliable CPU path when it doesn’t.</p>
-          <div class="hero-actions"><a class="button button-dark" href="/compare/">Try the live comparison ↗</a><a class="button button-light" href="#examples">Explore examples ↓</a></div>
-          <p class="hero-note">No server search API · Your queries stay on your device</p>
-        </div>
-        <div class="hero-code" aria-label="TypeScript quick start example">
-          <div class="code-top"><span>QUICK START</span><span>TypeScript</span></div>
-          <pre><code><span class="code-purple">import</span> { SearchIndex } <span class="code-purple">from</span> <span class="code-green">'webgpu-search'</span>;
+      <section class="hero shell" aria-labelledby="hero-title">
+        <p class="eyebrow">BROWSER-NATIVE SEARCH · WEBGPU + CPU</p>
+        <h1 id="hero-title">Find the right thing.<br /><span>Keep the UI fast.</span></h1>
+        <p class="hero-description">A small, portable search engine for large collections. Run fuzzy and substring search on WebGPU when it helps, with a CPU fallback when it doesn’t.</p>
+        <div class="hero-actions"><a class="button button-primary" href="#demo">Try the live demo ↗</a><a class="button button-light" href="#examples">Explore example apps ↓</a></div>
+        <div class="hero-facts" aria-label="Product highlights"><span>Worker-ready</span><span>Unicode-aware</span><span>Zero runtime dependencies</span></div>
+      </section>
+      <section class="shell" aria-label="Quick start code sample">
+        <div class="code-window">
+          <div class="code-bar"><span class="code-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>quick-start.ts</span><span>TypeScript</span></div>
+          <pre><code><span class="code-blue">import</span> { SearchIndex } <span class="code-blue">from</span> <span class="code-blue">'webgpu-search'</span>;
 
-<span class="code-purple">const</span> index = <span class="code-purple">await</span> SearchIndex.create(files);
-<span class="code-purple">const</span> results = <span class="code-purple">await</span> index.search('auth controller', { mode: 'fuzzy' });
+<span class="code-blue">const</span> index = <span class="code-blue">await</span> SearchIndex.create(files);
+<span class="code-blue">const</span> results = <span class="code-blue">await</span> index.search(<span class="code-blue">'auth controller'</span>, { mode: <span class="code-blue">'fuzzy'</span> });
 
 <span class="code-comment">// GPU when useful. CPU fallback when needed.</span></code></pre>
-          <div class="code-footer"><span>Fuzzy + substring search</span><span>Unicode-aware</span></div>
         </div>
+        <p class="intro-note">Use the same API in browser apps, Web Workers, Node.js, and SSR. The library selects an execution path based on the device and search workload.</p>
       </section>
       <section id="demo" class="demo-section shell">
-        <div class="section-heading"><div><p class="eyebrow">A SMALL DEMO, RUNNING LOCALLY</p><h2>Try a search</h2></div><a class="text-link" href="/compare/">Compare CPU and WebGPU →</a></div>
+        <div class="section-heading"><div><p class="eyebrow">01 / DEMO</p><h2>Try a search</h2></div><a class="text-link" href="#benchmark">See timings below →</a></div>
         <div class="demo-card">
           <label class="demo-search-label" for="demo-query">Search sample files</label>
           <div class="demo-search-wrap"><span aria-hidden="true">⌕</span><input id="demo-query" type="search" value="auth" placeholder="Try auth, worker, or profile" autocomplete="off" /><kbd>LIVE</kbd></div>
           <div class="demo-results-head"><span id="demo-status" aria-live="polite">Preparing local sample…</span><span>Sample data · not a speed test</span></div>
           <ul id="demo-results" class="demo-results" aria-label="Sample search results"></ul>
-          <div class="demo-card-footer"><span>Processed in this browser with <code>webgpu-search</code></span><a class="text-link" href="/compare/">Run a real timing comparison →</a></div>
+          <div class="demo-card-footer"><span>Processed in this browser with <code>webgpu-search</code></span><a class="text-link" href="#benchmark">Run the benchmark →</a></div>
         </div>
       </section>
-      <section id="features" class="features-section shell">
-        <div class="section-heading"><div><p class="eyebrow">SMALL API. PRACTICAL FALLBACKS.</p><h2>Search without the extra machinery.</h2></div></div>
-        <div class="feature-grid">
-          <article class="feature-card"><span>01</span><h3>One index, two engines</h3><p>Use WebGPU for supported large searches, or keep searching on CPU when the device or workload calls for it.</p></article>
-          <article class="feature-card"><span>02</span><h3>Search that feels right</h3><p>Fuzzy, substring, token, and prefix modes, plus typo tolerance and autocomplete.</p></article>
-          <article class="feature-card"><span>03</span><h3>Ready for real text</h3><p>Unicode-aware normalization for Latin, CJK, emoji, and mixed-script content.</p></article>
-          <article class="feature-card"><span>04</span><h3>Keep work off the UI</h3><p>Worker support, stale-query cancellation, local snapshots, and runtime diagnostics.</p></article>
+      <section id="benchmark" class="demo-section shell">
+        <div class="section-heading"><div><p class="eyebrow">02 / BENCHMARK</p><h2>How fast is it here?</h2></div><a class="text-link" href="/benchmark/">Open full matrix →</a></div>
+        <div class="demo-card">
+          <div class="compare-controls">
+            <div class="field"><label for="qb-size">Dataset size</label><select id="qb-size"><option value="10000">10,000 records</option><option value="100000" selected>100,000 records</option></select></div>
+            <div class="field"><label for="qb-query">Query</label><input id="qb-query" value="AuthController" autocomplete="off" /></div>
+            <button id="qb-run" class="run-button" type="button">Run benchmark</button>
+          </div>
+          <div class="demo-results-head"><span id="qb-status" role="status" aria-live="polite">Ready. Runs locally, nothing is uploaded.</span><span>Same records · same query</span></div>
+          <div id="qb-results" hidden>
+            <div class="metric-grid">
+              <div class="metric-card"><span>WebGPU route</span><strong id="qb-gpu">—</strong><small id="qb-gpu-d">Not run</small></div>
+              <div class="metric-card"><span>Exact CPU route</span><strong id="qb-cpu">—</strong><small id="qb-cpu-d">Not run</small></div>
+              <div class="metric-card"><span>Result agreement</span><strong id="qb-agree">—</strong><small id="qb-agree-d">Same records and query</small></div>
+            </div>
+            <p id="qb-note" class="fine-print"></p>
+          </div>
+          <div class="demo-card-footer"><span id="qb-device">WebGPU has setup costs, so it may not win on every device.</span><a class="text-link" href="/benchmark/">Full matrix with charts and exports →</a></div>
         </div>
+        <details class="playground">
+          <summary>Need a playground? Search your own text <span aria-hidden="true">↓</span></summary>
+          <div class="playground-body">
+            <label class="demo-search-label" for="pg-data">Your lines (one per row)</label>
+            <textarea id="pg-data" rows="5">AuthController handles login sessions
+BillingSearchIndex ranks invoices by relevance
+SearchWorkerClient keeps queries off the UI thread
+ProfileView renders user settings</textarea>
+            <div class="compare-controls">
+              <div class="field"><label for="pg-query">Query</label><input id="pg-query" value="auth" autocomplete="off" /></div>
+              <button id="pg-run" class="run-button" type="button">Search my text</button>
+            </div>
+            <p id="pg-status" class="sr-status" role="status" aria-live="polite">Runs on CPU in this browser.</p>
+            <ol id="pg-results" class="result-list"></ol>
+          </div>
+        </details>
       </section>
-      <section class="compare-banner shell"><div><p class="eyebrow">YOUR BROWSER. YOUR HARDWARE.</p><h2>See what search feels like on your device.</h2><p>Run the same query through WebGPU and CPU. Get real timings, result counts, and honest fallback status.</p></div><a class="button button-dark" href="/compare/">Compare in browser ↗</a></section>
       <section id="examples" class="examples-section shell">
-        <div class="section-heading"><div><p class="eyebrow">EXAMPLE APPS</p><h2>See it in context.</h2></div><p>Each example runs as a test app on this site.</p></div>
+        <div class="section-heading"><div><p class="eyebrow">03 / EXAMPLE APPS</p><h2>See it in context.</h2></div><p>Each example runs as a test app on this site.</p></div>
         <div class="example-grid">
           <a class="example-card" href="/examples/docs-search/"><span class="example-icon">↗</span><strong>Offline docs search</strong><span>Filters, facets, suggestions, and saved snapshots.</span><b>Open test app →</b></a>
           <a class="example-card" href="/examples/code-palette/"><span class="example-icon">⌘</span><strong>Code palette</strong><span>Find files and symbols with keyboard-first search.</span><b>Open test app →</b></a>
           <a class="example-card" href="/examples/log-viewer/"><span class="example-icon">≋</span><strong>Log viewer</strong><span>Search and filter large log streams in real time.</span><b>Open test app →</b></a>
         </div>
       </section>
-      <section class="benchmark-callout shell"><div><p class="eyebrow">WANT THE FULL MATRIX?</p><p>Run detailed tests across dataset sizes and text corpora, with charts and exportable results.</p></div><a class="text-link" href="/benchmark/">Open full benchmark →</a></section>
-      <section class="install-section shell"><div><p class="eyebrow">GET STARTED</p><h2>Bring your own interface.</h2><p>Zero runtime framework dependencies. Use it with the stack you already have.</p></div><div class="install-code"><code>npm install webgpu-search</code><button id="copy-install" type="button">Copy</button></div></section>
+      <section id="features" class="features-section shell">
+        <div class="section-heading"><div><p class="eyebrow">04 / BUILT FOR PRODUCT SEARCH</p><h2>Fast where it counts.</h2></div><p>GPU acceleration is one part of a practical search API, not a requirement for every query.</p></div>
+        <div class="feature-grid">
+          <article class="feature-card"><span>01 — HYBRID</span><h3>GPU + CPU routing</h3><p>Use WebGPU for suitable workloads; fall back cleanly when unavailable or more efficient.</p></article>
+          <article class="feature-card"><span>02 — MATCHING</span><h3>Useful search modes</h3><p>Fuzzy, substring, token, prefix, typo tolerance, and autocomplete.</p></article>
+          <article class="feature-card"><span>03 — TEXT</span><h3>Unicode-aware</h3><p>Normalize and match across scripts, including CJK text and emoji.</p></article>
+          <article class="feature-card"><span>04 — APP READY</span><h3>Off-thread &amp; observable</h3><p>Worker support, cancellation, memory stats, timings, and persistence tools.</p></article>
+        </div>
+      </section>
+      <section class="install-section shell"><div><p class="eyebrow">GET STARTED</p><h2>Start with one package.</h2><p>Bring your own UI. Keep the search engine framework-independent.</p></div><div class="install-code"><code>npm install webgpu-search</code><button id="copy-install" type="button">Copy</button></div></section>
     </main>
-    <footer class="site-footer shell"><a class="wordmark" href="/">⌕ webgpu-search</a><span>Search in the browser. Keep control of your data.</span><nav><a href="/compare/">Compare</a><a href="/benchmark/">Full benchmark</a><a href="https://www.npmjs.com/package/webgpu-search">npm</a><a href="https://github.com/codewarnab/webgpu-fuzzy-search">GitHub</a></nav></footer>
+    <footer class="site-footer shell"><a class="wordmark" href="/">⌕ webgpu-search</a><span>WebGPU when it helps, CPU when it should.</span><nav><a href="/benchmark/">Benchmark</a><a href="https://www.npmjs.com/package/webgpu-search">npm</a><a href="https://github.com/codewarnab/webgpu-fuzzy-search">GitHub</a></nav></footer>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

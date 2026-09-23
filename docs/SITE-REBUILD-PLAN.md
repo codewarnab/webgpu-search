@@ -1,6 +1,7 @@
 # webgpu-search Website Rebuild Plan
 
-**Status:** Approved; implementation in progress on `feat/site-rebuild`.  
+**Status:** Approved; implementation in progress on `main`.
+**Design update (2026-09-23):** monochrome direction superseded — homepage uses the wireframe blue accent (`--blue: #1769e0`) and single-column hero with full-width `quick-start.ts` code window. Benchmarks consolidated: one quick WebGPU-vs-CPU benchmark embedded on the homepage (`#benchmark`, shared `apps/site/src/quick-benchmark.ts`), full matrix only at `/benchmark/`; `/compare/` retired with a Vercel redirect to `/benchmark/`. The homepage demo doubles as entry point, with an optional collapsed playground for custom text.
 **Owner intent:** Replace the current benchmark dashboard UI with a polished product homepage, while keeping browser-based comparison and full benchmark testing available as clear, separate pages on the same site.  
 **Primary deployment:** Vercel, currently configured to publish `apps/benchmark/dist`.  
 **Plan date:** 2026-09-23
@@ -99,7 +100,7 @@ The deployed site should serve these apps on the same origin so the homepage lin
 - Change `vercel.json` so the deployed output is `apps/site/dist`.
 - Make the site build depend on the benchmark and example-app builds, then stage their static output under `apps/site` before the site Vite build.
 - Set each mounted app’s Vite base to its final same-origin route, so scripts, styles, workers, and assets resolve under the correct path.
-- Verify Vercel serves `/`, `/compare/`, `/benchmark/`, and all three `/examples/.../` routes from this single deployment.
+- Verify Vercel serves `/`, `/benchmark/` (with `/compare/` redirecting there), and all three `/examples/.../` routes from this single deployment.
 
 ## 6. Existing benchmark UI retirement
 
@@ -137,9 +138,9 @@ Exact file changes may be adjusted to fit existing Vite/Turbo conventions; the u
 ## 9. Acceptance criteria
 
 - [ ] `/` is a new clean product homepage, not the current benchmark dashboard.
-- [ ] Primary UI is monochrome, light, calm, and readable; code highlighting may use restrained colors.
-- [ ] The homepage has a compact working search demo and clear links to comparison, full benchmark, and example apps.
-- [ ] `/compare/` runs a genuine in-browser WebGPU-versus-exact-CPU comparison over the same dataset and query.
+- [ ] Primary UI is light, calm, and readable with the approved blue accent (`#1769e0`); code highlighting may use restrained colors.
+- [ ] The homepage has a compact working search demo, an embedded quick benchmark, an optional custom-text playground, and clear links to the full benchmark and example apps.
+- [ ] The homepage `#benchmark` section runs a genuine in-browser WebGPU-versus-exact-CPU comparison over the same dataset and query (`/compare/` retired; redirects to `/benchmark/`).
 - [ ] Comparison reports actual timings, result counts, and fallback/device state without fabricated values or unsupported speedup claims.
 - [ ] `/benchmark/` runs the full matrix locally in the visitor’s browser and uses a redesigned, less overwhelming UI.
 - [ ] Full benchmark retains useful detailed statistics, multi-corpus coverage, qualification notes, and exports.
