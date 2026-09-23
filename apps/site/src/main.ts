@@ -133,7 +133,7 @@ async function autoShareResult(result: {
 
 function renderQbChart(
   chart: SVGSVGElement,
-  entries: Array<{ label: string; medianMs: number; matches: number }>
+  entries: Array<{ label: string; medianMs: number; matches: number; hint?: string }>
 ): void {
   chart.replaceChildren();
   const width = 900;
@@ -156,6 +156,11 @@ function renderQbChart(
     const y = 40 + index * rowHeight;
     const isFastest = entry.medianMs <= fastest;
     chart.append(svgEl('text', { x: '18', y: `${y + 12}`, fill: isFastest ? '#29292d' : '#68696e', 'font-size': '11', 'font-family': 'sans-serif', 'font-weight': isFastest ? '600' : '400' }, entry.label));
+    if (entry.hint) {
+      const info = svgEl('text', { x: `${18 + entry.label.length * 6.2 + 4}`, y: `${y + 12}`, fill: '#1769e0', 'font-size': '10', 'font-family': 'sans-serif', cursor: 'help' }, 'ⓘ');
+      info.append(svgEl('title', {}, entry.hint));
+      chart.append(info);
+    }
     const barWidth = Math.max(2, entry.medianMs * scale);
     chart.append(svgEl('rect', { x: '210', y: `${y + 3}`, width: `${barWidth}`, height: '11', rx: '2', fill: isFastest ? '#252529' : '#a5a5aa' }));
     const value = `${formatMs(entry.medianMs)} · ${compactMatches(entry.matches)} matches`;
@@ -188,10 +193,17 @@ async function runHomepageBenchmark(): Promise<void> {
     void autoShareResult(result);
     if (qbFields.chart) {
       const entries = [
-        ...(result.gpuRan ? [{ label: 'WebGPU', medianMs: result.gpuMedianMs, matches: result.gpuMatches }] : []),
-        { label: 'CPU · exact', medianMs: result.cpuMedianMs, matches: result.cpuMatches },
+        ...(result.gpuRan ? [{ label: 'WebGPU', medianMs: result.gpuMedianMs, matches: result.gpuMatches, hint: 'Your GPU running the search in parallel. Matching CPU · exact totals means the result is correct.' }] : []),
+        { label: 'CPU · exact', medianMs: result.cpuMedianMs, matches: result.cpuMatches, hint: 'This library\u2019s own CPU reference scorer — the correctness baseline the GPU result is checked against.' },
         ...result.externals.filter(external => external.ran)
-          .map(external => ({ label: external.name, medianMs: external.medianMs, matches: external.matches }))
+          .map(external => ({
+            label: external.name,
+            medianMs: external.medianMs,
+            matches: external.matches,
+            hint: external.name === 'uFuzzy'
+              ? 'Popular third-party CPU fuzzy library, shown for context. Its scores are not comparable.'
+              : 'Popular third-party fuzzy library with its own match definition — different match counts are expected.'
+          }))
       ];
       renderQbChart(qbFields.chart, entries);
     }
