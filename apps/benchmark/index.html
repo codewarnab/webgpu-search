@@ -8,7 +8,15 @@
     <title>Full benchmark — webgpu-search</title>
   </head>
   <body>
-    <header class="page-nav shell"><a class="wordmark" href="/">⌕ webgpu-search</a><nav aria-label="Page navigation"><a href="/">Home</a><a href="/#benchmark">Quick benchmark</a></nav></header>
+    <header class="topbar wrap">
+      <a class="brand" href="/" aria-label="webgpu-search home">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3M8 10.8h5.6M10.8 8v5.6"></path></svg>
+        </span>
+        <span class="brand-name">webgpu-search</span>
+      </a>
+      <nav class="nav" aria-label="Page navigation"><a href="/">Home</a><a class="nav-cta" href="/#benchmark">Quick benchmark</a></nav>
+    </header>
     <main class="shell">
       <section class="page-header"><p class="eyebrow">FULL BENCHMARK</p><h1>Measure the whole search path.</h1><p>Run the benchmark locally across search modes, text corpora, and dataset sizes. Results stay in your browser.</p></section>
       <section class="result-panel" aria-label="Benchmark setup">
@@ -47,7 +55,12 @@
       </section>
       <section class="result-panel"><h2>Measurement notes</h2><p class="fine-print">Warm retained-query latency is separate from corpus normalization, packing, and GPU upload. Median and p95 summarize repeated searches. “Pending hardware” means the adapter could not be identified as a physical GPU; treat those numbers as software/mock results, not dedicated-GPU performance. GPU and CPU match totals are shown so correctness is visible alongside speed.</p></section>
     </main>
-    <footer class="site-footer shell"><a href="/">webgpu-search</a><span>All work runs on this device.</span><nav><a href="/#benchmark">Quick benchmark</a><a href="/examples/docs-search/">Examples</a></nav></footer>
+    <footer>
+      <div class="footer-inner wrap">
+        <span>webgpu-search · WebGPU when it helps, CPU when it should.</span>
+        <nav class="footer-links" aria-label="Footer navigation"><a href="/#benchmark">Quick benchmark</a><a href="/examples/docs-search/">Examples</a></nav>
+      </div>
+    </footer>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

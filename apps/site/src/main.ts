@@ -4,7 +4,9 @@ import { formatMs, runQuickCompare } from './quick-benchmark';
 
 const demoQuery = document.querySelector<HTMLInputElement>('#demo-query');
 const demoStatus = document.querySelector<HTMLElement>('#demo-status');
-const demoResults = document.querySelector<HTMLUListElement>('#demo-results');
+const demoResults = document.querySelector<HTMLElement>('#demo-results');
+const demoCorpus = document.querySelector<HTMLUListElement>('#demo-corpus');
+const demoCorpusCount = document.querySelector<HTMLElement>('#demo-corpus-count');
 const copyButton = document.querySelector<HTMLButtonElement>('#copy-install');
 
 const qbSize = document.querySelector<HTMLSelectElement>('#qb-size');
@@ -42,37 +44,56 @@ const sampleFiles = [
 let searchIndex: SearchIndex | null = null;
 let querySequence = 0;
 
-function showEmptyState(message: string): void {
+function showEmptyState(title: string, hint: string): void {
   if (!demoResults) return;
-  const row = document.createElement('li');
-  row.className = 'demo-empty';
-  row.textContent = message;
+  const row = document.createElement('div');
+  row.className = 'result-row';
+  const main = document.createElement('div');
+  main.className = 'result-main';
+  const name = document.createElement('div');
+  name.className = 'result-name';
+  name.textContent = title;
+  const path = document.createElement('div');
+  path.className = 'result-path';
+  path.textContent = hint;
+  main.append(name, path);
+  row.append(main);
   demoResults.replaceChildren(row);
 }
 
 function renderRows(items: Array<{ text: string; score: number }>): void {
   if (!demoResults) return;
   if (items.length === 0) {
-    showEmptyState('No sample results. Try “auth”, “worker”, or “profile”.');
+    showEmptyState('No sample results', 'Try “auth”, “worker”, or “profile”.');
     return;
   }
   demoResults.replaceChildren(...items.slice(0, 4).map(item => {
-    const row = document.createElement('li');
-    row.className = 'demo-result';
-    const content = document.createElement('div');
-    content.className = 'demo-result-text';
+    const row = document.createElement('div');
+    row.className = 'result-row';
+    const main = document.createElement('div');
+    main.className = 'result-main';
     const name = document.createElement('div');
-    name.className = 'demo-result-name';
+    name.className = 'result-name';
     name.textContent = item.text.split('/').at(-1) ?? item.text;
     const path = document.createElement('div');
-    path.className = 'demo-result-path';
+    path.className = 'result-path';
     path.textContent = item.text;
     const score = document.createElement('span');
-    score.className = 'demo-result-score';
+    score.className = 'result-score';
     score.textContent = `score ${item.score}`;
-    content.append(name, path);
-    row.append(content, score);
+    main.append(name, path);
+    row.append(main, score);
     return row;
+  }));
+}
+
+function renderCorpusList(): void {
+  if (demoCorpusCount) demoCorpusCount.textContent = `${sampleFiles.length} sample project files`;
+  if (!demoCorpus) return;
+  demoCorpus.replaceChildren(...sampleFiles.map(file => {
+    const item = document.createElement('li');
+    item.textContent = file;
+    return item;
   }));
 }
 
@@ -82,7 +103,7 @@ async function runDemoSearch(): Promise<void> {
   const sequence = ++querySequence;
   if (!query) {
     demoStatus.textContent = 'Type to search the local sample.';
-    showEmptyState('Search runs locally in your browser.');
+    showEmptyState('Search runs locally in your browser.', 'Results appear here as you type.');
     return;
   }
   demoStatus.textContent = 'Searching local sample…';
@@ -94,11 +115,12 @@ async function runDemoSearch(): Promise<void> {
   } catch {
     if (sequence !== querySequence) return;
     demoStatus.textContent = 'Search unavailable';
-    showEmptyState('The local demo could not complete this query.');
+    showEmptyState('The local demo could not complete this query.', 'Try the benchmark below instead.');
   }
 }
 
 async function initializeDemo(): Promise<void> {
+  renderCorpusList();
   if (!demoQuery || !demoStatus || !demoResults) return;
   try {
     searchIndex = await SearchIndex.create(sampleFiles, { preferGpu: false });
@@ -106,7 +128,7 @@ async function initializeDemo(): Promise<void> {
     await runDemoSearch();
   } catch {
     demoStatus.textContent = 'Demo could not start';
-    showEmptyState('Try the full benchmark to check your browser setup.');
+    showEmptyState('Demo could not start', 'Try the benchmark below to check your browser setup.');
   }
 }
 
@@ -124,10 +146,10 @@ async function runHomepageBenchmark(): Promise<void> {
     const result = await runQuickCompare(Number(qbSize.value), 'fuzzy', query, message => {
       qbStatus.textContent = message;
     });
-    if (qbFields.gpu) qbFields.gpu.textContent = result.gpuRan ? formatMs(result.gpuMedianMs) : 'Not available';
+    if (qbFields.gpu) qbFields.gpu.textContent = result.gpuRan ? formatMs(result.gpuMedianMs) : 'n/a';
     if (qbFields.gpuDetail) qbFields.gpuDetail.textContent = result.gpuRan
       ? `p95 ${formatMs(result.gpuP95Ms)} · ${result.gpuMatches.toLocaleString()} matches`
-      : 'WebGPU unavailable; no GPU timing recorded';
+      : 'WebGPU unavailable — no GPU timing recorded';
     if (qbFields.cpu) qbFields.cpu.textContent = formatMs(result.cpuMedianMs);
     if (qbFields.cpuDetail) qbFields.cpuDetail.textContent =
       `p95 ${formatMs(result.cpuP95Ms)} · ${result.cpuMatches.toLocaleString()} matches`;
