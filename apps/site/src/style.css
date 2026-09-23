@@ -29,6 +29,7 @@ a { color: var(--blue); text-decoration-thickness: 1px; text-underline-offset: 3
 a:hover { color: var(--blue-dark); }
 button, input, select, textarea { font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
+button:not(:disabled), a, summary { cursor: pointer; }
 code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .wrap, .shell { width: min(1060px, calc(100% - 48px)); margin-inline: auto; }
 :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
@@ -113,6 +114,18 @@ code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums;
 .control-select { padding: 0 9px; color: #5a5e64; }
 .search-input:focus, .control-select:focus { border-color: #7da8eb; box-shadow: 0 0 0 3px #1769e012; }
 .result-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 18px 11px; color: #777b81; font: 10px var(--mono); }
+#qb-status.is-busy {
+  background: linear-gradient(90deg, #777b81 25%, #c3c7cd 50%, #777b81 75%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: qb-shimmer 1.2s linear infinite;
+}
+@keyframes qb-shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  #qb-status.is-busy { animation: none; }
+}
 .result-list { border-top: 1px solid #eeeee9; }
 .result-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 18px; border-bottom: 1px solid #f0f0ec; }
 .result-row:last-child { border-bottom: 0; }
@@ -124,11 +137,6 @@ code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums;
 .metrics { display: flex; flex-wrap: wrap; gap: 17px; color: #777b81; font: 10px var(--mono); }
 .metrics strong { color: #34383d; font-weight: 500; }
 .metric-sub { color: var(--faint); }
-.qb-verdict { padding: 14px 18px 2px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--ink); }
-.qb-verdict .qb-faster { color: var(--blue); }
-.qb-totals { font-size: 12px; color: #34383d; }
-.qb-totals strong { color: var(--ink); font-weight: 650; }
-.qb-totals .metric-sub { color: #555a62; }
 #qb-chart { display: block; width: calc(100% - 36px); height: auto; margin: 4px 18px 14px; border: 1px solid #eeeee9; border-radius: 4px; background: #fff; }
 .mock-footnote { padding: 9px 18px; background: #f8f7f3; color: #858890; font: 10px var(--mono); }
 

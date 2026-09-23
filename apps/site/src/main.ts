@@ -11,15 +11,8 @@ const qbRun = document.querySelector<HTMLButtonElement>('#qb-run');
 const qbStatus = document.querySelector<HTMLElement>('#qb-status');
 const qbPanel = document.querySelector<HTMLElement>('#qb-results');
 const qbFields = {
-  gpu: document.querySelector<HTMLElement>('#qb-gpu'),
-  gpuDetail: document.querySelector<HTMLElement>('#qb-gpu-d'),
-  cpu: document.querySelector<HTMLElement>('#qb-cpu'),
-  cpuDetail: document.querySelector<HTMLElement>('#qb-cpu-d'),
-  agree: document.querySelector<HTMLElement>('#qb-agree'),
-  agreeDetail: document.querySelector<HTMLElement>('#qb-agree-d'),
   device: document.querySelector<HTMLElement>('#qb-device'),
   note: document.querySelector<HTMLElement>('#qb-note'),
-  verdict: document.querySelector<HTMLElement>('#qb-verdict'),
   chart: document.querySelector<SVGSVGElement>('#qb-chart')
 };
 
@@ -48,14 +41,18 @@ function renderQbChart(
     return element;
   };
   chart.append(svgEl('text', { x: '18', y: '26', fill: '#29292d', 'font-size': '13', 'font-family': 'sans-serif', 'font-weight': '600' }, 'Median search latency'));
+  const compactMatches = (count: number): string =>
+    count >= 10000 ? `${Math.round(count / 1000)}k` : count.toLocaleString();
   entries.forEach((entry, index) => {
     const y = 40 + index * rowHeight;
     const isFastest = entry.medianMs <= fastest;
     chart.append(svgEl('text', { x: '18', y: `${y + 12}`, fill: isFastest ? '#29292d' : '#68696e', 'font-size': '11', 'font-family': 'sans-serif', 'font-weight': isFastest ? '600' : '400' }, entry.label));
     const barWidth = Math.max(2, entry.medianMs * scale);
     chart.append(svgEl('rect', { x: '210', y: `${y + 3}`, width: `${barWidth}`, height: '11', rx: '2', fill: isFastest ? '#252529' : '#a5a5aa' }));
-    chart.append(svgEl('text', { x: `${Math.min(width - 8, 220 + barWidth)}`, y: `${y + 12}`, fill: '#55565b', 'font-size': '11', 'font-family': 'monospace' },
-      `${formatMs(entry.medianMs)} · ${entry.matches.toLocaleString()} matches`));
+    const value = `${formatMs(entry.medianMs)} · ${compactMatches(entry.matches)} matches`;
+    const textX = 220 + barWidth;
+    const anchor = textX + value.length * 6.6 > width - 8 ? 'end' : 'start';
+    chart.append(svgEl('text', { x: `${anchor === 'end' ? width - 8 : textX}`, y: `${y + 12}`, fill: '#55565b', 'font-size': '11', 'font-family': 'monospace', 'text-anchor': anchor }, value));
   });
 }
 
@@ -69,21 +66,11 @@ async function runHomepageBenchmark(): Promise<void> {
   }
   qbRun.disabled = true;
   qbPanel.hidden = true;
+  qbStatus.classList.add('is-busy');
   try {
     const result = await runQuickCompare(Number(qbSize.value), 'fuzzy', query, message => {
       qbStatus.textContent = message;
     });
-    if (qbFields.gpu) qbFields.gpu.textContent = result.gpuRan ? formatMs(result.gpuMedianMs) : 'n/a';
-    if (qbFields.gpuDetail) qbFields.gpuDetail.textContent = result.gpuRan
-      ? `p95 ${formatMs(result.gpuP95Ms)} · ${result.gpuMatches.toLocaleString()} matches`
-      : 'WebGPU unavailable — no GPU timing recorded';
-    if (qbFields.cpu) qbFields.cpu.textContent = formatMs(result.cpuMedianMs);
-    if (qbFields.cpuDetail) qbFields.cpuDetail.textContent =
-      `p95 ${formatMs(result.cpuP95Ms)} · ${result.cpuMatches.toLocaleString()} matches`;
-    if (qbFields.agree) qbFields.agree.textContent = result.gpuRan ? (result.agree ? 'Match' : 'Different') : 'CPU only';
-    if (qbFields.agreeDetail) qbFields.agreeDetail.textContent = result.gpuRan
-      ? `${result.gpuMatches.toLocaleString()} WebGPU · ${result.cpuMatches.toLocaleString()} CPU`
-      : 'WebGPU was not available in this browser';
     if (qbFields.device) qbFields.device.textContent = result.deviceLabel;
     if (qbFields.chart) {
       const entries = [
@@ -94,24 +81,6 @@ async function runHomepageBenchmark(): Promise<void> {
       ];
       renderQbChart(qbFields.chart, entries);
     }
-    if (qbFields.verdict) {
-      if (!result.gpuRan) {
-        qbFields.verdict.textContent = 'WebGPU unavailable here — CPU-only result shown.';
-      } else if (result.gpuMedianMs > 0 && result.cpuMedianMs > 0) {
-        const ratio = result.cpuMedianMs / result.gpuMedianMs;
-        if (ratio >= 1.1) {
-          qbFields.verdict.textContent =
-            `WebGPU ${ratio.toFixed(1)}× faster than CPU here.`;
-        } else if (ratio <= 1 / 1.1) {
-          qbFields.verdict.textContent =
-            `CPU ${(1 / ratio).toFixed(1)}× faster than WebGPU here.`;
-        } else {
-          qbFields.verdict.textContent = 'Too close to call — WebGPU and CPU tied within noise.';
-        }
-      } else {
-        qbFields.verdict.textContent = 'Timed run complete — see medians below.';
-      }
-    }
     if (qbFields.note) qbFields.note.textContent =
       `CPU route: scoreExactMatches (webgpu-search exact scorer); uFuzzy via CPUEngine, Fuse.js defaults · Corpus: ${result.corpusSize.toLocaleString()} generated records · Query: “${result.query}”. Setup is excluded from warm-search timing.`;
     qbPanel.hidden = false;
@@ -119,6 +88,7 @@ async function runHomepageBenchmark(): Promise<void> {
   } catch (error) {
     qbStatus.textContent = `Benchmark failed: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
+    qbStatus.classList.remove('is-busy');
     qbRun.disabled = false;
   }
 }
