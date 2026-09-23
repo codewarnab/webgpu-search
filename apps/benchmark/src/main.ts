@@ -234,3 +234,22 @@ exportChart?.addEventListener('click', async () => {
     setStatus(`Chart export failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 });
+
+// Browser regression gate hook (scripts/test-regression.ts waits for
+// `window.__IS_INITIALIZED__` and drives `window.gpuEngine` directly).
+// The benchmark itself creates per-run engines lazily on click; this
+// separate eagerly-initialized engine exists only so the CI browser gate
+// can exercise real WGSL dispatch without driving the full UI.
+const gateGpuEngine = new WebGPUEngine();
+const gateCpuEngine = new CPUEngine();
+async function initRegressionGate(): Promise<void> {
+  try {
+    await gateGpuEngine.init();
+  } catch {
+    // Engine stays CPU-fallback; the gate reports readiness either way.
+  }
+  (window as unknown as Record<string, unknown>).gpuEngine = gateGpuEngine;
+  (window as unknown as Record<string, unknown>).cpuEngine = gateCpuEngine;
+  (window as unknown as Record<string, unknown>).__IS_INITIALIZED__ = true;
+}
+void initRegressionGate();
