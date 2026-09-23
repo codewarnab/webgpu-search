@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Compare WebGPU and exact CPU search locally in your browser." />
+    <title>Browser comparison — webgpu-search</title>
+  </head>
+  <body>
+    <header class="page-nav shell"><a class="wordmark" href="/">⌕ webgpu-search</a><nav aria-label="Page navigation"><a href="/">Home</a><a href="/benchmark/">Full benchmark ↗</a></nav></header>
+    <main class="shell">
+      <section class="page-header"><p class="eyebrow">LOCAL BROWSER TEST</p><h1>Compare search on your device.</h1><p>Run the same generated records and query through a WebGPU-preferred index and an exact CPU index. Nothing is uploaded.</p></section>
+      <section class="result-panel" aria-label="Comparison controls">
+        <div class="compare-controls">
+          <div class="field"><label for="compare-size">Dataset size</label><select id="compare-size"><option value="10000">10,000 records</option><option value="100000" selected>100,000 records</option><option value="500000">500,000 records</option></select></div>
+          <div class="field"><label for="compare-mode">Search mode</label><select id="compare-mode"><option value="fuzzy">Fuzzy</option><option value="substring">Substring</option></select></div>
+          <div class="field"><label for="compare-query">Query</label><input id="compare-query" value="AuthController" autocomplete="off" /></div>
+          <button id="compare-run" class="run-button" type="button">Run comparison</button>
+        </div>
+        <p class="fine-print">Each run builds the index first, warms up the search, then records 9 measurements per engine. Dataset preparation and warm search time are reported separately.</p>
+        <p id="compare-status" class="sr-status" role="status" aria-live="polite">Ready. Choose a size and run the local comparison.</p>
+      </section>
+      <section id="compare-results" class="result-panel" aria-label="Comparison results" hidden>
+        <h2>Results from this run</h2>
+        <p id="compare-device" class="status-note"></p>
+        <div class="metric-grid">
+          <div class="metric-card"><span>WebGPU-preferred route</span><strong id="gpu-median">—</strong><small id="gpu-detail">Not run</small></div>
+          <div class="metric-card"><span>Exact CPU route</span><strong id="cpu-median">—</strong><small id="cpu-detail">Not run</small></div>
+          <div class="metric-card"><span>Result agreement</span><strong id="agreement">—</strong><small id="agreement-detail">Same records and query</small></div>
+        </div>
+        <p id="compare-note" class="fine-print"></p>
+        <h2 style="margin-top:20px">Top matches</h2>
+        <ol id="compare-hits" class="result-list"></ol>
+      </section>
+      <section class="result-panel"><h2>How to read this</h2><p class="fine-print">WebGPU has setup and data-transfer costs, so it may not win on every device or dataset. A CPU fallback is labeled as CPU; this page never reports it as a GPU timing or computes a speedup from it. Results depend on your browser, hardware, and query.</p></section>
+    </main>
+    <footer class="site-footer shell"><a href="/">webgpu-search</a><span>Searches stay in this browser.</span><nav><a href="/benchmark/">Full benchmark</a><a href="/examples/docs-search/">Examples</a></nav></footer>
+    <script type="module" src="/src/compare.ts"></script>
+  </body>
+</html>

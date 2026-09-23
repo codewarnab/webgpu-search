@@ -482,7 +482,7 @@ async function runTests() {
     });
 
     const stubIndex = await DocumentIndex.create(CORPUS, productIndexOpts());
-    (stubIndex as unknown as { engineType: string }).engineType = 'webgpu';
+    (stubIndex as unknown as { engineState: { engine: string } }).engineState = { engine: 'webgpu' };
 
     // Capped pool (docs p1..p3) with overflow, auto mode -> approximate.
     (stubIndex as unknown as { gpuEngine: unknown }).gpuEngine = stubGpu([0, 1, 2], true);

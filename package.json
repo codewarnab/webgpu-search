@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev": "turbo dev",
-    "build": "turbo build",
+    "build": "turbo build && bun scripts/assemble-site.ts",
     "test": "turbo test",
     "test:mock": "bun scripts/test-vgpu-mock.ts",
     "test:headless": "bun scripts/test-vgpu-mock.ts",

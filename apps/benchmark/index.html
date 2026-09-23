@@ -2,393 +2,51 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>webgpu-search &mdash; GPU Compute vs CPU Search Benchmark</title>
-    <link rel="stylesheet" href="./src/style.css" />
+    <meta name="description" content="Run the full webgpu-search benchmark locally in your browser." />
+    <title>Full benchmark — webgpu-search</title>
   </head>
   <body>
-    <div class="app-container">
-      <!-- Minimalist Top Navigation / Header -->
-      <header class="top-nav">
-        <div class="brand-group">
-          <div class="brand-logo">⚡</div>
-          <div class="brand-text">
-            <span class="brand-name">webgpu-search</span>
-            <span class="brand-version">v0.1.0</span>
-          </div>
-          <div class="badge badge-webgpu" id="webgpu-status-badge">WebGPU Initializing...</div>
+    <header class="page-nav shell"><a class="wordmark" href="/">⌕ webgpu-search</a><nav aria-label="Page navigation"><a href="/">Home</a><a href="/compare/">Simple comparison</a></nav></header>
+    <main class="shell">
+      <section class="page-header"><p class="eyebrow">FULL BENCHMARK</p><h1>Measure the whole search path.</h1><p>Run the benchmark locally across search modes, text corpora, and dataset sizes. Results stay in your browser.</p></section>
+      <section class="result-panel" aria-label="Benchmark setup">
+        <h2>1. Choose a run</h2>
+        <div class="benchmark-controls">
+          <div class="field"><span class="field-label">Dataset sizes</span><div class="size-options">
+            <label><input type="checkbox" name="size" value="10000" checked /> 10k</label>
+            <label><input type="checkbox" name="size" value="100000" checked /> 100k</label>
+            <label><input type="checkbox" name="size" value="500000" /> 500k</label>
+            <label><input type="checkbox" name="size" value="1000000" /> 1M</label>
+            <label><input type="checkbox" name="size" value="2000000" /> 2M</label>
+          </div></div>
+          <div class="field"><label for="benchmark-corpus">Text corpus</label><select id="benchmark-corpus"><option value="ascii">ASCII code paths</option><option value="cjk">CJK</option><option value="emoji">Emoji + mixed script</option></select></div>
+          <div class="field"><label for="benchmark-mode">Search mode</label><select id="benchmark-mode"><option value="substring">Substring</option><option value="fuzzy">Fuzzy</option></select></div>
+          <div class="field"><label for="benchmark-query">Query</label><input id="benchmark-query" value="AuthController" /></div>
+          <button id="benchmark-run" class="run-button" type="button">Run benchmark</button>
         </div>
-
-        <div class="telemetry-strip" id="hardware-info">
-          <div class="telemetry-item" title="Active Graphics Hardware">
-            <span class="telemetry-label">DEVICE</span>
-            <strong class="telemetry-val" id="hw-adapter">Detecting...</strong>
-          </div>
-          <div class="telemetry-item" title="Hardware Vendor & Architecture">
-            <span class="telemetry-label">ARCH</span>
-            <strong class="telemetry-val" id="hw-vendor">--</strong>
-          </div>
-          <div class="telemetry-item" title="VRAM Staging Buffer Limit">
-            <span class="telemetry-label">VRAM LIMIT</span>
-            <strong class="telemetry-val mono" id="hw-buffer">--</strong>
-          </div>
-          <div class="telemetry-item telemetry-fps-item" title="Current UI Thread Frame Rate">
-            <span class="pulse-dot"></span>
-            <span class="telemetry-label">UI THREAD</span>
-            <strong class="telemetry-val mono text-emerald" id="hw-fps">120 FPS</strong>
-          </div>
+        <p class="fine-print">Default: 10k + 100k records, 5 warmups and 20 interleaved samples. Large runs can take several minutes and use substantial memory; choose 500k–2M only if your device has room.</p>
+        <p id="benchmark-status" class="sr-status" role="status" aria-live="polite">Ready. Select a corpus, mode, and dataset sizes.</p>
+        <div class="progress" aria-hidden="true"><span id="benchmark-progress"></span></div>
+      </section>
+      <section id="benchmark-summary" class="result-panel" aria-label="Benchmark results" hidden>
+        <h2>2. Run summary</h2>
+        <p id="benchmark-hardware" class="status-note"></p>
+        <svg id="benchmark-chart" aria-label="Median search latency comparison" role="img"></svg>
+        <div class="export-actions">
+          <button id="export-csv" type="button">Download CSV</button>
+          <button id="export-markdown" type="button">Download Markdown summary</button>
+          <button id="export-chart" type="button">Download chart PNG</button>
         </div>
-      </header>
-
-      <!-- WebGPU Fallback / Diagnostic Banner -->
-      <div id="webgpu-warning-banner" class="warning-banner" style="display: none;">
-        <div class="warning-banner-header">
-          <span class="warning-banner-icon">⚠️</span>
-          <div>
-            <strong>WebGPU is currently disabled in your browser &mdash; Running in CPU Fallback Mode (uFuzzy & Native JS)</strong>
-            <p class="warning-banner-sub">Enable graphics acceleration in <code>chrome://settings/system</code> or turn on <code>chrome://flags/#enable-unsafe-webgpu</code> to enable WebGPU compute; the live FPS meter reports responsiveness on this device.</p>
-          </div>
-        </div>
-      </div>
-
-      <main class="main-content">
-        <!-- Section 1: Interactive Search Console -->
-        <section class="card console-card">
-          <div class="card-header">
-            <div class="card-title-group">
-              <span class="card-eyebrow">PLAYGROUND</span>
-              <h2 class="card-title">Interactive Search Console</h2>
-            </div>
-            <div class="header-status">
-              <span class="dataset-badge" id="active-dataset-size">100,000 items</span>
-            </div>
-          </div>
-
-          <!-- Controls Bar -->
-          <div class="controls-toolbar">
-            <div class="control-group">
-              <label for="dataset-size-select">DATASET SIZE</label>
-              <div class="select-wrapper">
-                <select id="dataset-size-select">
-                  <option value="10000">10,000 items</option>
-                  <option value="100000" selected>100,000 items</option>
-                  <option value="500000">500,000 items</option>
-                  <option value="1000000">1,000,000 items</option>
-                  <option value="2000000">2,000,000 items</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="control-group">
-              <label for="corpus-type-select">CORPUS CLASS</label>
-              <div class="select-wrapper">
-                <select id="corpus-type-select">
-                  <option value="ascii" selected>ASCII Code Paths (v0.1 Parity)</option>
-                  <option value="cjk">CJK Multi-Byte Terms (Hanzi/Kana)</option>
-                  <option value="emoji">Emoji & Mixed-Script (Astral/ZWJ)</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="control-group">
-              <label for="search-mode-select">ALGORITHM</label>
-              <div class="select-wrapper">
-                <select id="search-mode-select">
-                  <option value="substring" selected>Exact / Substring Match</option>
-                  <option value="fuzzy">Fuzzy Subsequence + Score</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="control-group">
-              <label for="execution-thread-select">EXECUTION THREAD</label>
-              <div class="select-wrapper">
-                <select id="execution-thread-select">
-                  <option value="worker" selected>⚡ Web Worker (Offloaded)</option>
-                  <option value="main">🖥️ Main Thread (Direct UI)</option>
-                </select>
-              </div>
-            </div>
-
-            <button class="btn-ghost" id="btn-reload-data" title="Re-seed synthetic dataset in memory">
-              ↻ Regenerate Data
-            </button>
-          </div>
-
-          <!-- Search Input Bar -->
-          <div class="search-box">
-            <div class="search-input-prefix">🔍</div>
-            <input
-              type="text"
-              class="search-input"
-              id="search-query-input"
-              placeholder="Type in real-time to query millions of records (e.g. AuthController, Billing, Modal)..."
-              value="AuthController"
-              autocomplete="off"
-              spellcheck="false"
-            />
-          </div>
-
-          <!-- Edge Case Presets -->
-          <div class="presets-bar">
-            <span class="presets-label">QUICK QUERIES:</span>
-            <div class="preset-chips">
-              <button class="btn-chip" data-query="AuthController">AuthController</button>
-              <button class="btn-chip" data-query="rsctl">Acronym ("rsctl")</button>
-              <button class="btn-chip" data-query="src">High-Match ("src")</button>
-              <button class="btn-chip" data-query="ユーザー">CJK ("ユーザー")</button>
-              <button class="btn-chip" data-query="🧑‍💻">Emoji ("🧑‍💻")</button>
-              <button class="btn-chip" data-query="&#x200D;">Degenerate ZWJ</button>
-              <button class="btn-chip" data-query="xyz999_nomatch">Zero-Match</button>
-            </div>
-          </div>
-
-          <!-- Minimalist 5-Metric Performance Strip -->
-          <div class="metrics-strip">
-            <div class="metric-block metric-gpu" id="meter-gpu">
-              <div class="metric-eyebrow">WEBGPU (RETAINED)</div>
-              <div class="metric-value mono" id="meter-gpu-val">-- ms</div>
-              <div class="metric-footnote" id="meter-gpu-sub">Dispatch: -- | Readback: --</div>
-            </div>
-
-            <div class="metric-block metric-parity" id="meter-parity">
-              <div class="metric-eyebrow">CPU PARITY (REFERENCE)</div>
-              <div class="metric-value mono" id="meter-parity-val">-- ms</div>
-              <div class="metric-footnote">Contracted v0.2 fallback</div>
-            </div>
-
-            <div class="metric-block metric-ufuzzy" id="meter-ufuzzy">
-              <div class="metric-eyebrow">UFUZZY (CPU)</div>
-              <div class="metric-value mono" id="meter-ufuzzy-val">-- ms</div>
-              <div class="metric-footnote">Multi-term filter + sort</div>
-            </div>
-
-            <div class="metric-block metric-native" id="meter-native">
-              <div class="metric-eyebrow">JS NATIVE (CPU)</div>
-              <div class="metric-value mono" id="meter-native-val">-- ms</div>
-              <div class="metric-footnote">String.prototype.includes</div>
-            </div>
-
-            <div class="metric-block metric-fps" id="meter-fps">
-              <div class="metric-eyebrow">UI FRAME RATE</div>
-              <div class="metric-value mono text-emerald" id="meter-fps-val">120 FPS</div>
-              <div class="metric-footnote" id="meter-fps-sub">Live UI Thread Responsiveness</div>
-            </div>
-          </div>
-
-          <!-- Live Results Output -->
-          <div class="results-container">
-            <div class="results-header">
-              <span id="results-count-summary" class="mono text-muted">Matched 0 items</span>
-              <span class="text-dim">Top 50 displayed</span>
-            </div>
-            <div class="results-list" id="results-list">
-              <div class="results-empty">Type in the box above to trigger instant search.</div>
-            </div>
-          </div>
-        </section>
-
-        <!-- Section 2: End-to-End Matrix Benchmark -->
-        <section class="card benchmark-card">
-          <div class="benchmark-header">
-            <div>
-              <span class="card-eyebrow">EVALUATION</span>
-              <h2 class="card-title">Full Matrix Benchmark Suite</h2>
-              <p class="card-subtitle">Stress-testing isolated WebGPU vs uFuzzy vs JS Native across 10k to 2M records</p>
-            </div>
-
-            <div class="benchmark-actions">
-              <span class="benchmark-status mono" id="benchmark-status">Ready</span>
-              <button class="btn-primary" id="btn-run-benchmark">
-                ▶ Run Matrix Benchmark
-              </button>
-            </div>
-          </div>
-
-          <!-- Export Toolbar -->
-          <div class="export-toolbar" id="download-bar">
-            <span class="export-label">EXPORT ASSETS:</span>
-            <div class="export-buttons">
-              <button class="btn-export" id="btn-copy-summary" disabled>
-                📋 Copy Markdown Summary
-              </button>
-              <button class="btn-export" id="btn-download-csv" disabled>
-                📊 CSV Spreadsheet
-              </button>
-              <button class="btn-export" id="btn-download-png-sub" disabled>
-                🖼️ Substring Chart
-              </button>
-              <button class="btn-export" id="btn-download-png-fuz" disabled>
-                🖼️ Fuzzy Chart
-              </button>
-              <button class="btn-export btn-export-all" id="btn-download-all" disabled>
-                📥 Download All (2 Images + 1 CSV)
-              </button>
-            </div>
-          </div>
-
-          <!-- Sleek Progress Box -->
-          <div class="progress-box" id="benchmark-progress-box">
-            <div class="progress-meta">
-              <span class="progress-status mono" id="benchmark-progress-text">Initializing benchmark suite...</span>
-              <span class="progress-fps mono text-emerald">UI Thread: <strong id="benchmark-fps-val">120 FPS</strong></span>
-            </div>
-            <div class="progress-track">
-              <div class="progress-indicator" id="benchmark-progress-bar"></div>
-            </div>
-          </div>
-
-          <!-- Algorithm Tabs -->
-          <div class="tab-strip">
-            <button class="tab-pill active" id="tab-btn-substring">⚡ Substring Matrix</button>
-            <button class="tab-pill" id="tab-btn-fuzzy">🔍 Fuzzy Subsequence Matrix</button>
-          </div>
-
-          <!-- SUBSTRING PANEL -->
-          <div class="tab-panel active" id="panel-substring">
-            <div class="chart-wrapper">
-              <svg id="benchmark-chart-substring" width="100%" height="340" viewBox="0 0 1000 340"></svg>
-            </div>
-
-            <div class="table-container">
-              <table class="benchmark-table">
-                <thead>
-                  <tr>
-                    <th>Dataset Size (N)</th>
-                    <th>Corpus</th>
-                    <th>GPU Retained (ms)</th>
-                    <th>GPU Cold Total</th>
-                    <th>CPU Parity (ms)</th>
-                    <th>uFuzzy (CPU)</th>
-                    <th>JS Native (CPU)</th>
-                    <th>Speedup vs Parity</th>
-                    <th>Speedup vs uFuzzy</th>
-                    <th>UI Frame Rate</th>
-                    <th>Verdict / Status</th>
-                  </tr>
-                </thead>
-                <tbody id="table-body-substring">
-                  <tr>
-                    <td colspan="11" class="table-empty">
-                      Click "Run Matrix Benchmark" to execute the 10k to 2M dataset test suite.
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <!-- FUZZY PANEL -->
-          <div class="tab-panel" id="panel-fuzzy">
-            <div class="chart-wrapper">
-              <svg id="benchmark-chart-fuzzy" width="100%" height="340" viewBox="0 0 1000 340"></svg>
-            </div>
-
-            <div class="table-container">
-              <table class="benchmark-table">
-                <thead>
-                  <tr>
-                    <th>Dataset Size (N)</th>
-                    <th>Corpus</th>
-                    <th>GPU Retained (ms)</th>
-                    <th>GPU Cold Total</th>
-                    <th>CPU Parity (ms)</th>
-                    <th>uFuzzy (CPU)</th>
-                    <th>JS Native (CPU)</th>
-                    <th>Speedup vs Parity</th>
-                    <th>Speedup vs uFuzzy</th>
-                    <th>UI Frame Rate</th>
-                    <th>Verdict / Status</th>
-                  </tr>
-                </thead>
-                <tbody id="table-body-fuzzy">
-                  <tr>
-                    <td colspan="11" class="table-empty">
-                      Click "Run Matrix Benchmark" to execute the 10k to 2M dataset test suite.
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </section>
-
-        <!-- Section 3: Clean Collapsible Architecture Insights -->
-        <details class="insights-drawer">
-          <summary class="insights-summary">
-            <div class="summary-left">
-              <span class="summary-icon">🔬</span>
-              <strong class="summary-title">Architectural Deep-Dive & Crossover Mechanics</strong>
-              <span class="summary-badge">3 Core Takeaways</span>
-            </div>
-            <span class="summary-toggle-indicator">Expand Details</span>
-          </summary>
-
-          <div class="insights-content">
-            <div class="insight-card border-gpu">
-              <div class="insight-number mono">01</div>
-              <div>
-                <h4 class="insight-title">Retained VRAM vs Cold Upload</h4>
-                <p class="insight-text">
-                  Uploading 1M rows over PCIe takes ~8–20ms. If data is re-uploaded every keystroke, CPU <em>always</em> wins. But when data is retained in GPU VRAM (loaded once into storage buffers), keystroke search only dispatches a 272-byte uniform, unlocking pure GPU compute speed.
-                </p>
-              </div>
-            </div>
-
-            <div class="insight-card border-ufuzzy">
-              <div class="insight-number mono">02</div>
-              <div>
-                <h4 class="insight-title">The mapAsync() Fixed Latency Floor</h4>
-                <p class="insight-text">
-                  WebGPU buffer mapping has an inherent ~1ms to 3ms round-trip overhead. Below 50k items, uFuzzy executes in &lt;1ms on CPU, making CPU 4× faster at small scale. Above 100k–2M items, CPU slows down to 17–160ms+, while GPU compute stays near flat.
-                </p>
-              </div>
-            </div>
-
-            <div class="insight-card border-emerald">
-              <div class="insight-number mono">03</div>
-              <div>
-                <h4 class="insight-title">Candidate Pool Compaction & CPU Ranking</h4>
-                <p class="insight-text">
-                  Instead of transferring 2,000,000 rows across PCIe, the compute shader writes up to 8,192 scored candidates into a compact 64 KB buffer using atomic counters. The CPU then sorts candidates by score to return the top 1,000, avoiding PCIe bottlenecks while keeping search work off the main thread. The live meter reports actual UI FPS.
-                </p>
-              </div>
-            </div>
-
-            <div class="insight-card border-muted">
-              <div class="insight-number mono">04</div>
-              <div>
-                <h4 class="insight-title">SIMD Warp Divergence Bounding</h4>
-                <p class="insight-text">
-                  Variable-length string matching creates warp divergence across SIMD lanes. However, bounding strings to fixed slots (64 bytes) caps thread branch depth to 60 iterations, enabling massive parallel throughput despite divergence.
-                </p>
-              </div>
-            </div>
-          </div>
+        <details style="margin-top:16px">
+          <summary>Detailed timing table and diagnostics</summary>
+          <div class="benchmark-table-wrap"><table class="benchmark-table"><thead><tr><th>Rows</th><th>Corpus</th><th>GPU retained med / p95</th><th>GPU cold upload</th><th>CPU exact med / p95</th><th>uFuzzy med / p95</th><th>Native med / p95</th><th>VRAM</th><th>Matches GPU / CPU</th><th>UI jank</th><th>Qualification</th></tr></thead><tbody id="benchmark-table-body"></tbody></table></div>
+          <div id="benchmark-details" class="details-grid" style="margin-top:12px"></div>
         </details>
-      </main>
-
-      <!-- Minimalist Footer -->
-      <footer class="app-footer">
-        <span><code>webgpu-search</code> &mdash; Zero-dependency WebGPU search engine for browser, workers, Node.js & SSR.</span>
-        <div class="footer-links">
-          <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noopener">GitHub Repository</a>
-          <span>&middot;</span>
-          <a href="https://www.npmjs.com/package/webgpu-search" target="_blank" rel="noopener">npm package</a>
-        </div>
-      </footer>
-    </div>
-
-    <!-- Floating Sticky Live FPS Telemetry HUD (Minimalist Glassmorphic Pill) -->
-    <div class="floating-fps-hud" id="floating-fps-hud">
-      <span class="hud-pulse" id="hud-pulse-dot"></span>
-      <span class="hud-fps mono text-emerald" id="hud-fps-val">120 FPS</span>
-      <span class="hud-divider">|</span>
-      <span class="hud-label" id="hud-mode-val">⚡ Worker</span>
-    </div>
-
-    <script type="module" src="./src/main.ts"></script>
+      </section>
+      <section class="result-panel"><h2>Measurement notes</h2><p class="fine-print">Warm retained-query latency is separate from corpus normalization, packing, and GPU upload. Median and p95 summarize repeated searches. “Pending hardware” means the adapter could not be identified as a physical GPU; treat those numbers as software/mock results, not dedicated-GPU performance. GPU and CPU match totals are shown so correctness is visible alongside speed.</p></section>
+    </main>
+    <footer class="site-footer shell"><a href="/">webgpu-search</a><span>All work runs on this device.</span><nav><a href="/compare/">Simple comparison</a><a href="/examples/docs-search/">Examples</a></nav></footer>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
-

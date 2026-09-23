@@ -37,14 +37,21 @@ async function main() {
         });
 
         let loaded = false;
-        for (let i = 0; i < 10; i++) {
-            try {
-                await page.goto(`${server.url}/`, { waitUntil: 'networkidle0', timeout: 15000 });
-                loaded = true;
-                break;
-            } catch (err) {
-                await new Promise(r => setTimeout(r, 1000));
+        // Vite `base` differs per deployment target (`/` on main,
+        // `/benchmark/` for same-origin site assembly): probe the
+        // sub-path first, fall back to root.
+        const candidates = [`${server.url}/benchmark/`, `${server.url}/`];
+        for (const candidate of candidates) {
+            for (let i = 0; i < 10 && !loaded; i++) {
+                try {
+                    await page.goto(candidate, { waitUntil: 'networkidle0', timeout: 15000 });
+                    loaded = true;
+                    break;
+                } catch (err) {
+                    await new Promise(r => setTimeout(r, 1000));
+                }
             }
+            if (loaded) break;
         }
         if (!loaded) {
             throw new Error(`Failed to connect to ${server.url}/ after multiple attempts`);

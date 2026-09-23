@@ -18,6 +18,7 @@ const wgslPlugin = {
 };
 
 export default defineConfig({
+  base: '/examples/log-viewer/',
   plugins: [wgslPlugin],
   worker: {
     format: 'es',
