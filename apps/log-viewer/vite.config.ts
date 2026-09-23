@@ -32,6 +32,7 @@ export default defineConfig({
   },
   server: {
     port: 5175,
+    allowedHosts: ['free-vm-vcn.tail0070c0.ts.net'],
     open: false
   },
   preview: {

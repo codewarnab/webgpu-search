@@ -145,6 +145,14 @@ export const CORE_DOCS: DocPageRecord[] = [
 
 const SECTIONS: DocSection[] = ['Guide', 'API', 'Storage', 'Reliability', 'Reference'];
 
+const LOREM_A = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.';
+const LOREM_B = 'Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.';
+
+/** Rich body for the doc reader: real summary first, then standard doc sections with lorem filler. */
+export function docBody(record: { content: string; tags: string }): string {
+  return `${record.content}\n\n${LOREM_A}\n\n${LOREM_B}`;
+}
+
 const TOPIC_WORDS = [
   'tokenizer', 'pipeline', 'workgroup', 'bindgroup', 'readback', 'compaction',
   'tombstone', 'bitset', 'facet', 'quaestor', 'dispatch', 'uniform', 'staging',

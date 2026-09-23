@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="theme-color" content="#faf9f6" />
-  <meta name="description" content="Search offline docs instantly. Compare our fast search with popular libraries on the same pages." />
-  <title>Docs search demo — webgpu-search</title>
+  <meta name="description" content="Acme product docs with instant offline search. Compare our fast search with popular libraries on the same pages." />
+  <title>Acme Docs — webgpu-search demo</title>
   <link rel="stylesheet" href="./src/style.css" />
 </head>
 <body>
@@ -14,170 +14,172 @@
       <span class="brand-mark" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3M8 10.8h5.6M10.8 8v5.6"></path></svg>
       </span>
-      <span class="brand-name">webgpu-search</span><span class="brand-version">docs demo</span>
+      <span class="brand-name">Acme Docs</span><span class="brand-version">powered by webgpu-search</span>
     </a>
     <nav class="nav" aria-label="Main navigation">
       <a href="/">Home</a>
       <a href="/#benchmark">Benchmark</a>
-      <span id="engine-badge" class="badge badge-gpu">Fast mode on</span>
     </nav>
   </header>
 
   <main class="shell">
-    <section class="page-header">
-      <div class="eyebrow">Example · Offline docs</div>
-      <h1>Search the docs.</h1>
-      <p class="lede">Type to search 400 offline pages. Switch the search engine below to compare our fast search with popular libraries — same pages, same query, timed on your device.</p>
-    </section>
-
-    <div class="page-actions">
-      <button id="btn-add-modal" class="btn btn-primary" type="button">Add a page</button>
-      <button id="btn-batch-add" class="btn" type="button">Add 200 sample pages</button>
-      <button id="btn-reset" class="btn" type="button">Reset to starter docs</button>
-    </div>
-
-    <div class="docs-container">
-      <div class="docs-input-wrap">
-        <span class="search-icon-hint" aria-hidden="true">⌕</span>
-        <input
-          type="search"
-          id="search-input"
-          class="docs-input"
-          placeholder="Search docs — try 'snapshot', 'offline', or 'highlight'…"
-          autocomplete="off"
-          spellcheck="false"
-          autofocus
-          aria-label="Search docs"
-        />
-        <span class="input-shortcut-hint">Up / down to move · Enter to open · Esc to clear</span>
-      </div>
-
-      <div class="settings-bar">
-        <div class="setting-group">
-          <div class="setting-item">
-            <label for="mode-select">How to match</label>
-            <select id="mode-select" class="select-ctrl">
-              <option value="fuzzy" selected>Forgiving — finds typos</option>
-              <option value="substring">Exact phrase — in order</option>
-              <option value="prefix">Starts with — titles first</option>
-              <option value="token">All words — any order</option>
-            </select>
+    <div class="docs-layout">
+      <!-- Left: docs navigation / search results -->
+      <aside class="docs-side" aria-label="Docs navigation">
+        <div class="side-search">
+          <div class="docs-input-wrap">
+            <span class="search-icon-hint" aria-hidden="true">⌕</span>
+            <input
+              type="search"
+              id="search-input"
+              class="docs-input"
+              placeholder="Search docs…  (press / )"
+              autocomplete="off"
+              spellcheck="false"
+              autofocus
+              aria-label="Search docs"
+            />
           </div>
-
-          <div class="setting-item">
-            <label for="section-select">Topic</label>
-            <select id="section-select" class="select-ctrl">
-              <option value="ALL" selected>All topics</option>
-              <option value="Guide">Guide</option>
-              <option value="API">API</option>
-              <option value="Storage">Storage</option>
-              <option value="Reliability">Reliability</option>
-              <option value="Reference">Reference</option>
-            </select>
-          </div>
-
-          <div class="setting-item">
-            <label for="version-select">Version</label>
-            <select id="version-select" class="select-ctrl">
-              <option value="ALL" selected>All versions</option>
-              <option value="1.0">1.0</option>
-              <option value="0.4">0.4</option>
-            </select>
-          </div>
-
-          <div class="setting-item">
-            <label for="engine-select">Search with</label>
-            <select id="engine-select" class="select-ctrl">
-              <option value="webgpu" selected>Our fast search (recommended)</option>
-              <option value="cpu">Our thorough search (same results)</option>
-              <option value="ufuzzy">uFuzzy — popular fuzzy library</option>
-              <option value="fuse">Fuse.js — popular fuzzy library</option>
-              <option value="native">Simple scan — slowest, for reference</option>
-            </select>
-          </div>
-
-          <div class="setting-item">
-            <label for="worker-select">Run search</label>
-            <select id="worker-select" class="select-ctrl">
-              <option value="worker" selected>In background — typing stays smooth</option>
-              <option value="main">On this page — may pause typing</option>
-            </select>
+          <div id="search-meta" class="search-meta">
+            <span id="stat-matches-line">Browsing all pages</span>
+            <span id="stat-latency-line" class="telemetry-val"></span>
           </div>
         </div>
 
-        <div class="setting-group">
-          <label class="toggle-label">
-            <input type="checkbox" id="highlight-toggle" checked />
-            <span>Highlight matching words</span>
-          </label>
-          <label class="toggle-label">
-            <input type="checkbox" id="suggest-toggle" checked />
-            <span>Show suggestions while typing</span>
-          </label>
+        <div id="suggest-bar" class="suggest-bar" style="display: none;">
+          <span class="section-label">Suggestions — click to search</span>
+          <div id="suggest-list" class="suggest-list"></div>
         </div>
-        <p id="engine-hint" class="engine-hint">Our two modes return identical results. Popular libraries rank differently, so scores can't be compared directly.</p>
-      </div>
 
-      <div class="persistence-bar">
-        <span class="section-label">Saved copy for offline use</span>
-        <button id="btn-save-idb" class="btn" type="button">Save for offline</button>
-        <button id="btn-restore-idb" class="btn" type="button">Open saved copy</button>
-        <button id="btn-clear-idb" class="btn" type="button">Delete saved copy</button>
-        <button id="btn-rebuild-gpu" class="btn" type="button">Restart fast search</button>
-        <span id="idb-status" class="idb-status">No saved copy yet</span>
-      </div>
+        <div id="facet-bar" class="facet-bar" style="display: none;">
+          <span class="section-label">Related topics — click to filter</span>
+          <div id="facet-list" class="facet-list"></div>
+        </div>
 
-      <div id="suggest-bar" class="suggest-bar" style="display: none;">
-        <span class="section-label">Suggestions — click to search</span>
-        <div id="suggest-list" class="suggest-list"></div>
-      </div>
-
-      <div id="facet-bar" class="facet-bar" style="display: none;">
-        <span class="section-label">Related topics — click to filter</span>
-        <div id="facet-list" class="facet-list"></div>
-      </div>
-
-      <div class="docs-body">
         <ul id="results-list" class="results-list" aria-live="polite">
-          <!-- Results injected dynamically -->
+          <!-- Results / nav injected dynamically -->
         </ul>
 
-        <div id="preview-pane" class="preview-pane">
-          <div class="preview-header">
-            <div id="preview-title" class="preview-title">Click a result to read more</div>
-            <div id="preview-meta" class="preview-meta">Title, topic and version appear here</div>
-          </div>
-          <div class="preview-section">
-            <span class="section-label">What this page covers</span>
-            <div id="preview-content" class="section-content">-</div>
-          </div>
-          <div class="preview-section">
-            <span class="section-label">Keywords</span>
-            <div id="preview-tags" class="symbols-box">-</div>
-          </div>
-          <div class="preview-section">
-            <span class="section-label">File location</span>
-            <pre id="preview-path" class="code-snippet">// File location appears here</pre>
-          </div>
-        </div>
-      </div>
+        <details class="advanced">
+          <summary>Advanced &amp; engine comparison</summary>
+          <div class="advanced-body">
+            <p class="advanced-lede">Sensible defaults are pre-selected. Open this only to compare engines or tweak matching.</p>
+            <div class="setting-group">
+              <div class="setting-item">
+                <label for="mode-select">How to match</label>
+                <select id="mode-select" class="select-ctrl">
+                  <option value="fuzzy" selected>Forgiving — finds typos</option>
+                  <option value="substring">Exact phrase — in order</option>
+                  <option value="prefix">Starts with — titles first</option>
+                  <option value="token">All words — any order</option>
+                </select>
+              </div>
 
-      <div class="telemetry-bar">
-        <div class="telemetry-group">
-          <span>Pages: <span id="stat-records" class="telemetry-val">0</span></span>
-          <span>Searchable rows: <span id="stat-rows" class="telemetry-val">0</span></span>
-          <span>Results found: <span id="stat-matches" class="telemetry-val">0</span></span>
-          <span>Search took: <span id="stat-latency" class="telemetry-val">0.00 ms</span></span>
+              <div class="setting-item">
+                <label for="section-select">Topic</label>
+                <select id="section-select" class="select-ctrl">
+                  <option value="ALL" selected>All topics</option>
+                  <option value="Guide">Guide</option>
+                  <option value="API">API</option>
+                  <option value="Storage">Storage</option>
+                  <option value="Reliability">Reliability</option>
+                  <option value="Reference">Reference</option>
+                </select>
+              </div>
+
+              <div class="setting-item">
+                <label for="version-select">Version</label>
+                <select id="version-select" class="select-ctrl">
+                  <option value="ALL" selected>All versions</option>
+                  <option value="1.0">1.0</option>
+                  <option value="0.4">0.4</option>
+                </select>
+              </div>
+
+              <div class="setting-item">
+                <label for="engine-select">Search with</label>
+                <select id="engine-select" class="select-ctrl">
+                  <option value="webgpu" selected>Our fast search (recommended)</option>
+                  <option value="cpu">Our thorough search (same results)</option>
+                  <option value="ufuzzy">uFuzzy — popular fuzzy library</option>
+                  <option value="fuse">Fuse.js — popular fuzzy library</option>
+                  <option value="native">Simple scan — slowest, for reference</option>
+                </select>
+              </div>
+
+              <div class="setting-item">
+                <label for="worker-select">Run search</label>
+                <select id="worker-select" class="select-ctrl">
+                  <option value="worker" selected>In background — typing stays smooth</option>
+                  <option value="main">On this page — may pause typing</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="setting-group">
+              <label class="toggle-label">
+                <input type="checkbox" id="highlight-toggle" checked />
+                <span>Highlight matching words</span>
+              </label>
+              <label class="toggle-label">
+                <input type="checkbox" id="suggest-toggle" checked />
+                <span>Show suggestions while typing</span>
+              </label>
+            </div>
+            <p id="engine-hint" class="engine-hint">Our two modes return identical results. Popular libraries rank differently, so scores can’t be compared directly.</p>
+
+            <div class="persistence-bar">
+              <span class="section-label">Saved copy for offline use</span>
+              <div class="persistence-actions">
+                <button id="btn-save-idb" class="btn" type="button">Save for offline</button>
+                <button id="btn-restore-idb" class="btn" type="button">Open saved copy</button>
+                <button id="btn-clear-idb" class="btn" type="button">Delete saved copy</button>
+                <button id="btn-rebuild-gpu" class="btn" type="button">Restart fast search</button>
+              </div>
+              <span id="idb-status" class="idb-status">No saved copy yet</span>
+            </div>
+
+            <div class="page-actions">
+              <button id="btn-add-modal" class="btn btn-primary" type="button">Add a page</button>
+              <button id="btn-batch-add" class="btn" type="button">Add 200 sample pages</button>
+              <button id="btn-reset" class="btn" type="button">Reset to starter docs</button>
+            </div>
+
+            <div class="telemetry-bar">
+              <div class="telemetry-group">
+                <span>Pages: <span id="stat-records" class="telemetry-val">0</span></span>
+                <span>Results: <span id="stat-matches" class="telemetry-val">0</span></span>
+                <span>Search: <span id="stat-latency" class="telemetry-val">–</span></span>
+              </div>
+              <div class="telemetry-group">
+                <span>Graphics memory: <span id="stat-vram" class="telemetry-val">0 KB</span></span>
+                <span>Memory: <span id="stat-ram" class="telemetry-val">0 KB</span></span>
+                <span>Changes: <span id="stat-epoch" class="telemetry-val">0</span></span>
+              </div>
+              <span id="stat-rows" class="telemetry-val" hidden>0</span>
+            </div>
+            <div class="mock-footnote">All searching happens on your device — nothing is uploaded. Popular-library scores use their own ranking and can't be compared with ours.</div>
+          </div>
+        </details>
+      </aside>
+
+      <!-- Right: doc reader -->
+      <article class="doc-reader" aria-live="polite">
+        <div class="reader-kicker"><span id="preview-meta-top" class="eyebrow">Guide · v1.0</span></div>
+        <h1 id="preview-title" class="preview-title">Welcome to Acme Docs</h1>
+        <div id="preview-meta" class="preview-meta">Pick a page on the left to start reading</div>
+        <div id="preview-content" class="section-content"></div>
+        <div class="preview-section">
+          <span class="section-label">Keywords</span>
+          <div id="preview-tags" class="symbols-box">-</div>
         </div>
-        <div class="telemetry-group">
-          <span>Graphics memory: <span id="stat-vram" class="telemetry-val">0 KB</span></span>
-          <span>Memory used: <span id="stat-ram" class="telemetry-val">0 KB</span></span>
-          <span>Changes saved: <span id="stat-epoch" class="telemetry-val">0</span></span>
+        <div class="preview-section">
+          <span class="section-label">File location</span>
+          <pre id="preview-path" class="code-snippet">// File location appears here</pre>
         </div>
-      </div>
-      <div class="mock-footnote">All searching happens on your device — nothing is uploaded. Popular-library scores use their own ranking and can't be compared with ours.</div>
+      </article>
     </div>
-    <p class="hint">Tip: try “auth” with Forgiving matching, then switch Search with to Fuse.js to see how rankings differ.</p>
+    <p class="hint">Tip: press <kbd>/</kbd> to focus search, <kbd>↑</kbd><kbd>↓</kbd> to move, <kbd>Enter</kbd> to open. Try “auth” with Forgiving matching, then open Advanced to compare with Fuse.js.</p>
   </main>
 
   <footer>

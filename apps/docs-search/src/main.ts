@@ -1,7 +1,7 @@
 import { CPUEngine } from 'webgpu-search';
 import Fuse from 'fuse.js';
 import { DocsEngine } from './docs-engine';
-import { generateDocsRecords, CORE_DOCS } from './docs-data';
+import { generateDocsRecords, CORE_DOCS, docBody } from './docs-data';
 import type { DocPageRecord, DocsSearchResult } from './types';
 
 // DOM Elements
@@ -18,16 +18,19 @@ const suggestBar = document.getElementById('suggest-bar') as HTMLDivElement;
 const suggestList = document.getElementById('suggest-list') as HTMLDivElement;
 const facetBar = document.getElementById('facet-bar') as HTMLDivElement;
 const facetList = document.getElementById('facet-list') as HTMLDivElement;
-const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement;
+const engineBadge = document.getElementById('engine-badge') as HTMLSpanElement | null;
 const engineHint = document.getElementById('engine-hint') as HTMLParagraphElement | null;
 const idbStatus = document.getElementById('idb-status') as HTMLSpanElement;
 
 // Preview Elements
-const previewTitle = document.getElementById('preview-title') as HTMLDivElement;
+const previewTitle = document.getElementById('preview-title') as HTMLHeadingElement;
 const previewMeta = document.getElementById('preview-meta') as HTMLDivElement;
+const previewMetaTop = document.getElementById('preview-meta-top') as HTMLSpanElement | null;
 const previewContent = document.getElementById('preview-content') as HTMLDivElement;
 const previewTags = document.getElementById('preview-tags') as HTMLDivElement;
 const previewPath = document.getElementById('preview-path') as HTMLPreElement;
+const statMatchesLine = document.getElementById('stat-matches-line') as HTMLSpanElement | null;
+const statLatencyLine = document.getElementById('stat-latency-line') as HTMLSpanElement | null;
 
 // Telemetry Elements
 const statRecords = document.getElementById('stat-records') as HTMLSpanElement;
@@ -133,6 +136,7 @@ function setSelectGuarded(sel: HTMLSelectElement, value: string): void {
 }
 
 function setBadgeForCompetitor(choice: EngineChoice): void {
+  if (!engineBadge) return;
   engineBadge.textContent = competitorLabel(choice);
   engineBadge.className = 'badge badge-cpu';
 }
@@ -162,11 +166,15 @@ async function updateTelemetry(): Promise<void> {
   statEpoch.textContent = String(stats.mutationEpoch);
 
   if (stats.engine === 'webgpu') {
-    engineBadge.textContent = 'Fast mode on';
-    engineBadge.className = 'badge badge-gpu';
+    if (engineBadge) {
+      engineBadge.textContent = 'Fast mode on';
+      engineBadge.className = 'badge badge-gpu';
+    }
   } else {
-    engineBadge.textContent = 'Standard mode — same results';
-    engineBadge.className = 'badge badge-cpu';
+    if (engineBadge) {
+      engineBadge.textContent = 'Standard mode — same results';
+      engineBadge.className = 'badge badge-cpu';
+    }
   }
 }
 
@@ -188,39 +196,80 @@ function updateEngineHint(): void {
 
 function updatePreview(record: DocPageRecord | null): void {
   if (!record) {
-    previewTitle.textContent = 'Click a result to read more';
-    previewMeta.textContent = 'Title, topic and version appear here';
-    previewContent.textContent = '-';
+    previewTitle.textContent = 'Welcome to Acme Docs';
+    if (previewMetaTop) previewMetaTop.textContent = 'Offline docs';
+    previewMeta.textContent = 'Pick a page on the left to start reading';
+    previewContent.innerHTML = `<p>This is an embedded docs site. Search above to filter pages, or browse the list on the left.</p><h2>Getting started</h2><p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>`;
     previewTags.textContent = '-';
     previewPath.textContent = '// File location appears here';
     return;
   }
 
   previewTitle.textContent = record.title;
+  if (previewMetaTop) previewMetaTop.textContent = `${record.section} · v${record.version}`;
   previewMeta.textContent = `${record.section} · v${record.version} · ${record.readingMinutes} min read`;
-  previewContent.textContent = record.content;
+  const body = docBody(record);
+  const paras = body.split('\n\n').filter(Boolean);
+  previewContent.innerHTML = '';
+  paras.forEach((p, i) => {
+    if (i === 0) {
+      const lead = document.createElement('p');
+      lead.textContent = p;
+      previewContent.appendChild(lead);
+      const h = document.createElement('h2');
+      h.textContent = 'Overview';
+      previewContent.appendChild(h);
+    } else {
+      const el = document.createElement('p');
+      el.textContent = p;
+      previewContent.appendChild(el);
+    }
+  });
+  const listHead = document.createElement('h3');
+  listHead.textContent = 'On this page';
+  previewContent.appendChild(listHead);
+  const ul = document.createElement('ul');
+  for (const kw of record.tags.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 4)) {
+    const li = document.createElement('li');
+    li.textContent = kw;
+    ul.appendChild(li);
+  }
+  previewContent.appendChild(ul);
   previewTags.textContent = record.tags;
   previewPath.textContent = record.path;
 }
 
+function setSearchMeta(line: string, latency: string): void {
+  if (statMatchesLine) statMatchesLine.textContent = line;
+  if (statLatencyLine) statLatencyLine.textContent = latency;
+  statMatches.textContent = line.replace(/[^0-9,]/g, '') || '0';
+  statLatency.textContent = latency || '–';
+}
+
 function renderResults(): void {
   resultsList.innerHTML = '';
+  const browsing = !searchInput.value.trim();
 
   if (activeResults.length === 0) {
     const li = document.createElement('li');
-    li.className = 'result-item';
-    li.style.color = 'var(--muted)';
-    li.style.textAlign = 'center';
-    li.style.padding = '32px 16px';
-    li.textContent = searchInput.value.trim()
-      ? 'No pages match. Try fewer or different words.'
-      : 'Type above to search the docs.';
+    li.className = 'empty-note';
+    li.textContent = browsing
+      ? 'No pages in this section yet.'
+      : 'No pages match. Try fewer or different words.';
     resultsList.appendChild(li);
-    updatePreview(null);
+    if (browsing) updatePreview(null);
     return;
   }
 
+  let lastSection = '';
   activeResults.forEach((res, idx) => {
+    if (browsing && res.doc.section !== lastSection) {
+      lastSection = res.doc.section;
+      const header = document.createElement('li');
+      header.className = 'nav-group-label';
+      header.textContent = lastSection;
+      resultsList.appendChild(header);
+    }
     const li = document.createElement('li');
     li.className = `result-item ${idx === selectedIndex ? 'selected' : ''}`;
 
@@ -231,16 +280,18 @@ function renderResults(): void {
     const highlightedPath = res.highlightedText?.path ? sanitizeHighlighted(res.highlightedText.path) : escapeHtml(res.doc.path);
     const highlightedContent = res.highlightedText?.content ? sanitizeHighlighted(res.highlightedText.content) : escapeHtml(res.doc.content);
 
+    const metaBadges = browsing ? '' : `
+        <div class="item-right">
+          <span class="field-badge">Found in ${escapeHtml(friendlyField(res.matchedField))}</span>
+          <span class="score-badge">Relevance ${res.score}</span>
+        </div>`;
+
     li.innerHTML = `
       <div class="item-header">
         <div class="item-left">
           <span class="kind-icon kind-${escapeHtml(section)}">${sectionLabel}</span>
           <span class="item-filename">${highlightedTitle}</span>
-        </div>
-        <div class="item-right">
-          <span class="field-badge">Found in ${escapeHtml(friendlyField(res.matchedField))}</span>
-          <span class="score-badge">Relevance ${res.score}</span>
-        </div>
+        </div>${metaBadges}
       </div>
       <div class="item-path">${highlightedPath}</div>
       <div class="item-symbols">${highlightedContent}</div>
@@ -449,8 +500,10 @@ async function performSearch(): Promise<void> {
       const res = await searchCompetitor(query, choice, sectionFilter, versionFilter, 50);
       activeResults = res.results;
       selectedIndex = 0;
-      statMatches.textContent = res.totalMatches.toLocaleString();
-      statLatency.textContent = `${res.durationMs.toFixed(2)} ms`;
+      const label = query
+        ? `${res.totalMatches.toLocaleString()} results`
+        : `${res.totalMatches.toLocaleString()} pages`;
+      setSearchMeta(label, query ? `${res.durationMs.toFixed(2)} ms` : '');
       renderSuggestions([]);
       renderFacets(res.facets);
       renderResults();
@@ -458,6 +511,19 @@ async function performSearch(): Promise<void> {
       if (err?.name === 'AbortError') return;
       console.error('[Search Error]', err);
     }
+    return;
+  }
+
+  // Browse mode: empty query shows the docs navigation instead of no hits.
+  if (!query) {
+    const docs = getFilteredRecords(sectionFilter, versionFilter).slice(0, 100);
+    activeResults = docs.map((doc) => ({ id: doc.id, score: 50, matchedField: 'Page', doc }));
+    selectedIndex = 0;
+    setSearchMeta(`${getFilteredRecords(sectionFilter, versionFilter).length.toLocaleString()} pages`, '');
+    renderSuggestions([]);
+    renderFacets(facetsForDocs(getFilteredRecords(sectionFilter, versionFilter)));
+    renderResults();
+    await updateTelemetry();
     return;
   }
 
@@ -474,8 +540,9 @@ async function performSearch(): Promise<void> {
 
     activeResults = searchRes.results;
     selectedIndex = 0;
-    statMatches.textContent = searchRes.totalMatches.toLocaleString();
-    statLatency.textContent = `${searchRes.searchDurationMs.toFixed(2)} ms`;
+    const label = `${searchRes.totalMatches.toLocaleString()} results`;
+    const engineName = searchRes.engine === 'webgpu' ? 'Fast mode' : 'Standard mode';
+    setSearchMeta(`${label} · ${engineName}`, `${searchRes.searchDurationMs.toFixed(2)} ms`);
 
     renderSuggestions(searchRes.suggestions ?? []);
     renderFacets(searchRes.facets);
@@ -528,6 +595,16 @@ highlightToggle.addEventListener('change', () => performSearch());
 suggestToggle.addEventListener('change', () => performSearch());
 sectionSelect.addEventListener('change', () => performSearch());
 versionSelect.addEventListener('change', () => performSearch());
+
+// Press "/" or Cmd/Ctrl+K anywhere to focus search, like popular docs sites.
+document.addEventListener('keydown', (e) => {
+  const target = e.target as HTMLElement | null;
+  const typing = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT');
+  if ((e.key === '/' && !typing) || ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k')) {
+    e.preventDefault();
+    searchInput.focus();
+  }
+});
 
 engineSelect.addEventListener('change', async () => {
   const choice = currentEngine();
