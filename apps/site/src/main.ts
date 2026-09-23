@@ -65,6 +65,7 @@ async function runHomepageBenchmark(): Promise<void> {
     return;
   }
   qbRun.disabled = true;
+  qbRun.textContent = 'Running…';
   qbPanel.hidden = true;
   qbStatus.classList.add('is-busy');
   try {
@@ -90,6 +91,7 @@ async function runHomepageBenchmark(): Promise<void> {
   } finally {
     qbStatus.classList.remove('is-busy');
     qbRun.disabled = false;
+    qbRun.textContent = 'Run benchmark';
   }
 }
 

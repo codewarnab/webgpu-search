@@ -25,12 +25,7 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5178,
-    allowedHosts: ['free-vm-vcn.tail0070c0.ts.net'],
-    proxy: {
-      '/examples/docs-search': 'http://localhost:5176',
-      '/examples/code-palette': 'http://localhost:5174',
-      '/examples/log-viewer': 'http://localhost:5175'
-    }
+    allowedHosts: ['free-vm-vcn.tail0070c0.ts.net']
   },
   build: {
     rollupOptions: {

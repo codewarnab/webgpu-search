@@ -13,8 +13,6 @@ const ALLOW = /@deprecated|0x55324|docs\/archive|U2F2.*wire|wire.*U2|legacy snap
 const targets = [
   "packages/webgpu-search/src",
   "apps/benchmark/src",
-  "apps/monaco-palette/src",
-  "apps/log-viewer/src",
   "examples",
   "scripts",
 ];

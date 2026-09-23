@@ -23,8 +23,8 @@ import {
   DocumentIndex,
   SNAPSHOT_FORMAT_VERSION,
 } from '../packages/webgpu-search/src/index';
-import { generateMonacoRecords } from '../apps/monaco-palette/src/sample-data';
-import { generateStructuredLogs } from '../apps/log-viewer/src/log-generator';
+import { generateMonacoRecords } from './bench-data/monaco-data';
+import { generateStructuredLogs } from './bench-data/log-generator';
 import {
   BENCHMARK_FIXTURE_VERSION,
   BENCHMARK_LOG_BASE_TIME_MS,
@@ -90,7 +90,7 @@ async function main(): Promise<void> {
   const fixturesRaw = fs.readFileSync(path.join(rootDir, 'scripts/benchmark-fixtures.ts'), 'utf8');
   // Strip comments + string literals before matching so prose mentioning
   // `window` / `document` does not trip the bare-global scan (same approach
-  // as scripts/test-proof-apps.ts §7 and the search-modes DOM test).
+  // as the search-modes DOM test).
   const fixturesSrc = fixturesRaw
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .split('\n')

@@ -86,10 +86,6 @@ jobs:
       - name: Run Observability & Framework Recipe Tests
         run: bun run test:observability
 
-      - name: Run Proof Applications & Acceptance Tests
-        run: bun run test:proof-apps
-
-
       - name: Run Parity Harness (differential + fallback + worker)
         timeout-minutes: 10
         # Single-shard in CI; PARITY_SHARD_* sharding is local-only (validated

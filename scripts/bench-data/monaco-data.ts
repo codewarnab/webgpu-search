@@ -1,4 +1,4 @@
-import type { MonacoFileRecord, SymbolKind } from './types';
+import type { MonacoFileRecord, SymbolKind } from './monaco-types';
 
 export const CORE_FILES: MonacoFileRecord[] = [
   {

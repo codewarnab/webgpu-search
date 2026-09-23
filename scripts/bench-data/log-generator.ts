@@ -1,4 +1,4 @@
-import type { LogLevel, StructuredLogRecord } from './types';
+import type { LogLevel, StructuredLogRecord } from './log-types';
 
 const SERVICES = [
   'auth-service',

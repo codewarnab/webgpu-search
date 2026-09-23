@@ -5,6 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#faf9f6" />
     <meta name="description" content="Browser-native fuzzy search with WebGPU when it helps and CPU fallback when it should." />
+    <meta name="view-transition" content="same-origin" />
+    <style>
+      @view-transition {
+        navigation: auto;
+      }
+    </style>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>webgpu-search — Search at the speed of your browser</title>
   </head>
@@ -18,7 +24,6 @@
       </a>
       <nav class="nav" aria-label="Main navigation">
         <a href="#features">Features</a>
-        <a href="#examples">Examples</a>
         <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noreferrer">GitHub ↗</a>
         <a class="nav-cta" href="#benchmark">Live benchmark</a>
       </nav>
@@ -31,7 +36,6 @@
         <p class="hero-copy">A small, portable search engine for large collections. Run fuzzy and substring search on WebGPU when it helps, with a CPU fallback when it doesn’t.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="#benchmark">Try the live benchmark <span aria-hidden="true">↗</span></a>
-          <a class="button" href="#examples">Explore example apps <span aria-hidden="true">↓</span></a>
         </div>
         <div class="hero-facts" aria-label="Product highlights">
           <span>Worker-ready</span><span>Unicode-aware</span><span>Zero runtime dependencies</span>
@@ -89,36 +93,9 @@ ProfileView renders user settings</textarea>
         </details>
       </section>
 
-      <section id="examples" class="section" aria-labelledby="examples-title">
-        <div class="section-head">
-          <div><div class="section-kicker">02 / Example apps</div><h2 id="examples-title">Try it in real interfaces</h2></div>
-          <p>Three focused demos show how search can fit into familiar app patterns.</p>
-        </div>
-        <div class="app-grid">
-          <article class="app-card">
-            <div class="app-icon" aria-hidden="true">⌕</div>
-            <h3>Offline docs search</h3>
-            <p>Search documentation with filters, facets, suggestions, highlights, and saved snapshots.</p>
-            <a class="button button-small" href="/examples/docs-search/">Test docs search ↗</a>
-          </article>
-          <article class="app-card">
-            <div class="app-icon" aria-hidden="true">⌘</div>
-            <h3>Code &amp; symbol palette</h3>
-            <p>Find files and symbols with keyboard-first fuzzy search, type filters, and previews.</p>
-            <a class="button button-small" href="/examples/code-palette/">Test code palette ↗</a>
-          </article>
-          <article class="app-card">
-            <div class="app-icon" aria-hidden="true">≋</div>
-            <h3>High-throughput log viewer</h3>
-            <p>Search large log streams by message, service, level, time, and latency.</p>
-            <a class="button button-small" href="/examples/log-viewer/">Test log viewer ↗</a>
-          </article>
-        </div>
-      </section>
-
       <section id="features" class="section" aria-labelledby="features-title">
         <div class="section-head">
-          <div><div class="section-kicker">03 / Built for product search</div><h2 id="features-title">Fast where it counts</h2></div>
+          <div><div class="section-kicker">02 / Built for product search</div><h2 id="features-title">Fast where it counts</h2></div>
           <p>GPU acceleration is one part of a practical search API — not a requirement for every query.</p>
         </div>
         <div class="feature-grid">

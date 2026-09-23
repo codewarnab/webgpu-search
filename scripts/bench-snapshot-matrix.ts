@@ -2,7 +2,7 @@
  * headless benchmark matrix (Issue #11 Phase 5 frozen baseline).
  *
  * Covers the benchmark invariant without requiring a browser/GPU:
- * - IDE symbols (monaco-palette records): prefix search, type-filtered
+ * - IDE symbol records: prefix search, type-filtered
  * search, and autocomplete() latency.
  * - Data-grid rows (structured logs at 10k / 50k / 100k): fuzzy search,
  * structured level/service/latency filtering, and facet aggregation.
@@ -29,8 +29,8 @@
  * All engines run CPU (`preferGpu: false`) for headless determinism.
  */
 import { DocumentIndex } from '../packages/webgpu-search/src/index';
-import { generateMonacoRecords } from '../apps/monaco-palette/src/sample-data';
-import { generateStructuredLogs } from '../apps/log-viewer/src/log-generator';
+import { generateMonacoRecords } from './bench-data/monaco-data';
+import { generateStructuredLogs } from './bench-data/log-generator';
 import {
   BENCHMARK_FIXTURE_VERSION,
   BENCHMARK_LOG_BASE_TIME_MS,
@@ -130,7 +130,7 @@ async function main(): Promise<void> {
   const outPath = resolveOutPath(outIdx >= 0 ? process.argv[outIdx + 1] : undefined);
 
   // ------------------------------------------------------------------
-  // 1. IDE symbols (monaco-palette shape)
+  // 1. IDE symbol records (prefix search shape)
   // ------------------------------------------------------------------
   {
     const records = generateMonacoRecords(5000);
