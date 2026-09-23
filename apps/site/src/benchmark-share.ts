@@ -121,18 +121,6 @@ export function markShared(fingerprint: string): void {
   }
 }
 
-export async function checkKnown(fingerprint: string): Promise<boolean | null> {
-  try {
-    const res = await fetch(`/api/submit-benchmark?fingerprint=${encodeURIComponent(fingerprint)}`);
-    if (res.status === 503) return null; // backend not configured
-    if (!res.ok) return null;
-    const data = (await res.json()) as { known?: boolean };
-    return data.known ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export async function submitSharedResult(
   payload: SharePayload
 ): Promise<{ ok: boolean; duplicate?: boolean; unconfigured?: boolean; error?: string }> {

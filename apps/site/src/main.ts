@@ -17,7 +17,6 @@ const qbFields = {
 };
 
 const qbShareRow = document.querySelector<HTMLElement>('#qb-share-row');
-const qbShareButton = document.querySelector<HTMLButtonElement>('#qb-share');
 const qbShareStatus = document.querySelector<HTMLElement>('#qb-share-status');
 const qbGpuFlag = document.querySelector<HTMLElement>('#qb-gpu-flag');
 
@@ -70,56 +69,28 @@ function renderGpuFlag(
   }
 }
 
-async function armShareButton(result: {
+async function autoShareResult(result: {
   adapter: unknown;
   corpusSize: number;
   mode: string;
   gpuRan: boolean;
 }): Promise<void> {
-  if (!qbShareRow || !qbShareButton || !qbShareStatus) return;
+  if (!qbShareRow || !qbShareStatus) return;
   qbShareRow.hidden = true;
   qbShareStatus.textContent = '';
-  qbShareButton.disabled = false;
-  qbShareButton.textContent = 'Share this untested result';
   if (!result.gpuRan) return; // CPU-only runs are not crowdsourced
   try {
     const share = await import('./benchmark-share');
     const full = share.buildSharePayload(result as never);
-    if (share.alreadyShared(full.fingerprint)) {
-      qbShareRow.hidden = false;
-      qbShareStatus.textContent = 'Already shared from this browser. Thanks!';
-      qbShareButton.disabled = true;
-      return;
-    }
-    const known = await share.checkKnown(full.fingerprint);
-    if (known === true) return; // tested config: stay quiet
-    // known === false (untested) or null (backend unknown): offer opt-in share
+    if (share.alreadyShared(full.fingerprint)) return; // sent before from this browser
+    const res = await share.submitSharedResult(full);
+    if (res.unconfigured) return; // backend not enabled: stay silent
+    if (!res.ok) return; // network/rate-limit hiccup: benchmark itself is unaffected
+    share.markShared(full.fingerprint);
     qbShareRow.hidden = false;
-    if (known === false) {
-      qbShareStatus.textContent = 'Untested hardware — consider sharing it.';
-    }
-    qbShareButton.onclick = async () => {
-      qbShareButton.disabled = true;
-      qbShareStatus.textContent = 'Sharing…';
-      const res = await share.submitSharedResult(full);
-      if (res.unconfigured) {
-        qbShareStatus.textContent = 'Sharing is not enabled on this deployment yet.';
-        qbShareButton.disabled = false;
-        return;
-      }
-      if (res.ok && res.duplicate) {
-        qbShareStatus.textContent = 'Already in the dataset. Thanks!';
-        share.markShared(full.fingerprint);
-        return;
-      }
-      if (res.ok) {
-        qbShareStatus.textContent = 'Shared. Thanks!';
-        share.markShared(full.fingerprint);
-        return;
-      }
-      qbShareStatus.textContent = `Share failed: ${res.error ?? 'unknown error'}`;
-      qbShareButton.disabled = false;
-    };
+    qbShareStatus.textContent = res.duplicate
+      ? 'Untested hardware — already in the community dataset.'
+      : 'Untested hardware — result shared to the community dataset. Thanks!';
   } catch {
     // share chunk failed to load: benchmark itself is unaffected
   }
@@ -179,7 +150,7 @@ async function runHomepageBenchmark(): Promise<void> {
     });
     if (qbFields.device) qbFields.device.textContent = result.deviceLabel;
     renderGpuFlag(result.gpuTier, result.deviceLabel, result.gpuRan);
-    void armShareButton(result);
+    void autoShareResult(result);
     if (qbFields.chart) {
       const entries = [
         ...(result.gpuRan ? [{ label: 'WebGPU', medianMs: result.gpuMedianMs, matches: result.gpuMatches }] : []),
