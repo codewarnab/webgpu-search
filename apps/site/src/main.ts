@@ -1,4 +1,5 @@
 import { SearchIndex } from 'webgpu-search';
+import '@fontsource-variable/inter';
 import './style.css';
 import { formatMs, runQuickCompare } from './quick-benchmark';
 
