@@ -20,7 +20,7 @@
         <a href="#features">Features</a>
         <a href="#examples">Examples</a>
         <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noreferrer">GitHub ↗</a>
-        <a class="nav-cta" href="/benchmark/">Open benchmark ↗</a>
+        <a class="nav-cta" href="#benchmark">Live benchmark</a>
       </nav>
     </header>
 
@@ -54,10 +54,10 @@
       <section id="benchmark" class="section" aria-labelledby="benchmark-title">
         <div class="section-head">
           <div><div class="section-kicker">01 / Benchmark</div><h2 id="benchmark-title">How fast is it here?</h2></div>
-          <p>Same generated records, same query — WebGPU vs the webgpu-search exact CPU scorer (<span class="mono">scoreExactMatches</span>). Nothing is uploaded.</p>
+          <p>Same generated records, same query — our WebGPU and CPU against uFuzzy and Fuse.js. Nothing is uploaded.</p>
         </div>
         <div class="playground">
-          <div class="playground-top"><div class="playground-title">WebGPU vs CPU</div><span class="preview-label">live</span></div>
+          <div class="playground-top"><div class="playground-title">WebGPU vs CPU vs popular libs</div><span class="preview-label">live</span></div>
           <div class="search-controls">
             <div class="search-input-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input id="qb-query" class="search-input" type="search" value="AuthController" aria-label="Benchmark query" autocomplete="off" /></div>
             <select id="qb-size" class="control-select" aria-label="Dataset size"><option value="10000">10,000 records</option><option value="100000" selected>100,000 records</option></select>
@@ -65,17 +65,18 @@
           </div>
           <div class="result-summary"><span id="qb-status" role="status" aria-live="polite">Ready. Runs locally, nothing is uploaded.</span><span>7 timed searches / engine</span></div>
           <div id="qb-results" hidden>
-            <div class="result-summary" style="padding-top:11px">
+            <div id="qb-verdict" class="qb-verdict" role="status" aria-live="polite"></div>
+            <div class="result-summary qb-totals">
               <span>WEBGPU <strong id="qb-gpu">—</strong> <span id="qb-gpu-d" class="metric-sub"></span></span>
               <span title="scoreExactMatches from the webgpu-search package (exact parity scorer)">CPU · webgpu-search exact <strong id="qb-cpu">—</strong> <span id="qb-cpu-d" class="metric-sub"></span></span>
               <span>AGREEMENT <strong id="qb-agree">—</strong> <span id="qb-agree-d" class="metric-sub"></span></span>
             </div>
+            <svg id="qb-chart" role="img" aria-label="Median search latency comparison"></svg>
           </div>
           <div class="playground-bottom">
             <div class="metrics"><span id="qb-device">WebGPU has setup costs, so it may not win on every device.</span></div>
-            <a class="button button-small" href="/benchmark/">Open full matrix ↗</a>
           </div>
-          <div class="mock-footnote" id="qb-note">CPU route: scoreExactMatches (webgpu-search exact scorer, same package). Dataset setup is excluded from warm-search timing.</div>
+          <div class="mock-footnote" id="qb-note">CPU route: scoreExactMatches (webgpu-search exact scorer); uFuzzy via CPUEngine, Fuse.js defaults. Setup is excluded from warm-search timing.</div>
         </div>
         <details class="playground playground-collapsed">
           <summary>Need a playground? Search your own text</summary>
@@ -148,7 +149,7 @@ ProfileView renders user settings</textarea>
         <nav class="footer-links" aria-label="Footer navigation">
           <a href="https://www.npmjs.com/package/webgpu-search" target="_blank" rel="noreferrer">npm</a>
           <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noreferrer">Source</a>
-          <a href="/benchmark/">Benchmark</a>
+          <a href="#benchmark">Benchmark</a>
         </nav>
       </div>
     </footer>

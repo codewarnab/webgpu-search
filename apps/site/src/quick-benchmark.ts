@@ -1,4 +1,5 @@
 import {
+  CPUEngine,
   normalizeText,
   packDataset,
   scoreExactMatches,
@@ -6,6 +7,15 @@ import {
   type SearchMode,
   type SearchResultItem
 } from 'webgpu-search';
+import Fuse from 'fuse.js';
+
+export interface ExternalEngineResult {
+  name: string;
+  medianMs: number;
+  p95Ms: number;
+  matches: number;
+  ran: boolean;
+}
 
 export interface QuickBenchmarkResult {
   gpuRan: boolean;
@@ -20,6 +30,7 @@ export interface QuickBenchmarkResult {
   agree: boolean;
   deviceLabel: string;
   hits: SearchResultItem[];
+  externals: ExternalEngineResult[];
   corpusSize: number;
   mode: SearchMode;
   query: string;
@@ -132,6 +143,55 @@ export async function runQuickCompare(
       cpuTotal = response.totalMatches;
     }
 
+    onStatus('Measuring the comparison libraries…');
+    const externals: ExternalEngineResult[] = [];
+    try {
+      const cpuEngine = new CPUEngine();
+      const timeIt = (run: () => unknown): number[] => {
+        for (let i = 0; i < WARMUPS; i++) run();
+        const samples: number[] = [];
+        for (let i = 0; i < MEASUREMENTS; i++) {
+          const start = performance.now();
+          run();
+          samples.push(performance.now() - start);
+        }
+        return samples;
+      };
+      let ufuzzyMatches = 0;
+      const ufuzzySamples = timeIt(() => {
+        ufuzzyMatches = cpuEngine.searchWithUFuzzy(strings, query, 100).totalMatches;
+      });
+      externals.push({
+        name: 'uFuzzy',
+        medianMs: median(ufuzzySamples),
+        p95Ms: p95(ufuzzySamples),
+        matches: ufuzzyMatches,
+        ran: true
+      });
+    } catch {
+      externals.push({ name: 'uFuzzy', medianMs: 0, p95Ms: 0, matches: 0, ran: false });
+    }
+    try {
+      const fuse = new Fuse(strings, { threshold: 0.4, ignoreLocation: true });
+      let fuseMatches = 0;
+      const fuseSamples: number[] = [];
+      for (let i = 0; i < WARMUPS; i++) fuse.search(query);
+      for (let i = 0; i < MEASUREMENTS; i++) {
+        const start = performance.now();
+        fuseMatches = fuse.search(query).length;
+        fuseSamples.push(performance.now() - start);
+      }
+      externals.push({
+        name: 'Fuse.js',
+        medianMs: median(fuseSamples),
+        p95Ms: p95(fuseSamples),
+        matches: fuseMatches,
+        ran: true
+      });
+    } catch {
+      externals.push({ name: 'Fuse.js', medianMs: 0, p95Ms: 0, matches: 0, ran: false });
+    }
+
     const deviceLabel = gpuRan
       ? `WebGPU ran on ${adapter ? [adapter.vendor, adapter.device].filter(Boolean).join(' · ') : 'this device'}.`
       : gpuFailure
@@ -151,6 +211,7 @@ export async function runQuickCompare(
       agree: gpuRan && resultsAgree(gpuLast, cpuLast, gpuTotal, cpuTotal),
       deviceLabel,
       hits: (gpuRan ? gpuLast : cpuLast).slice(0, 6),
+      externals,
       corpusSize: size,
       mode,
       query

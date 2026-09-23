@@ -124,6 +124,12 @@ code, pre, .mono { font-family: var(--mono); font-variant-numeric: tabular-nums;
 .metrics { display: flex; flex-wrap: wrap; gap: 17px; color: #777b81; font: 10px var(--mono); }
 .metrics strong { color: #34383d; font-weight: 500; }
 .metric-sub { color: var(--faint); }
+.qb-verdict { padding: 14px 18px 2px; font-size: 15px; font-weight: 600; letter-spacing: -.01em; color: var(--ink); }
+.qb-verdict .qb-faster { color: var(--blue); }
+.qb-totals { font-size: 12px; color: #34383d; }
+.qb-totals strong { color: var(--ink); font-weight: 650; }
+.qb-totals .metric-sub { color: #555a62; }
+#qb-chart { display: block; width: calc(100% - 36px); height: auto; margin: 4px 18px 14px; border: 1px solid #eeeee9; border-radius: 4px; background: #fff; }
 .mock-footnote { padding: 9px 18px; background: #f8f7f3; color: #858890; font: 10px var(--mono); }
 
 .playground-collapsed { margin-top: 13px; }

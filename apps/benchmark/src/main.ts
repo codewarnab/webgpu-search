@@ -1,4 +1,5 @@
 import { CPUEngine, WebGPUEngine } from 'webgpu-search';
+import './style.css';
 import { BenchmarkRunner, type BenchmarkRowResult } from './benchmark';
 import type { CorpusType } from './dataset';
 import {

@@ -8,15 +8,15 @@ An ultra-fast fuzzy and substring search engine powered by parallel **WebGPU com
 
 > ℹ️ **Text pipeline:** every string is normalized through a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, dataset container). See [`docs/text-normalization.md`](./docs/text-normalization.md) and [`docs/snapshot-format.md`](./docs/snapshot-format.md).
 
-👉 **[Product site](https://webgpu-fuzzy-search.vercel.app)** · [Try the homepage benchmark](https://webgpu-fuzzy-search.vercel.app/#benchmark) · [Run the full benchmark](https://webgpu-fuzzy-search.vercel.app/benchmark/)
+👉 **[Product site](https://webgpu-fuzzy-search.vercel.app)** · [Try the homepage benchmark](https://webgpu-fuzzy-search.vercel.app/#benchmark) — WebGPU and exact CPU vs uFuzzy and Fuse.js, measured live in your browser.
 
 ---
 
 ## ⚡ Monorepo Structure
 
 - **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, dataset binary serialization, and SSR/Worker-safe memory primitives.
-- **[`apps/site`](./apps/site)**: Monochrome product homepage and a local WebGPU-versus-exact-CPU comparison page.
-- **[`apps/benchmark`](./apps/benchmark)**: Full local benchmark across 10,000 to 2,000,000 records and ASCII, CJK, and emoji/mixed-script corpora.
+- **[`apps/site`](./apps/site)**: Product homepage with a local WebGPU-vs-CPU-vs-uFuzzy-vs-Fuse.js comparison panel.
+- **[`apps/benchmark`](./apps/benchmark)**: Full local benchmark harness across 10,000 to 2,000,000 records and ASCII, CJK, and emoji/mixed-script corpora (not published to the site).
 - **Example apps**: Docs Search, Code Palette, and Log Viewer are mounted under `/examples/` in the same deployment.
 
 ---
@@ -33,7 +33,7 @@ bun install
 bun run dev
 ```
 
-Open the homepage at **`http://localhost:5178`**. The dev server proxies `/benchmark/` and `/examples/.../` to their workspace apps. Run `bun run build` to produce the complete static site at `apps/site/dist`.
+Open the homepage at **`http://localhost:5178`**. The dev server proxies `/examples/.../` to their workspace apps. Run `bun run build` to produce the complete static site at `apps/site/dist`.
 
 ---
 
