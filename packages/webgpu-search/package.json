@@ -1,6 +1,6 @@
 {
   "name": "webgpu-search",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Ultra-fast hybrid fuzzy and substring search library powered by WebGPU compute shaders with uFuzzy CPU fallback",
   "type": "module",
   "main": "./dist/index.cjs",

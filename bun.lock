@@ -81,7 +81,7 @@
     },
     "packages/webgpu-search": {
       "name": "webgpu-search",
-      "version": "0.2.0",
+      "version": "1.0.0",
       "dependencies": {
         "@leeoniya/ufuzzy": "^1.0.19",
       },
