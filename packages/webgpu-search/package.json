@@ -42,12 +42,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/codewarnab/webgpu-fuzzy-search.git",
+    "url": "git+https://github.com/codewarnab/webgpu-search.git",
     "directory": "packages/webgpu-search"
   },
-  "homepage": "https://github.com/codewarnab/webgpu-fuzzy-search#readme",
+  "homepage": "https://github.com/codewarnab/webgpu-search#readme",
   "bugs": {
-    "url": "https://github.com/codewarnab/webgpu-fuzzy-search/issues"
+    "url": "https://github.com/codewarnab/webgpu-search/issues"
   },
   "sideEffects": false,
   "scripts": {

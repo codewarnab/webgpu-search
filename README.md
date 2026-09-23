@@ -1,6 +1,6 @@
 # Browser-Native Fuzzy Search with WebGPU & CPU
 
-[![Live Demo](https://img.shields.io/badge/demo-online-brightgreen.svg)](https://webgpu-fuzzy-search.vercel.app)
+[![Live Demo](https://img.shields.io/badge/demo-online-brightgreen.svg)](https://webgpu-search.vercel.app)
 [![npm version](https://img.shields.io/npm/v/webgpu-search.svg)](https://www.npmjs.com/package/webgpu-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -8,16 +8,17 @@ An ultra-fast fuzzy and substring search engine powered by parallel **WebGPU com
 
 > ℹ️ **Text pipeline:** every string is normalized through a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, dataset container). See [`docs/text-normalization.md`](./docs/text-normalization.md) and [`docs/snapshot-format.md`](./docs/snapshot-format.md).
 
-👉 **[Product site](https://webgpu-fuzzy-search.vercel.app)** · [Try the homepage benchmark](https://webgpu-fuzzy-search.vercel.app/#benchmark) — WebGPU and exact CPU vs uFuzzy and Fuse.js, measured live in your browser.
+👉 **[Product site](https://webgpu-search.vercel.app)** · [Try the homepage benchmark](https://webgpu-search.vercel.app/#benchmark) — WebGPU and exact CPU vs uFuzzy and Fuse.js, measured live in your browser.
 
 ---
 
 ## ⚡ Monorepo Structure
 
 - **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, dataset binary serialization, and SSR/Worker-safe memory primitives.
-- **[`apps/site`](./apps/site)**: Product homepage with a local WebGPU-vs-CPU-vs-uFuzzy-vs-Fuse.js comparison panel.
-- **[`apps/benchmark`](./apps/benchmark)**: Full local benchmark harness across 10,000 to 2,000,000 records and ASCII, CJK, and emoji/mixed-script corpora (not published to the site).
-- **Example apps**: Docs Search, Code Palette, and Log Viewer are mounted under `/examples/` in the same deployment.
+- **[`apps/site`](./apps/site)**: Product homepage with an embedded live WebGPU-vs-CPU-vs-uFuzzy-vs-Fuse.js comparison (`#benchmark`). Published output is `apps/site/dist` (see `vercel.json`; `/benchmark/` and `/compare/` redirect to `/#benchmark`).
+- **[`apps/benchmark`](./apps/benchmark)**: Full local benchmark harness across 10,000 to 2,000,000 records and ASCII, CJK, and emoji/mixed-script corpora (dev server on `:5173`; used by `bun run test:browser` / `bun run test:benchmark`).
+- **[`examples/`](./examples)**: Framework integration recipes (`react`, `vue`, `svelte`, `vanilla`) — not deployed routes.
+- **[`scripts/bench-data/`](./scripts/bench-data)**: Deterministic benchmark fixture generators (moved out of the removed `apps/*` proof apps).
 
 ---
 
@@ -25,15 +26,15 @@ An ultra-fast fuzzy and substring search engine powered by parallel **WebGPU com
 
 ```bash
 # Clone and install dependencies
-git clone https://github.com/codewarnab/webgpu-fuzzy-search.git
-cd webgpu-fuzzy-search
+git clone https://github.com/codewarnab/webgpu-search.git
+cd webgpu-search
 bun install
 
 # Run the site and workspace dev servers
 bun run dev
 ```
 
-Open the homepage at **`http://localhost:5178`**. The dev server proxies `/examples/.../` to their workspace apps. Run `bun run build` to produce the complete static site at `apps/site/dist`.
+Open the homepage at **`http://localhost:5178`**. Run `bun run build` to produce the complete static site at `apps/site/dist`.
 
 ---
 
@@ -215,9 +216,13 @@ The deprecated aliases were removed. Update call sites before upgrading:
 - [**Support matrix + CPU baseline (`docs/support-matrix.md`)**](./docs/support-matrix.md): Browser/OS/runtime support, tested CPU-only baseline, `ufuzzy` opt-in rules, and the named compatibility suite.
 - [**Text normalization (`docs/text-normalization.md`)**](./docs/text-normalization.md): Normative specification for preprocessing pipeline, version caps, delimiter sets, and scoring formulas.
 - [**Naming conventions (`docs/naming-conventions.md`)**](./docs/naming-conventions.md): Domain-first naming rules enforced by `lint:naming`.
+- [**Benchmarks (`docs/benchmarks.md`)**](./docs/benchmarks.md): Frozen fixtures, headless CPU baseline, and browser/WebGPU separation.
+- [**Contributing (`CONTRIBUTING.md`)**](./CONTRIBUTING.md): Setup, commands, PR process, and release workflow.
+- [**Security (`SECURITY.md`)**](./SECURITY.md): Supported versions and vulnerability reporting.
+- [**Code of Conduct (`CODE_OF_CONDUCT.md`)**](./CODE_OF_CONDUCT.md): Community standards.
 
 ---
 
 ## 📄 License
 
-MIT © [codewarnab](https://github.com/codewarnab)
+MIT — see [LICENSE](./LICENSE). © [codewarnab](https://github.com/codewarnab) and webgpu-search contributors.

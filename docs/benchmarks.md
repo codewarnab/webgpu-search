@@ -18,8 +18,8 @@ Generators (deterministic; no `Math.random`):
 
 | Corpus | Generator | Sizes | Anchor |
 | --- | --- | --- | --- |
-| IDE symbols (monaco-palette shape) | `generateMonacoRecords` (`apps/monaco-palette/src/sample-data.ts`) | 5,000 | fully deterministic (`f-001` …) |
-| Data-grid rows (structured logs) | `generateStructuredLogs` (`apps/log-viewer/src/log-generator.ts`) | 10,000 / 50,000 / 100,000 | IDs, level/service/message/latency deterministic; timestamps anchored at `BENCHMARK_LOG_BASE_TIME_MS` (`2026-01-01T00:00:00.000Z`) so snapshot bytes reproduce run-to-run |
+| IDE symbols (prefix-search shape) | `generateMonacoRecords` (`scripts/bench-data/monaco-data.ts`) | 5,000 | fully deterministic (`f-001` …) |
+| Data-grid rows (structured logs) | `generateStructuredLogs` (`scripts/bench-data/log-generator.ts`) | 10,000 / 50,000 / 100,000 | IDs, level/service/message/latency deterministic; timestamps anchored at `BENCHMARK_LOG_BASE_TIME_MS` (`2026-01-01T00:00:00.000Z`) so snapshot bytes reproduce run-to-run |
 
 Index shapes:
 

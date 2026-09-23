@@ -13,6 +13,9 @@
    - **Clean Diff Audit**: Ensure no temporary test files, debug console logs, or dead scripts remain.
 3. **Resolve Findings Before Sign-off**: Any actionable defects or regressions flagged by the verification subagent must be resolved before presenting the final response to the user.
 
+### Exemption — Trivial Changes:
+Skip the verification subagent for trivial, low-risk changes: copy/text edits, dropdown option lists, single-line config or constant tweaks, and other edits with no logic, contract, or control-flow impact. For these, a local `typecheck` + `build` pass by the agent itself is sufficient sign-off.
+
 ---
 
 ## 2. Architecture & Monorepo Standards

@@ -1,6 +1,14 @@
 # webgpu-search Website Rebuild Plan
 
-**Status:** Approved; implementation in progress on `main`.
+**Status:** Shipped with post-1.0 revisions (2026-09-23). Homepage uses the
+wireframe blue accent (`--blue: #1769e0`) with an embedded `#benchmark` quick
+comparison (WebGPU vs exact CPU vs uFuzzy vs Fuse.js). `/benchmark/` and
+`/compare/` redirect to `/#benchmark` (see `vercel.json`); there is no
+separate full-matrix page in production. The `apps/docs-search`,
+`apps/monaco-palette`, and `apps/log-viewer` example apps were removed and
+benchmark fixture generators moved to `scripts/bench-data/`; `examples/`
+holds framework recipes only. The §4 route table and §§5/7 app lists below
+are historical and no longer reflect the tree.
 **Design update (2026-09-23):** monochrome direction superseded — homepage uses the wireframe blue accent (`--blue: #1769e0`) and single-column hero with full-width `quick-start.ts` code window. Benchmarks consolidated: one quick WebGPU-vs-CPU benchmark embedded on the homepage (`#benchmark`, shared `apps/site/src/quick-benchmark.ts`), full matrix only at `/benchmark/`; `/compare/` retired with a Vercel redirect to `/benchmark/`. The homepage demo doubles as entry point, with an optional collapsed playground for custom text.
 **Owner intent:** Replace the current benchmark dashboard UI with a polished product homepage, while keeping browser-based comparison and full benchmark testing available as clear, separate pages on the same site.  
 **Primary deployment:** Vercel, currently configured to publish `apps/benchmark/dist`.  

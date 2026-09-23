@@ -162,7 +162,7 @@ bun run test:compatibility
 bun run test:browser
 
 # Full repo gate (includes compatibility suites plus records/highlight/
-# mutations/worker/snapshot/observability/proof-apps/normalization/
+# mutations/worker/snapshot/observability/normalization/
 # filtering/faceting/diagnostics)
 bun run test:all
 ```

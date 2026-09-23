@@ -73,9 +73,9 @@ bun run check:bundle-size
   is `@leeoniya/ufuzzy`.
 - Default worker construction uses a **same-origin module URL**, not a blob:
   `SearchWorkerClient` builds `new Worker(new URL('./worker.js', import.meta.url),
-  { type: 'module' })` (`src/worker/worker-client.ts`), and the proof apps
-  construct `new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' })`
-  under Vite (`apps/docs-search/src/docs-engine.ts`). Keep `script-src 'self'`
+  { type: 'module' })` (`src/worker/worker-client.ts`), and hosts typically
+  construct `new Worker(new URL('./search.worker.ts', import.meta.url), { type: 'module' })`
+  under Vite (see `examples/react/README.md`). Keep `script-src 'self'`
   and matching `worker-src 'self'`.
 - Only if the host itself wraps the worker file in a `Blob` URL must
   `script-src` / `worker-src` additionally allow `blob:`. The library never
@@ -85,7 +85,8 @@ bun run check:bundle-size
 
 ## 4. Worker setup
 
-Dedicated worker file (one line — re-exported pattern used by all proof apps):
+Dedicated worker file (one line — pattern used by `examples/react`,
+`examples/vue`, and `examples/svelte`):
 
 ```ts
 // src/worker.ts (bundled as a separate worker entry by Vite)
@@ -94,7 +95,7 @@ import { startSearchWorker } from 'webgpu-search/worker';
 startSearchWorker();
 ```
 
-Main-thread client (`apps/docs-search/src/docs-engine.ts` pattern):
+Main-thread client (`examples/react/useDocumentSearch.ts` pattern):
 
 ```ts
 import { SearchWorkerClient } from 'webgpu-search';
@@ -127,8 +128,8 @@ Rules:
 - Worker indexes recover via `restore()` / re-`init()` (the worker owns its
   `DocumentIndex`); `DESTROY` tears it down. `SearchWorkerClient.destroy()`
   is idempotent — always call it plus `worker.terminate()` on
-  `pagehide` / component unmount (proof-app pattern in
-  `apps/docs-search/src/main.ts`).
+  `pagehide` / component unmount (framework-recipe pattern in
+  `examples/react/useDocumentSearch.ts`).
 - Node.js / SSR: there is no default `Worker` — pass a custom
   `options.worker` instance or factory, otherwise construction throws with
   an actionable message.
@@ -139,7 +140,7 @@ Rules:
 
 - Importing `webgpu-search` (either entry) at SSR / Node.js import time is
   safe: zero unguarded `window` / `document` globals (pinned by the
-  `test:proof-apps` DOM-free engine/data audit and the `test:contracts` SSR
+  `test:search-modes` portability audit and the `test:contracts` SSR
   worker guard). GPU detection is guarded
   (`typeof navigator !== 'undefined' && !!navigator.gpu`,
   `docs/support-matrix.md` §3); absence of WebGPU serves the CPU baseline
@@ -153,31 +154,25 @@ Rules:
 
 ## 6. Example-UI accessibility guidance
 
-Proof-app UIs (`apps/monaco-palette`, `apps/log-viewer`, `apps/docs-search`)
-demonstrate the interaction patterns; hosts shipping their own UI should meet
-at least this bar:
+Hosts shipping their own search UI (see the `examples/` framework recipes)
+should meet at least this bar:
 
 1. **Labels for every control.** Every `<select>` / `<input>` has a
-   programmatic label (`<label for="mode-select">`, proof-app pattern in
-   `apps/docs-search/index.html`). Placeholder text is never the only label.
+   programmatic label (`<label for="mode-select">`). Placeholder text is never the only label.
 2. **Full keyboard operation.** Search input + result list must work without
    a pointer: `ArrowDown` / `ArrowUp` move selection, `Enter` opens the
-   selection, `Escape` clears the query (proof-app pattern in
-   `apps/docs-search/src/main.ts`). Keep focus in the input while navigating
+   selection, `Escape` clears the query. Keep focus in the input while navigating
    results; move focus into dialogs (e.g. `formTitle.focus()` on modal open)
    and return it on close.
 3. **Live-region announcements.** Expose result-count + engine/fallback status
    in an `aria-live="polite"` region so screen-reader users hear
-   "N matches, CPU fallback (device-lost)" without focus theft. The proof
-   apps render these as plain telemetry spans — wrap the host equivalent in
-   a live region.
+   "N matches, CPU fallback (device-lost)" without focus theft. Render these
+   as plain telemetry spans wrapped in a live region.
 4. **Highlight safety.** Render `highlightedText` only through an escaping
-   sanitizer that preserves `<mark>` (proof-app `sanitizeHighlighted` in
-   `apps/docs-search/src/main.ts`); never inject raw record text via
+   sanitizer that preserves `<mark>`; never inject raw record text via
    `innerHTML`. Honor `escapeHtml: true` on untrusted corpora.
 5. **Reduced motion.** Gate smooth scrolling / animations behind
-   `matchMedia('(prefers-reduced-motion: reduce)')` — the proof apps call
-   `scrollIntoView({ behavior: 'smooth' })` on selection; hosts must fall
+   `matchMedia('(prefers-reduced-motion: reduce)')` — fall
    back to `behavior: 'auto'` when reduced motion is requested.
 6. **Status + error visibility.** Surface `fallbackReason`, overflow, and
    restore rejects as text (not color alone), and announce them in the live

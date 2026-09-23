@@ -1,11 +1,11 @@
 ---
 name: milestone-workflow
-description: Autonomous milestone execution workflow for webgpu-fuzzy-search. Use whenever the user provides a milestone, issue, or feature task to research, implement, verify, and raise a PR end-to-end without requiring repetitive prompting.
+description: Autonomous milestone execution workflow for webgpu-search. Use whenever the user provides a milestone, issue, or feature task to research, implement, verify, and raise a PR end-to-end without requiring repetitive prompting.
 ---
 
 # Milestone Workflow
 
-An autonomous, end-to-end runbook for executing development milestones in `webgpu-fuzzy-search`. When given a milestone prompt (e.g., "Issue #9 M3: ..."), execute all phases sequentially without pausing for user confirmation unless blocked.
+An autonomous, end-to-end runbook for executing development milestones in `webgpu-search`. When given a milestone prompt (e.g., "Issue #9 M3: ..."), execute all phases sequentially without pausing for user confirmation unless blocked.
 
 ---
 

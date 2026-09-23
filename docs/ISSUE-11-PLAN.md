@@ -1,8 +1,13 @@
 # Issue #11 — 1.0 Lock Compatibility, Reliability, and the Embedding Ecosystem: Implementation Plan
 
-> **Issue Reference**: [GitHub Issue #11: 1.0: lock compatibility, reliability, and the embedding ecosystem](https://github.com/codewarnab/webgpu-fuzzy-search/issues/11)
+> **Issue Reference**: [GitHub Issue #11: 1.0: lock compatibility, reliability, and the embedding ecosystem](https://github.com/codewarnab/webgpu-search/issues/11)
 > **Target Milestone**: `1.0.0`
 > **Status**: Phases 0–6 complete
+> **Post-1.0 note (2026-09-23)**: the `apps/docs-search`,
+> `apps/monaco-palette`, and `apps/log-viewer` proof apps were removed;
+> benchmark fixture generators moved to `scripts/bench-data/`, and
+> `scripts/test-proof-apps.ts` / `scripts/assemble-site.ts` were deleted.
+> Phase 4/5 prose below referencing those paths is historical.
 > **Predecessors**: v0.1.1 (#8), v0.2 (#7), v0.3 (#9), v0.4 (#10)
 > **Roadmap**: Issue #12 (embeddable search infrastructure through 1.0)
 

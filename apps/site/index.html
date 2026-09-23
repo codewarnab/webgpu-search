@@ -24,7 +24,7 @@
       </a>
       <nav class="nav" aria-label="Main navigation">
         <a href="#features">Features</a>
-        <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noreferrer">GitHub ↗</a>
+        <a href="https://github.com/codewarnab/webgpu-search" target="_blank" rel="noreferrer">GitHub ↗</a>
         <a class="nav-cta" href="#benchmark">Live benchmark</a>
       </nav>
     </header>
@@ -38,7 +38,7 @@
           <a class="button button-primary" href="#benchmark">Try the live benchmark <span aria-hidden="true">↗</span></a>
         </div>
         <div class="hero-facts" aria-label="Product highlights">
-          <span>Worker-ready</span><span>Unicode-aware</span><span>Zero runtime dependencies</span>
+          <span>Worker-ready</span><span>Unicode-aware</span><span>CPU fallback built in</span>
         </div>
       </section>
 
@@ -64,33 +64,19 @@
           <div class="playground-top"><div class="playground-title">WebGPU vs CPU vs popular libs</div><span class="preview-label">live</span></div>
           <div class="search-controls">
             <div class="search-input-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input id="qb-query" class="search-input" type="search" value="AuthController" aria-label="Benchmark query" autocomplete="off" /></div>
-            <select id="qb-size" class="control-select" aria-label="Dataset size"><option value="10000">10,000 records</option><option value="100000" selected>100,000 records</option></select>
+            <select id="qb-size" class="control-select" aria-label="Dataset size"><option value="100000" selected>100,000 records</option><option value="200000">200,000 records</option><option value="500000">500,000 records</option><option value="1000000">1,000,000 records</option><option value="2000000">2,000,000 records</option></select>
             <button id="qb-run" class="button button-small" type="button">Run benchmark</button>
           </div>
           <div class="result-summary"><span id="qb-status" role="status" aria-live="polite">Ready. Runs locally, nothing is uploaded.</span><span>7 timed searches / engine</span></div>
           <div id="qb-results" hidden>
             <svg id="qb-chart" role="img" aria-label="Median search latency comparison"></svg>
+            <div class="qb-data-link-row"><a id="qb-data-link" href="corpus.html" target="_blank" rel="noopener">View generated data &amp; matches ↗</a></div>
           </div>
           <div class="playground-bottom">
             <div class="metrics"><span id="qb-device">WebGPU has setup costs, so it may not win on every device.</span></div>
           </div>
           <div class="mock-footnote" id="qb-note">CPU route: scoreExactMatches (webgpu-search exact scorer); uFuzzy via CPUEngine, Fuse.js defaults. Setup is excluded from warm-search timing.</div>
         </div>
-        <details class="playground playground-collapsed">
-          <summary>Need a playground? Search your own text</summary>
-          <div class="playground-body">
-            <textarea id="pg-data" rows="5" aria-label="Your lines, one per row">AuthController handles login sessions
-BillingSearchIndex ranks invoices by relevance
-SearchWorkerClient keeps queries off the UI thread
-ProfileView renders user settings</textarea>
-            <div class="playground-run-row">
-              <div class="search-input-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input id="pg-query" class="search-input" type="search" value="auth" aria-label="Playground query" autocomplete="off" /></div>
-              <button id="pg-run" class="button button-small" type="button">Search my text</button>
-            </div>
-            <p id="pg-status" class="sr-status" role="status" aria-live="polite">Runs on CPU in this browser.</p>
-            <ol id="pg-results" class="playground-results"></ol>
-          </div>
-        </details>
       </section>
 
       <section id="features" class="section" aria-labelledby="features-title">
@@ -103,7 +89,12 @@ ProfileView renders user settings</textarea>
           <article class="feature"><div class="feature-num">02 — MATCHING</div><h3>Useful search modes</h3><p>Fuzzy, substring, token, prefix, typo tolerance, and autocomplete.</p></article>
           <article class="feature"><div class="feature-num">03 — TEXT</div><h3>Unicode-aware</h3><p>Normalize and match across scripts, including CJK text and emoji.</p></article>
           <article class="feature"><div class="feature-num">04 — APP READY</div><h3>Off-thread &amp; observable</h3><p>Worker support, cancellation, memory stats, timings, and persistence tools.</p></article>
+          <article class="feature is-extra" hidden><div class="feature-num">05 — ROUTING</div><h3>Smart dynamic routing</h3><p>Runs on WebGPU at scale (30k+ items), uFuzzy on CPU when small or unavailable.</p></article>
+          <article class="feature is-extra" hidden><div class="feature-num">06 — TYPING</div><h3>Zero-stutter keystrokes</h3><p>Stale searches are dropped mid-flight via AbortSignal and sequence tagging.</p></article>
+          <article class="feature is-extra" hidden><div class="feature-num">07 — SNAPSHOTS</div><h3>Portable snapshots</h3><p>Binary encode and restore indexes; one shared GPU device across all of them.</p></article>
+          <article class="feature is-extra" hidden><div class="feature-num">08 — PARITY</div><h3>Bit-exact parity</h3><p>Identical normalized scores on GPU and CPU. Zero runtime dependencies.</p></article>
         </div>
+        <div class="feature-more-wrap"><button id="features-more" class="feature-more" type="button" aria-expanded="false">Show more ↓</button></div>
       </section>
 
       <section class="section" aria-label="Install webgpu-search">
@@ -119,7 +110,7 @@ ProfileView renders user settings</textarea>
         <span>webgpu-search · WebGPU when it helps, CPU when it should.</span>
         <nav class="footer-links" aria-label="Footer navigation">
           <a href="https://www.npmjs.com/package/webgpu-search" target="_blank" rel="noreferrer">npm</a>
-          <a href="https://github.com/codewarnab/webgpu-fuzzy-search" target="_blank" rel="noreferrer">Source</a>
+          <a href="https://github.com/codewarnab/webgpu-search" target="_blank" rel="noreferrer">Source</a>
           <a href="#benchmark">Benchmark</a>
         </nav>
       </div>

@@ -25,12 +25,15 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5178,
-    allowedHosts: ['free-vm-vcn.tail0070c0.ts.net']
+    allowedHosts: ['free-vm-vcn.tail0070c0.ts.net'],
+    // No auto-reload: the user refreshes manually.
+    hmr: false
   },
   build: {
     rollupOptions: {
       input: {
-        home: path.resolve(currentDir, 'index.html')
+        home: path.resolve(currentDir, 'index.html'),
+        corpus: path.resolve(currentDir, 'corpus.html')
       }
     }
   }

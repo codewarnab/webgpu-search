@@ -1,7 +1,6 @@
-import { SearchIndex } from 'webgpu-search';
-import '@fontsource-variable/inter';
+import './fonts.css';
 import './style.css';
-import { formatMs, runQuickCompare } from './quick-benchmark';
+import { formatMs } from './format';
 
 const copyButton = document.querySelector<HTMLButtonElement>('#copy-install');
 
@@ -13,14 +12,9 @@ const qbPanel = document.querySelector<HTMLElement>('#qb-results');
 const qbFields = {
   device: document.querySelector<HTMLElement>('#qb-device'),
   note: document.querySelector<HTMLElement>('#qb-note'),
-  chart: document.querySelector<SVGSVGElement>('#qb-chart')
+  chart: document.querySelector<SVGSVGElement>('#qb-chart'),
+  dataLink: document.querySelector<HTMLAnchorElement>('#qb-data-link')
 };
-
-const pgData = document.querySelector<HTMLTextAreaElement>('#pg-data');
-const pgQuery = document.querySelector<HTMLInputElement>('#pg-query');
-const pgRun = document.querySelector<HTMLButtonElement>('#pg-run');
-const pgStatus = document.querySelector<HTMLElement>('#pg-status');
-const pgResults = document.querySelector<HTMLOListElement>('#pg-results');
 
 function renderQbChart(
   chart: SVGSVGElement,
@@ -69,8 +63,10 @@ async function runHomepageBenchmark(): Promise<void> {
   qbPanel.hidden = true;
   qbStatus.classList.add('is-busy');
   try {
+    qbStatus.textContent = 'Loading the benchmark engine…';
+    const { runQuickCompare } = await import('./quick-benchmark');
     const result = await runQuickCompare(Number(qbSize.value), 'fuzzy', query, message => {
-      qbStatus.textContent = message;
+      if (qbStatus) qbStatus.textContent = message;
     });
     if (qbFields.device) qbFields.device.textContent = result.deviceLabel;
     if (qbFields.chart) {
@@ -84,6 +80,8 @@ async function runHomepageBenchmark(): Promise<void> {
     }
     if (qbFields.note) qbFields.note.textContent =
       `CPU route: scoreExactMatches (webgpu-search exact scorer); uFuzzy via CPUEngine, Fuse.js defaults · Corpus: ${result.corpusSize.toLocaleString()} generated records · Query: “${result.query}”. Setup is excluded from warm-search timing.`;
+    if (qbFields.dataLink) qbFields.dataLink.href =
+      `corpus.html?query=${encodeURIComponent(result.query)}&size=${result.corpusSize}`;
     qbPanel.hidden = false;
     qbStatus.textContent = 'Completed 7 timed searches per available engine.';
   } catch (error) {
@@ -95,49 +93,31 @@ async function runHomepageBenchmark(): Promise<void> {
   }
 }
 
-async function runPlayground(): Promise<void> {
-  if (!pgData || !pgQuery || !pgRun || !pgStatus || !pgResults) return;
-  const lines = pgData.value.split('\n').map(line => line.trim()).filter(Boolean).slice(0, 200);
-  const query = pgQuery.value.trim();
-  if (lines.length === 0) {
-    pgStatus.textContent = 'Add at least one line of text.';
-    return;
-  }
-  if (!query) {
-    pgStatus.textContent = 'Enter a query.';
-    pgQuery.focus();
-    return;
-  }
-  pgRun.disabled = true;
-  pgStatus.textContent = 'Searching your text…';
-  try {
-    const index = await SearchIndex.create(lines, { preferGpu: false });
-    try {
-      const response = await index.search(query, { mode: 'fuzzy', limit: 8 });
-      pgResults.replaceChildren();
-      for (const item of response.results) {
-        const row = document.createElement('li');
-        row.textContent = `${item.text} · score ${item.score}`;
-        pgResults.append(row);
-      }
-      if (response.results.length === 0) {
-        const row = document.createElement('li');
-        row.textContent = 'No matches in your text.';
-        pgResults.append(row);
-      }
-      pgStatus.textContent = `${response.totalMatches} match${response.totalMatches === 1 ? '' : 'es'} · CPU, local only.`;
-    } finally {
-      index.destroy();
+qbRun?.addEventListener('click', () => { void runHomepageBenchmark(); });
+
+// Prefetch the benchmark chunk when its section scrolls into view so the
+// first Run click feels instant. Initial page load stays lean regardless.
+const benchSection = document.querySelector('#benchmark');
+if (benchSection && 'IntersectionObserver' in window) {
+  const benchObserver = new IntersectionObserver(entries => {
+    if (entries.some(entry => entry.isIntersecting)) {
+      void import('./quick-benchmark');
+      benchObserver.disconnect();
     }
-  } catch (error) {
-    pgStatus.textContent = `Playground failed: ${error instanceof Error ? error.message : String(error)}`;
-  } finally {
-    pgRun.disabled = false;
-  }
+  });
+  benchObserver.observe(benchSection);
 }
 
-qbRun?.addEventListener('click', () => { void runHomepageBenchmark(); });
-pgRun?.addEventListener('click', () => { void runPlayground(); });
+const featuresMore = document.querySelector<HTMLButtonElement>('#features-more');
+featuresMore?.addEventListener('click', () => {
+  const extras = [...document.querySelectorAll<HTMLElement>('.feature.is-extra')];
+  const expanding = extras.some(extra => extra.hidden);
+  for (const extra of extras) extra.hidden = !expanding;
+  if (featuresMore) {
+    featuresMore.textContent = expanding ? 'Show less ↑' : 'Show more ↓';
+    featuresMore.setAttribute('aria-expanded', String(expanding));
+  }
+});
 
 copyButton?.addEventListener('click', async () => {
   try {

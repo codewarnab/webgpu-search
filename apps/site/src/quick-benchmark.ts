@@ -7,7 +7,7 @@ import {
   type SearchMode,
   type SearchResultItem
 } from 'webgpu-search';
-import Fuse from 'fuse.js';
+import { generateCorpus } from './corpus-gen';
 
 export interface ExternalEngineResult {
   name: string;
@@ -36,15 +36,8 @@ export interface QuickBenchmarkResult {
   query: string;
 }
 
-const prefixes = ['src/auth', 'src/search', 'src/components', 'packages/engine', 'apps/docs', 'examples/palette'];
-const nouns = ['Auth', 'User', 'Profile', 'Order', 'Invoice', 'Search', 'Query', 'Worker', 'Document', 'Session', 'Token', 'Index'];
-const suffixes = ['Controller', 'Service', 'Handler', 'Manager', 'Provider', 'Repository', 'View', 'Worker', 'Index'];
-
-export function generateCorpus(size: number): string[] {
-  return Array.from({ length: size }, (_, i) =>
-    `${prefixes[i % prefixes.length]}/${nouns[(i * 7 + 3) % nouns.length]}${nouns[(i * 13 + 5) % nouns.length]}${suffixes[(i * 17 + 1) % suffixes.length]}_${i}.ts`
-  );
-}
+export { generateCorpus } from './corpus-gen';
+export { formatMs } from './format';
 
 export function median(samples: number[]): number {
   const sorted = [...samples].sort((a, b) => a - b);
@@ -54,10 +47,6 @@ export function median(samples: number[]): number {
 export function p95(samples: number[]): number {
   const sorted = [...samples].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.95) - 1)] ?? 0;
-}
-
-export function formatMs(value: number): string {
-  return `${value < 10 ? value.toFixed(2) : value.toFixed(1)} ms`;
 }
 
 function resultsAgree(gpu: SearchResultItem[], cpu: SearchResultItem[], gpuTotal: number, cpuTotal: number): boolean {
@@ -172,6 +161,7 @@ export async function runQuickCompare(
       externals.push({ name: 'uFuzzy', medianMs: 0, p95Ms: 0, matches: 0, ran: false });
     }
     try {
+      const { default: Fuse } = await import('fuse.js');
       const fuse = new Fuse(strings, { threshold: 0.4, ignoreLocation: true });
       let fuseMatches = 0;
       const fuseSamples: number[] = [];
