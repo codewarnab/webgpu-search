@@ -54,7 +54,7 @@ async function runHomepageBenchmark(): Promise<void> {
       : 'WebGPU was not available in this browser';
     if (qbFields.device) qbFields.device.textContent = result.deviceLabel;
     if (qbFields.note) qbFields.note.textContent =
-      `Corpus: ${result.corpusSize.toLocaleString()} generated records · Query: “${result.query}”. Setup is excluded from warm-search timing.`;
+      `CPU route: scoreExactMatches (webgpu-search exact scorer, same package) · Corpus: ${result.corpusSize.toLocaleString()} generated records · Query: “${result.query}”. Setup is excluded from warm-search timing.`;
     qbPanel.hidden = false;
     qbStatus.textContent = 'Completed 7 timed searches per available engine.';
   } catch (error) {

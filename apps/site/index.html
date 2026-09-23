@@ -54,7 +54,7 @@
       <section id="benchmark" class="section" aria-labelledby="benchmark-title">
         <div class="section-head">
           <div><div class="section-kicker">01 / Benchmark</div><h2 id="benchmark-title">How fast is it here?</h2></div>
-          <p>Same generated records, same query — WebGPU against exact CPU. Nothing is uploaded.</p>
+          <p>Same generated records, same query — WebGPU vs the webgpu-search exact CPU scorer (<span class="mono">scoreExactMatches</span>). Nothing is uploaded.</p>
         </div>
         <div class="playground">
           <div class="playground-top"><div class="playground-title">WebGPU vs CPU</div><span class="preview-label">live</span></div>
@@ -67,7 +67,7 @@
           <div id="qb-results" hidden>
             <div class="result-summary" style="padding-top:11px">
               <span>WEBGPU <strong id="qb-gpu">—</strong> <span id="qb-gpu-d" class="metric-sub"></span></span>
-              <span>CPU <strong id="qb-cpu">—</strong> <span id="qb-cpu-d" class="metric-sub"></span></span>
+              <span title="scoreExactMatches from the webgpu-search package (exact parity scorer)">CPU · webgpu-search exact <strong id="qb-cpu">—</strong> <span id="qb-cpu-d" class="metric-sub"></span></span>
               <span>AGREEMENT <strong id="qb-agree">—</strong> <span id="qb-agree-d" class="metric-sub"></span></span>
             </div>
           </div>
@@ -75,7 +75,7 @@
             <div class="metrics"><span id="qb-device">WebGPU has setup costs, so it may not win on every device.</span></div>
             <a class="button button-small" href="/benchmark/">Open full matrix ↗</a>
           </div>
-          <div class="mock-footnote" id="qb-note">Dataset setup is excluded from warm-search timing.</div>
+          <div class="mock-footnote" id="qb-note">CPU route: scoreExactMatches (webgpu-search exact scorer, same package). Dataset setup is excluded from warm-search timing.</div>
         </div>
         <details class="playground playground-collapsed">
           <summary>Need a playground? Search your own text</summary>
