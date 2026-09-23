@@ -16,8 +16,6 @@ const qbFields = {
   dataLink: document.querySelector<HTMLAnchorElement>('#qb-data-link')
 };
 
-const qbShareRow = document.querySelector<HTMLElement>('#qb-share-row');
-const qbShareStatus = document.querySelector<HTMLElement>('#qb-share-status');
 const qbGpuFlag = document.querySelector<HTMLElement>('#qb-gpu-flag');
 const qbHistoryWrap = document.querySelector<HTMLElement>('#qb-history-wrap');
 const qbHistoryList = document.querySelector<HTMLElement>('#qb-history-list');
@@ -110,22 +108,14 @@ async function autoShareResult(result: {
   mode: string;
   gpuRan: boolean;
 }): Promise<void> {
-  if (!qbShareRow || !qbShareStatus) return;
-  qbShareRow.hidden = true;
-  qbShareStatus.textContent = '';
   if (!result.gpuRan) return; // CPU-only runs are not crowdsourced
   try {
     const share = await import('./benchmark-share');
     const full = share.buildSharePayload(result as never);
     if (share.alreadyShared(full.fingerprint)) return; // sent before from this browser
     const res = await share.submitSharedResult(full);
-    if (res.unconfigured) return; // backend not enabled: stay silent
-    if (!res.ok) return; // network/rate-limit hiccup: benchmark itself is unaffected
+    if (!res.ok) return; // backend off / network hiccup: benchmark itself is unaffected
     share.markShared(full.fingerprint);
-    qbShareRow.hidden = false;
-    qbShareStatus.textContent = res.duplicate
-      ? 'Untested hardware — already in the community dataset.'
-      : 'Untested hardware — result shared to the community dataset. Thanks!';
   } catch {
     // share chunk failed to load: benchmark itself is unaffected
   }

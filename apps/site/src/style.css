@@ -166,9 +166,7 @@ mark { background: #fff1b8; border-radius: 2px; padding: 0 1px; }
 .gpu-flag details { font-size: 11px; }
 .gpu-flag summary { cursor: pointer; color: var(--blue-dark); }
 .gpu-flag ol { margin: 6px 0 0; padding-left: 18px; }
-.qb-share-row { display: flex; align-items: center; gap: 10px; padding: 2px 18px 14px; }
-.qb-share-row[hidden] { display: none; }
-.qb-share-status { color: var(--muted); font: 11px var(--mono); }
+.gpu-flag summary { cursor: pointer; color: var(--blue-dark); }
 
 .feature-grid { display: grid; grid-template-columns: repeat(4, 1fr); border-top: 1px solid var(--line); border-left: 1px solid var(--line); }
 .feature-more-wrap { display: flex; justify-content: center; margin-top: 14px; }
