@@ -712,16 +712,25 @@ async function runMockTests() {
     for (const token of ['packDataset', 'deserializeDataset', 'STRING_ISOLATED_ENRICHMENT', 'latestQueryId', 'SEARCH_ERROR', 'datasetGeneration']) {
         if (!workerSrc.includes(token)) throw new Error(`search.worker.ts missing  token: ${token}`);
     }
-    // Main thread enriches compact hits and transfers the dataset buffer.
+    // Main thread must not regress to the legacy ASCII packer or clone legacy
+    // byte buffers. The redesigned benchmark runs the matrix via
+    // BenchmarkRunner on the main thread (no per-keystroke worker search);
+    // the app-level worker module above still carries the unicode-path
+    // coverage, so main.ts is checked for the new architecture instead of
+    // the retired worker-search DOM protocol.
     const mainSrc = await fsSentinel.readFile(new URL('../apps/benchmark/src/main.ts', import.meta.url), 'utf8');
-    if (mainSrc.includes('recordsBufferData.slice(0)')) {
+    const mainCode = mainSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1');
+    if (/packStringsToGPUBuffer\s*\(/.test(mainCode) || /import[^;]*packStringsToGPUBuffer/.test(mainCode)) {
+        throw new Error('main.ts must not use legacy packStringsToGPUBuffer (blocker)');
+    }
+    if (mainSrc.includes('recordsBufferData.slice(0)') || mainSrc.includes('offsetsBufferData.slice(0)')) {
         throw new Error('main.ts must not clone legacy byte buffers to the worker (blocker)');
     }
-    if (!mainSrc.includes('gpuCompact') || !mainSrc.includes('serializedDataset.slice(0)')) {
-        throw new Error('main.ts missing string-isolated enrichment / dataset transfer (blocker)');
+    for (const token of ['BenchmarkRunner', 'generateBenchmarkCsv', 'generateMarkdownSummary', 'svgToPngBlob']) {
+        if (!mainSrc.includes(token)) throw new Error(`main.ts missing benchmark token: ${token}`);
     }
-    for (const token of ['SEARCH_ERROR', 'activeDatasetGeneration', 'requestGeneration']) {
-        if (!mainSrc.includes(token)) throw new Error(`main.ts missing  token: ${token}`);
+    if (!mainSrc.includes('WebGPU did not initialize') && !mainSrc.includes('GPU did not run') && !mainSrc.includes('GPU not run')) {
+        throw new Error('main.ts must label the WebGPU-unavailable path honestly (blocker)');
     }
     console.log('   ✅ sentinels verified (scripts-only, ufuzzy conflict, worker unicode path)');
 

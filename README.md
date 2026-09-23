@@ -1,4 +1,4 @@
-# WebGPU vs uFuzzy Benchmark & Search Engine
+# Browser-Native Fuzzy Search with WebGPU & CPU
 
 [![Live Demo](https://img.shields.io/badge/demo-online-brightgreen.svg)](https://webgpu-fuzzy-search.vercel.app)
 [![npm version](https://img.shields.io/npm/v/webgpu-search.svg)](https://www.npmjs.com/package/webgpu-search)
@@ -8,14 +8,16 @@ An ultra-fast fuzzy and substring search engine powered by parallel **WebGPU com
 
 > ℹ️ **Text pipeline:** every string is normalized through a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, dataset container). See [`docs/text-normalization.md`](./docs/text-normalization.md) and [`docs/snapshot-format.md`](./docs/snapshot-format.md).
 
-👉 **[Live Interactive Benchmark & Playground](https://webgpu-fuzzy-search.vercel.app)**
+👉 **[Product site](https://webgpu-fuzzy-search.vercel.app)** · [Try the browser comparison](https://webgpu-fuzzy-search.vercel.app/compare/) · [Run the full benchmark](https://webgpu-fuzzy-search.vercel.app/benchmark/)
 
 ---
 
 ## ⚡ Monorepo Structure
 
 - **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, dataset binary serialization, and SSR/Worker-safe memory primitives.
-- **[`apps/benchmark`](./apps/benchmark)**: Interactive evaluation dashboard and live test suite comparing WebGPU compute against CPU algorithms across 10,000 to 2,000,000+ records across multiple script corpora (ASCII, CJK, and Emoji).
+- **[`apps/site`](./apps/site)**: Monochrome product homepage and a local WebGPU-versus-exact-CPU comparison page.
+- **[`apps/benchmark`](./apps/benchmark)**: Full local benchmark across 10,000 to 2,000,000 records and ASCII, CJK, and emoji/mixed-script corpora.
+- **Example apps**: Docs Search, Code Palette, and Log Viewer are mounted under `/examples/` in the same deployment.
 
 ---
 
@@ -27,11 +29,11 @@ git clone https://github.com/codewarnab/webgpu-fuzzy-search.git
 cd webgpu-fuzzy-search
 bun install
 
-# Run the local benchmark dashboard
+# Run the site and workspace dev servers
 bun run dev
 ```
 
-Open **`http://localhost:5173`** in any WebGPU-capable browser (Chrome, Edge, Safari 18+, or Firefox Nightly).
+Open the homepage at **`http://localhost:5178`**. The dev server proxies `/benchmark/` and `/examples/.../` to their workspace apps. Run `bun run build` to produce the complete static site at `apps/site/dist`.
 
 ---
 

@@ -18,6 +18,7 @@ const wgslPlugin = {
 };
 
 export default defineConfig({
+  base: '/examples/docs-search/',
   plugins: [wgslPlugin],
   worker: {
     format: 'es',

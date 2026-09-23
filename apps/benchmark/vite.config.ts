@@ -18,6 +18,7 @@ const wgslPlugin = {
 };
 
 export default defineConfig({
+  base: '/benchmark/',
   plugins: [wgslPlugin],
   worker: {
     format: 'es',

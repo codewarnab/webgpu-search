@@ -12,7 +12,7 @@
     },
     "build": {
       "dependsOn": ["^build", "check:shaders"],
-      "inputs": ["src/**", "index.html", "package.json", "tsconfig.json", "tsup.config.ts", "vite.config.ts", "$TURBO_ROOT$/tsconfig.base.json"],
+      "inputs": ["src/**", "index.html", "package.json", "tsconfig.json", "tsup.config.ts", "vite.config.ts", "$TURBO_ROOT$/tsconfig.base.json", "$TURBO_ROOT$/apps/site/src/style.css"],
       "outputs": ["dist/**"]
     },
     "test": {

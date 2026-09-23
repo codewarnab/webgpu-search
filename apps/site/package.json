@@ -1,18 +1,16 @@
 {
-  "name": "benchmark",
+  "name": "site",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host 0.0.0.0 --port 5178",
     "build": "vite build",
-    "preview": "vite preview",
+    "preview": "vite preview --host 0.0.0.0 --port 4178",
     "typecheck": "tsc --noEmit",
     "test": "tsc --noEmit"
   },
-  "dependencies": {
-    "webgpu-search": "workspace:*"
-  },
+  "dependencies": { "webgpu-search": "workspace:*" },
   "devDependencies": {
     "@webgpu/types": "^0.1.72",
     "typescript": "~6.0.2",

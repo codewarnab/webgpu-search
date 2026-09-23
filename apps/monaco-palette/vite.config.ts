@@ -18,6 +18,7 @@ const wgslPlugin = {
 };
 
 export default defineConfig({
+  base: '/examples/code-palette/',
   plugins: [wgslPlugin],
   worker: {
     format: 'es',
