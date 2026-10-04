@@ -77,30 +77,49 @@ export function buildFingerprint(
   return `webgpu-${fnv1aHex(key)}`;
 }
 
+/** Server-side limits (api/submit-benchmark.ts); clamp so a valid run is never rejected. */
+const LIMITS = { adapterField: 300, adapterType: 64, tierReason: 300, family: 32, query: 120, externalName: 32, externals: 8, ms: 60000, count: 2000000 } as const;
+
+const clampStr = (value: string, max: number): string => value.slice(0, max);
+const clampMs = (value: number): number => (Number.isFinite(value) ? Math.min(LIMITS.ms, Math.max(0, value)) : 0);
+const clampCount = (value: number): number =>
+  (Number.isFinite(value) ? Math.min(LIMITS.count, Math.max(0, Math.floor(value))) : 0);
+
 export function buildSharePayload(result: QuickBenchmarkResult): SharePayload {
   const ua = typeof navigator !== 'undefined' ? navigator.userAgent : 'headless';
+  const field = (value: string | undefined): string => clampStr(value ?? '', LIMITS.adapterField);
   return {
     fingerprint: buildFingerprint(result.adapter, result.corpusSize, result.mode, ua),
     adapter: {
-      vendor: result.adapter?.vendor ?? '',
-      device: result.adapter?.device ?? '',
-      architecture: result.adapter?.architecture ?? '',
-      renderer: result.adapter?.renderer ?? '',
-      ...(result.adapter?.adapterType ? { adapterType: result.adapter.adapterType } : {})
+      vendor: field(result.adapter?.vendor),
+      device: field(result.adapter?.device),
+      architecture: field(result.adapter?.architecture),
+      renderer: field(result.adapter?.renderer),
+      ...(result.adapter?.adapterType ? { adapterType: clampStr(result.adapter.adapterType, LIMITS.adapterType) } : {})
     },
-    gpuTier: result.gpuTier,
-    browser: browserFamily(ua),
-    os: osFamily(ua),
+    gpuTier: {
+      tier: result.gpuTier.tier,
+      confidence: result.gpuTier.confidence,
+      reason: clampStr(result.gpuTier.reason, LIMITS.tierReason)
+    },
+    browser: clampStr(browserFamily(ua), LIMITS.family),
+    os: clampStr(osFamily(ua), LIMITS.family),
     corpusSize: result.corpusSize,
     mode: result.mode,
-    query: result.query,
-    gpuMedianMs: result.gpuMedianMs,
-    gpuP95Ms: result.gpuP95Ms,
-    gpuMatches: result.gpuMatches,
-    cpuMedianMs: result.cpuMedianMs,
-    cpuP95Ms: result.cpuP95Ms,
-    cpuMatches: result.cpuMatches,
-    externals: result.externals,
+    query: clampStr(result.query, LIMITS.query),
+    gpuMedianMs: clampMs(result.gpuMedianMs),
+    gpuP95Ms: clampMs(result.gpuP95Ms),
+    gpuMatches: clampCount(result.gpuMatches),
+    cpuMedianMs: clampMs(result.cpuMedianMs),
+    cpuP95Ms: clampMs(result.cpuP95Ms),
+    cpuMatches: clampCount(result.cpuMatches),
+    externals: result.externals.slice(0, LIMITS.externals).map(external => ({
+      name: clampStr(external.name, LIMITS.externalName),
+      medianMs: clampMs(external.medianMs),
+      p95Ms: clampMs(external.p95Ms),
+      matches: clampCount(external.matches),
+      ran: external.ran
+    })),
     createdAt: new Date().toISOString()
   };
 }
@@ -123,7 +142,7 @@ export function markShared(fingerprint: string): void {
 
 export async function submitSharedResult(
   payload: SharePayload
-): Promise<{ ok: boolean; duplicate?: boolean; unconfigured?: boolean; error?: string }> {
+): Promise<{ ok: boolean; duplicate?: boolean; unconfigured?: boolean; terminal?: boolean; error?: string }> {
   try {
     const res = await fetch('/api/submit-benchmark', {
       method: 'POST',
@@ -133,7 +152,10 @@ export async function submitSharedResult(
     if (res.status === 503) return { ok: false, unconfigured: true };
     const data = (await res.json().catch(() => ({}))) as { duplicate?: boolean; error?: string };
     if (res.status === 409 || data.duplicate) return { ok: true, duplicate: true };
-    if (!res.ok) return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+    // 400/413 etc. = this payload will never be accepted: terminal, don't retry.
+    // 429 (rate limit) and 5xx are transient and may be retried next run.
+    const terminal = res.status >= 400 && res.status < 500 && res.status !== 429;
+    if (!res.ok) return { ok: false, terminal, error: data.error ?? `HTTP ${res.status}` };
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };

@@ -240,10 +240,14 @@ exportChart?.addEventListener('click', async () => {
 // `window.__IS_INITIALIZED__` and drives `window.gpuEngine` directly).
 // The benchmark itself creates per-run engines lazily on click; this
 // separate eagerly-initialized engine exists only so the CI browser gate
-// can exercise real WGSL dispatch without driving the full UI.
-const gateGpuEngine = new WebGPUEngine();
-const gateCpuEngine = new CPUEngine();
+// can exercise real WGSL dispatch without driving the full UI. The gate
+// always runs against the Vite dev server, so it is dev-only (stripped from
+// production builds); `?regression-gate` opts in on a built page.
+const regressionGateEnabled =
+  import.meta.env.DEV || new URLSearchParams(location.search).has('regression-gate');
 async function initRegressionGate(): Promise<void> {
+  const gateGpuEngine = new WebGPUEngine();
+  const gateCpuEngine = new CPUEngine();
   try {
     await gateGpuEngine.init();
   } catch {
@@ -253,4 +257,4 @@ async function initRegressionGate(): Promise<void> {
   (window as unknown as Record<string, unknown>).cpuEngine = gateCpuEngine;
   (window as unknown as Record<string, unknown>).__IS_INITIALIZED__ = true;
 }
-void initRegressionGate();
+if (regressionGateEnabled) void initRegressionGate();

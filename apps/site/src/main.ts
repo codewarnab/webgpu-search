@@ -114,8 +114,10 @@ async function autoShareResult(result: {
     const full = share.buildSharePayload(result as never);
     if (share.alreadyShared(full.fingerprint)) return; // sent before from this browser
     const res = await share.submitSharedResult(full);
-    if (!res.ok) return; // backend off / network hiccup: benchmark itself is unaffected
-    share.markShared(full.fingerprint);
+    // Mark on success/duplicate and on terminal (4xx validation) failures so a
+    // payload the server will never accept isn't resent every run. Backend
+    // off / network hiccup / rate limit: retry next run.
+    if (res.ok || res.terminal) share.markShared(full.fingerprint);
   } catch {
     // share chunk failed to load: benchmark itself is unaffected
   }

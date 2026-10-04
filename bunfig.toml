@@ -1,0 +1,6 @@
+# Load .wgsl shader imports as source text under the Bun runtime (scripts and
+# `bun test`), mirroring tsup's `'.wgsl': 'text'` loader used for the build.
+preload = ["./scripts/wgsl-loader-plugin.ts"]
+
+[test]
+preload = ["./scripts/wgsl-loader-plugin.ts"]

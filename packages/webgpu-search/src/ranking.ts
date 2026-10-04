@@ -93,29 +93,28 @@ function compareStringsAsc(a: string, b: string): number {
 }
 
 /**
- * Deterministic ID comparison:
+ * Deterministic ID comparison (a strict total order over mixed id types):
  * - number vs number: numeric ascending (both must be finite; NaN/Infinity
  * throw fail-closed to preserve the total-order contract).
- * - otherwise: String(id) code-unit ascending (covers string/string and
- * mixed string/number pairs deterministically; note numeric `2` and string
- * `"2"` compare id-equal and fall through to `docIndex`).
+ * - number vs string: every number sorts before every string (type-ranked,
+ * so mixed corpora stay transitive; numeric `2` and string `"2"` are NOT
+ * id-equal: `2` sorts first).
+ * - string vs string: code-unit ascending (never locale collation).
  */
 export function compareIdsAsc(a: string | number, b: string | number): number {
-  if (typeof a === 'number' && typeof b === 'number') {
-    if (!Number.isFinite(a) || !Number.isFinite(b)) {
-      throw new TypeError(
-        `[webgpu-search] compareIdsAsc requires finite numeric ids, got ${String(a)} vs ${String(b)}.`
-      );
-    }
-    if (a !== b) return a > b ? 1 : -1;
-    return 0;
-  }
-  if (typeof a === 'number' && !Number.isFinite(a)) {
+  const aNum = typeof a === 'number';
+  const bNum = typeof b === 'number';
+  if (aNum && !Number.isFinite(a)) {
     throw new TypeError(`[webgpu-search] compareIdsAsc requires finite numeric id, got ${String(a)}.`);
   }
-  if (typeof b === 'number' && !Number.isFinite(b)) {
+  if (bNum && !Number.isFinite(b)) {
     throw new TypeError(`[webgpu-search] compareIdsAsc requires finite numeric id, got ${String(b)}.`);
   }
+  if (aNum && bNum) {
+    if (a !== b) return (a as number) > (b as number) ? 1 : -1;
+    return 0;
+  }
+  if (aNum !== bNum) return aNum ? -1 : 1;
   return compareStringsAsc(String(a), String(b));
 }
 

@@ -1,10 +1,24 @@
 /**
  * Columnar attribute storage for structured pre-filtering and facet aggregations.
- * Backed by typed arrays (Float64Array, Uint32Array) and DocumentBitsets with geometric growth.
+ * Backed by typed arrays (Float64Array, Uint32Array), DocumentBitsets and
+ * adaptive per-value posting lists (sparse sets promoted to bitsets only when
+ * dense), so memory stays proportional to the stored (row, value) entries
+ * rather than `distinctValues x capacity`.
+ *
+ * Value coercion (applied identically at index and query time):
+ * - `number`: finite numbers, or non-blank numeric strings; anything else
+ *   (blank strings, NaN, +/-Infinity, booleans, objects) is treated as missing.
+ * - `boolean`: only `true`/`false` and the exact strings `"true"`/`"false"`;
+ *   any other value is treated as missing at index time and rejected with
+ *   `InvalidFilterError` at query time.
+ * - Default getters read own properties only (plus non-`Object.prototype`
+ *   inherited ones such as class accessors), never `constructor`/`toString`.
+ *
  * 100% portable across browser main thread, Web Workers, Node.js, and SSR (zero DOM references).
  */
 
 import { DocumentBitset } from './doc-bitset';
+import { PostingList } from './posting-list';
 import type {
   FilterFieldDefinition,
   FilterFieldType,
@@ -26,7 +40,8 @@ interface StringColumn extends BaseColumn {
   stringTable: string[];
   stringToCode: Map<string, number>;
   codes: Uint32Array;
-  invertedIndex: Map<number, DocumentBitset>;
+  /** code -> rows holding it; entries with zero rows are removed eagerly. */
+  invertedIndex: Map<number, PostingList>;
 }
 
 interface NumberColumn extends BaseColumn {
@@ -41,11 +56,62 @@ interface BooleanColumn extends BaseColumn {
 
 interface StringArrayColumn extends BaseColumn {
   type: 'string[]';
-  tagInverted: Map<string, DocumentBitset>;
+  /** tag -> rows holding it; entries with zero rows are removed eagerly. */
+  tagInverted: Map<string, PostingList>;
   docTags: Map<number, string[]>;
 }
 
 type Column = StringColumn | NumberColumn | BooleanColumn | StringArrayColumn;
+
+/**
+ * Default field accessor: reads `doc[name]` only when it is an own property
+ * or an inherited one not provided by `Object.prototype` (so class accessors
+ * still work, but `constructor`, `toString`, `__proto__`, ... never leak in as
+ * field values).
+ */
+export function readOwnField(doc: any, name: string): any {
+  if (doc === null || doc === undefined) return undefined;
+  if (Object.prototype.hasOwnProperty.call(doc, name)) return doc[name];
+  if (name in Object.prototype) return undefined;
+  return doc[name];
+}
+
+/**
+ * Strict numeric coercion shared by index and query paths: finite numbers
+ * and non-blank numeric strings only. Returns NaN for anything else
+ * (`Number("")`/`Number("  ")` would otherwise silently yield 0).
+ */
+function coerceNumber(raw: unknown): number {
+  if (typeof raw === 'number') return Number.isFinite(raw) ? raw : NaN;
+  if (typeof raw === 'string') {
+    if (raw.trim().length === 0) return NaN;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  return NaN;
+}
+
+/**
+ * Strict boolean coercion shared by index and query paths: `true`/`false`
+ * and the exact strings `"true"`/`"false"`; `undefined` for anything else.
+ */
+function coerceBoolean(raw: unknown): boolean | undefined {
+  if (raw === true || raw === 'true') return true;
+  if (raw === false || raw === 'false') return false;
+  return undefined;
+}
+
+/** Query-time boolean operand: rejects non-boolean values fail-closed. */
+function toBooleanOperand(raw: unknown, field: string): boolean {
+  const b = coerceBoolean(raw);
+  if (b === undefined) {
+    throw new InvalidFilterError(
+      `Boolean field "${field}" expects true/false (or "true"/"false"), got ${JSON.stringify(raw)}.`,
+      field
+    );
+  }
+  return b;
+}
 
 /** Validates a numeric range bound, throwing InvalidFilterError on non-numeric input. */
 function toNumberBound(raw: unknown, op: string, field: string): number {
@@ -55,7 +121,7 @@ function toNumberBound(raw: unknown, op: string, field: string): number {
       field
     );
   }
-  const n = Number(raw);
+  const n = coerceNumber(raw);
   if (Number.isNaN(n)) {
     throw new InvalidFilterError(
       `Range operator "${op}" on field "${field}" expects a numeric bound, got ${JSON.stringify(String(raw))}.`,
@@ -63,6 +129,53 @@ function toNumberBound(raw: unknown, op: string, field: string): number {
     );
   }
   return n;
+}
+
+/**
+ * Normalized column value produced by `ColumnarStore.prepare`:
+ * `undefined` = missing; otherwise string / finite number / boolean /
+ * non-empty deduped string[] matching the column type.
+ */
+export type PreparedColumnValue = string | number | boolean | string[] | undefined;
+
+/** One normalized value per registered column, in column order. */
+export type PreparedColumnarRow = PreparedColumnValue[];
+
+function normalizeColumnValue(type: FilterFieldType, rawVal: unknown): PreparedColumnValue {
+  if (rawVal === null || rawVal === undefined) return undefined;
+  switch (type) {
+    case 'string':
+      return String(rawVal);
+    case 'number': {
+      const n = coerceNumber(rawVal);
+      return Number.isFinite(n) ? n : undefined;
+    }
+    case 'boolean':
+      return coerceBoolean(rawVal);
+    case 'string[]': {
+      if (!Array.isArray(rawVal) || rawVal.length === 0) return undefined;
+      const seen = new Set<string>();
+      const tags: string[] = [];
+      for (let i = 0; i < rawVal.length; i++) {
+        const item = rawVal[i];
+        if (item === null || item === undefined) continue;
+        const t = String(item);
+        if (seen.has(t)) continue;
+        seen.add(t);
+        tags.push(t);
+      }
+      return tags.length > 0 ? tags : undefined;
+    }
+  }
+  return undefined;
+}
+
+function assertDocIndex(docIndex: number, op: string): void {
+  if (!Number.isInteger(docIndex) || docIndex < 0) {
+    throw new RangeError(
+      `[webgpu-search] ColumnarStore.${op} requires a non-negative integer docIndex, got ${String(docIndex)}.`
+    );
+  }
 }
 
 export interface ColumnarStoreOptions {
@@ -100,7 +213,7 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
 
   private registerField(fieldDef: FilterFieldDefinition<TDoc>): void {
     const name = fieldDef.name;
-    const getter = fieldDef.getter ?? ((doc: any) => doc[name]);
+    const getter = fieldDef.getter ?? ((doc: any) => readOwnField(doc, name));
     const type: FilterFieldType = fieldDef.type ?? 'string';
     const cap = this.capacity;
 
@@ -193,8 +306,8 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
           const newCodes = new Uint32Array(newCap);
           newCodes.set(col.codes);
           col.codes = newCodes;
-          for (const bs of col.invertedIndex.values()) {
-            bs.ensureCapacity(newCap);
+          for (const pl of col.invertedIndex.values()) {
+            pl.ensureCapacity(newCap);
           }
           break;
         }
@@ -210,8 +323,8 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
           break;
         }
         case 'string[]': {
-          for (const bs of col.tagInverted.values()) {
-            bs.ensureCapacity(newCap);
+          for (const pl of col.tagInverted.values()) {
+            pl.ensureCapacity(newCap);
           }
           break;
         }
@@ -261,10 +374,35 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
     }
   }
 
+  /**
+   * Runs every column getter for `doc` and normalizes the results into a
+   * plain per-column value vector. This is the only step that executes user
+   * code (getters, `String()` conversions) and may throw; it performs no
+   * mutation, so callers needing all-or-nothing semantics (e.g.
+   * `DocumentIndex.applyBatch`) can prepare every doc before mutating
+   * anything and then apply with `addPrepared`, which cannot throw on value
+   * conversion.
+   */
+  prepare(doc: TDoc): PreparedColumnarRow {
+    const out: PreparedColumnValue[] = new Array(this.columns.size);
+    let i = 0;
+    for (const col of this.columns.values()) {
+      out[i++] = normalizeColumnValue(col.type, col.getter(doc));
+    }
+    return out;
+  }
+
   add(docIndex: number, doc: TDoc): void {
-    if (!Number.isInteger(docIndex) || docIndex < 0) {
-      throw new RangeError(
-        `[webgpu-search] ColumnarStore.add requires a non-negative integer docIndex, got ${String(docIndex)}.`
+    assertDocIndex(docIndex, 'add');
+    this.addPrepared(docIndex, this.prepare(doc));
+  }
+
+  /** Applies a row produced by `prepare` (no user code runs here). */
+  addPrepared(docIndex: number, row: PreparedColumnarRow): void {
+    assertDocIndex(docIndex, 'add');
+    if (!Array.isArray(row) || row.length !== this.columns.size) {
+      throw new TypeError(
+        `[webgpu-search] ColumnarStore.addPrepared expects a prepared row of ${this.columns.size} values.`
       );
     }
     if (docIndex >= this.capacity) {
@@ -272,31 +410,18 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
     }
     this.activeDocs.set(docIndex);
 
+    let i = 0;
     for (const col of this.columns.values()) {
-      const rawVal = col.getter(doc);
       // Clear-then-set so re-add on an occupied slot never leaks stale
-      // string codes or tag bits (mirrors update()).
+      // string codes or tag bits.
       this.clearDocColumnValue(col, docIndex);
-      this.setDocColumnValue(col, docIndex, rawVal);
+      this.setDocColumnValue(col, docIndex, row[i++]);
     }
   }
 
   update(docIndex: number, doc: TDoc): void {
-    if (!Number.isInteger(docIndex) || docIndex < 0) {
-      throw new RangeError(
-        `[webgpu-search] ColumnarStore.update requires a non-negative integer docIndex, got ${String(docIndex)}.`
-      );
-    }
-    if (docIndex >= this.capacity) {
-      this.ensureCapacity(docIndex + 1);
-    }
-    this.activeDocs.set(docIndex);
-
-    for (const col of this.columns.values()) {
-      const rawVal = col.getter(doc);
-      this.clearDocColumnValue(col, docIndex);
-      this.setDocColumnValue(col, docIndex, rawVal);
-    }
+    assertDocIndex(docIndex, 'update');
+    this.addPrepared(docIndex, this.prepare(doc));
   }
 
   remove(docIndex: number): void {
@@ -308,42 +433,39 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
     }
   }
 
-  private setDocColumnValue(col: Column, docIndex: number, rawVal: any): void {
-    if (rawVal === null || rawVal === undefined) {
+  private setDocColumnValue(col: Column, docIndex: number, val: PreparedColumnValue): void {
+    if (val === undefined) {
       col.presence.clear(docIndex);
       return;
     }
 
     switch (col.type) {
       case 'string': {
-        const str = String(rawVal);
+        const str = val as string;
         col.presence.set(docIndex);
         let code = col.stringToCode.get(str);
         if (code === undefined) {
           code = col.stringTable.length;
           col.stringTable.push(str);
           col.stringToCode.set(str, code);
-          const bs = new DocumentBitset(this.capacity);
-          col.invertedIndex.set(code, bs);
+        }
+        let pl = col.invertedIndex.get(code);
+        if (!pl) {
+          pl = new PostingList();
+          col.invertedIndex.set(code, pl);
         }
         col.codes[docIndex] = code;
-        col.invertedIndex.get(code)!.set(docIndex);
+        pl.add(docIndex, this.capacity);
         break;
       }
       case 'number': {
-        const num = typeof rawVal === 'number' ? rawVal : Number(rawVal);
-        if (Number.isFinite(num)) {
-          col.presence.set(docIndex);
-          col.values[docIndex] = num;
-        } else {
-          col.presence.clear(docIndex);
-          col.values[docIndex] = NaN;
-        }
+        col.presence.set(docIndex);
+        col.values[docIndex] = val as number;
         break;
       }
       case 'boolean': {
         col.presence.set(docIndex);
-        if (Boolean(rawVal)) {
+        if (val === true) {
           col.trueBitset.set(docIndex);
         } else {
           col.trueBitset.clear(docIndex);
@@ -351,35 +473,19 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
         break;
       }
       case 'string[]': {
-        if (!Array.isArray(rawVal) || rawVal.length === 0) {
-          col.presence.clear(docIndex);
-          return;
-        }
-        // Per-doc dedupe: facet counts are per-doc (not per-occurrence) to
-        // match string/number/boolean branches and tagInverted bitsets.
-        const seen = new Set<string>();
-        const tags: string[] = [];
-        for (let i = 0; i < rawVal.length; i++) {
-          const item = rawVal[i];
-          if (item !== null && item !== undefined) {
-            const t = String(item);
-            if (seen.has(t)) continue;
-            seen.add(t);
-            tags.push(t);
-            let bs = col.tagInverted.get(t);
-            if (!bs) {
-              bs = new DocumentBitset(this.capacity);
-              col.tagInverted.set(t, bs);
-            }
-            bs.set(docIndex);
+        // Tags are already per-doc deduped by normalizeColumnValue: facet
+        // counts are per-doc (not per-occurrence).
+        const tags = val as string[];
+        for (let i = 0; i < tags.length; i++) {
+          let pl = col.tagInverted.get(tags[i]);
+          if (!pl) {
+            pl = new PostingList();
+            col.tagInverted.set(tags[i], pl);
           }
+          pl.add(docIndex, this.capacity);
         }
-        if (tags.length > 0) {
-          col.presence.set(docIndex);
-          col.docTags.set(docIndex, tags);
-        } else {
-          col.presence.clear(docIndex);
-        }
+        col.presence.set(docIndex);
+        col.docTags.set(docIndex, tags);
         break;
       }
     }
@@ -392,7 +498,11 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
     switch (col.type) {
       case 'string': {
         const code = col.codes[docIndex];
-        col.invertedIndex.get(code)?.clear(docIndex);
+        const pl = col.invertedIndex.get(code);
+        if (pl) {
+          pl.delete(docIndex, this.capacity);
+          if (pl.size === 0) col.invertedIndex.delete(code);
+        }
         col.codes[docIndex] = 0;
         break;
       }
@@ -408,7 +518,11 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
         const prevTags = col.docTags.get(docIndex);
         if (prevTags) {
           for (let i = 0; i < prevTags.length; i++) {
-            col.tagInverted.get(prevTags[i])?.clear(docIndex);
+            const pl = col.tagInverted.get(prevTags[i]);
+            if (pl) {
+              pl.delete(docIndex, this.capacity);
+              if (pl.size === 0) col.tagInverted.delete(prevTags[i]);
+            }
           }
           col.docTags.delete(docIndex);
         }
@@ -428,25 +542,45 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
     for (const [name, col] of this.columns.entries()) {
       switch (col.type) {
         case 'string': {
+          // Re-dictionary live values only: codes with zero surviving rows
+          // are dropped. Codes are assigned in old-code order so the table
+          // stays deterministic.
           const newCol: StringColumn = {
             name,
             type: 'string',
             getter: col.getter,
             presence: new DocumentBitset(newCap),
-            stringTable: col.stringTable.slice(),
-            stringToCode: new Map(col.stringToCode),
+            stringTable: [],
+            stringToCode: new Map(),
             codes: new Uint32Array(newCap),
             invertedIndex: new Map()
           };
-          for (const [code] of col.invertedIndex.entries()) {
-            newCol.invertedIndex.set(code, new DocumentBitset(newCap));
+          const liveOld: number[] = [];
+          for (const [oldD] of oldToNewDocIndexMap.entries()) {
+            if (col.presence.has(oldD)) liveOld.push(col.codes[oldD]);
+          }
+          liveOld.sort((a, b) => a - b);
+          const oldToNewCode = new Map<number, number>();
+          for (let i = 0; i < liveOld.length; i++) {
+            const oc = liveOld[i];
+            if (oldToNewCode.has(oc)) continue;
+            const nc = newCol.stringTable.length;
+            const str = col.stringTable[oc];
+            oldToNewCode.set(oc, nc);
+            newCol.stringTable.push(str);
+            newCol.stringToCode.set(str, nc);
           }
           for (const [oldD, newD] of oldToNewDocIndexMap.entries()) {
             if (col.presence.has(oldD)) {
               newCol.presence.set(newD);
-              const code = col.codes[oldD];
+              const code = oldToNewCode.get(col.codes[oldD])!;
               newCol.codes[newD] = code;
-              newCol.invertedIndex.get(code)?.set(newD);
+              let pl = newCol.invertedIndex.get(code);
+              if (!pl) {
+                pl = new PostingList();
+                newCol.invertedIndex.set(code, pl);
+              }
+              pl.add(newD, newCap);
             }
           }
           this.columns.set(name, newCol);
@@ -499,9 +633,6 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
             tagInverted: new Map(),
             docTags: new Map()
           };
-          for (const [tag] of col.tagInverted.entries()) {
-            newCol.tagInverted.set(tag, new DocumentBitset(newCap));
-          }
           for (const [oldD, newD] of oldToNewDocIndexMap.entries()) {
             if (col.presence.has(oldD)) {
               newCol.presence.set(newD);
@@ -509,7 +640,12 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
               if (tags) {
                 newCol.docTags.set(newD, tags.slice());
                 for (let i = 0; i < tags.length; i++) {
-                  newCol.tagInverted.get(tags[i])?.set(newD);
+                  let pl = newCol.tagInverted.get(tags[i]);
+                  if (!pl) {
+                    pl = new PostingList();
+                    newCol.tagInverted.set(tags[i], pl);
+                  }
+                  pl.add(newD, newCap);
                 }
               }
             }
@@ -540,11 +676,11 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
         if (code === undefined) {
           return DocumentBitset.none(this.capacity);
         }
-        const bs = col.invertedIndex.get(code);
-        return bs ? bs.and(active) : DocumentBitset.none(this.capacity);
+        const pl = col.invertedIndex.get(code);
+        return pl ? pl.toBitset(this.capacity).andInPlace(active) : DocumentBitset.none(this.capacity);
       }
       case 'number': {
-        const target = typeof value === 'number' ? value : Number(value);
+        const target = coerceNumber(value);
         if (!Number.isFinite(target)) {
           return DocumentBitset.none(this.capacity);
         }
@@ -573,7 +709,7 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
         return result;
       }
       case 'boolean': {
-        const target = Boolean(value);
+        const target = toBooleanOperand(value, name);
         if (target) {
           return col.trueBitset.and(active);
         } else {
@@ -582,8 +718,8 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
       }
       case 'string[]': {
         const tag = String(value);
-        const bs = col.tagInverted.get(tag);
-        return bs ? bs.and(active) : DocumentBitset.none(this.capacity);
+        const pl = col.tagInverted.get(tag);
+        return pl ? pl.toBitset(this.capacity).andInPlace(active) : DocumentBitset.none(this.capacity);
       }
     }
   }
@@ -610,8 +746,7 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
           } else {
             const code = col.stringToCode.get(String(v));
             if (code !== undefined) {
-              const bs = col.invertedIndex.get(code);
-              if (bs) result.orInPlace(bs);
+              col.invertedIndex.get(code)?.orInto(result);
             }
           }
         }
@@ -624,8 +759,7 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
           if (v === null) {
             includeNull = true;
           } else {
-            const bs = col.tagInverted.get(String(v));
-            if (bs) result.orInPlace(bs);
+            col.tagInverted.get(String(v))?.orInto(result);
           }
         }
         if (includeNull) {
@@ -641,7 +775,7 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
           if (v === null) {
             includeNull = true;
           } else {
-            const n = typeof v === 'number' ? v : Number(v);
+            const n = coerceNumber(v);
             if (Number.isFinite(n)) numSet.add(n);
           }
         }
@@ -676,7 +810,7 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
           const v = values[i];
           if (v === null) {
             result.orInPlace(active.andNot(col.presence));
-          } else if (Boolean(v)) {
+          } else if (toBooleanOperand(v, name)) {
             result.orInPlace(col.trueBitset);
           } else {
             result.orInPlace(col.presence.andNot(col.trueBitset));
@@ -897,8 +1031,7 @@ export class ColumnarStore<TDoc = Record<string, unknown>> {
         if (gteStr !== undefined && !(str >= gteStr)) continue;
         if (ltStr !== undefined && !(str < ltStr)) continue;
         if (lteStr !== undefined && !(str <= lteStr)) continue;
-        const bs = col.invertedIndex.get(code);
-        if (bs) result.orInPlace(bs);
+        col.invertedIndex.get(code)?.orInto(result);
       }
       return result.andInPlace(active);
     }

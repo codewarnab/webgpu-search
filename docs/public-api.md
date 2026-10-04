@@ -115,6 +115,13 @@ fail-closed (facets would reflect the unfiltered set).
   `FacetRequest` / `FacetResult`, `DeterministicRankingOptions`,
   `AutocompleteOptions` / `SuggestionItem`, `SearchHooks` /
   `ExtensionHookIds`, `CostBudgetOptions`.
+  Filter-field value coercion (index and query time alike): default
+  getters read own properties only (never inherited `Object.prototype`
+  members such as `constructor`); `number` fields accept finite numbers and
+  non-blank numeric strings (blank / non-finite values are missing; as range
+  bounds they throw `InvalidFilterError`); `boolean` fields accept only
+  `true` / `false` and the strings `"true"` / `"false"` (other indexed values
+  are missing; other query operands throw `InvalidFilterError`).
 - Snapshots / IDB: `DocumentIndexSchema`, `SerializeDocumentIndexOptions`,
   `RestoreDocumentIndexOptions`, `DocumentSnapshotHeader`, `IDBStorageOptions`.
 
@@ -221,9 +228,10 @@ worker, and snapshot-restore paths (`src/ranking.ts:1`):
    `SearchIndex` weight is uniform so this tier is a no-op there).
 3. `exact` DESC — full post-normalization token equality beats partial/fuzzy.
 4. `length` ASC — shorter matched-field token span wins.
-5. `id` ASC — `compareIdsAsc`: numbers numerically, otherwise `String(id)`
-   code-unit order (never locale collation). Numeric `2` vs string `"2"` are
-   id-equal and fall through.
+5. `id` ASC — `compareIdsAsc`: a total order over mixed ids. All numeric ids
+   sort before all string ids; numbers compare numerically, strings by
+   code-unit order (never locale collation). Numeric `2` sorts before string
+   `"2"` (they are not id-equal).
 6. Implicit final: `docIndex` ASC (insertion order; defensive, ids unique).
 
 Properties: wrap-free comparisons (no `|0` subtraction), code-unit string

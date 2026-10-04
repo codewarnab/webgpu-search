@@ -1,0 +1,6 @@
+# Same .wgsl text loader as the repo root, for Bun runs from this package dir
+# (`turbo test`, `bun test` here). Not published (outside package "files").
+preload = ["../../scripts/wgsl-loader-plugin.ts"]
+
+[test]
+preload = ["../../scripts/wgsl-loader-plugin.ts"]

@@ -85,7 +85,7 @@ import {
   type TextProfileId
 } from './text-profile';
 import { DocumentBitset } from './filtering/doc-bitset';
-import { ColumnarStore } from './filtering/columnar-store';
+import { ColumnarStore, readOwnField, type PreparedColumnarRow } from './filtering/columnar-store';
 import { compileFilter } from './filtering/compile-filter';
 import {
   FacetEngine,
@@ -129,6 +129,15 @@ import type {
   QueryDiagnostics,
   QueryDiagnosticsTimings
 } from './types';
+
+/**
+ * Own-property write that is safe for arbitrary user field names: a plain
+ * `obj[key] = v` with key `"__proto__"` would replace the prototype instead
+ * of creating an entry.
+ */
+function setOwnKey<V>(obj: Record<string, V>, key: string, value: V): void {
+  Object.defineProperty(obj, key, { value, enumerable: true, configurable: true, writable: true });
+}
 
 export interface InternalField<TDoc> extends FieldScoreDefinition {
   name: string;
@@ -265,7 +274,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           throw new TypeError('[webgpu-search] Field name string must not be empty.');
         }
         name = f;
-        getter = (doc: any) => doc[name];
+        getter = (doc: any) => readOwnField(doc, name);
       } else if (f && typeof f === 'object') {
         if (typeof f.name !== 'string' || f.name.length === 0) {
           throw new TypeError('[webgpu-search] Field definition requires a non-empty string name.');
@@ -285,7 +294,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           }
           getter = f.getter;
         } else {
-          getter = (doc: any) => doc[name];
+          getter = (doc: any) => readOwnField(doc, name);
         }
       } else {
         throw new TypeError('[webgpu-search] Field must be a string or FieldDefinition object.');
@@ -328,7 +337,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             throw new TypeError('[webgpu-search] Filter field name string must not be empty.');
           }
           name = ff;
-          getter = (doc: any) => doc[name];
+          getter = (doc: any) => readOwnField(doc, name);
           hasGetter = false;
         } else if (ff && typeof ff === 'object') {
           if (typeof ff.name !== 'string' || ff.name.trim().length === 0) {
@@ -343,7 +352,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             getter = ff.getter;
             hasGetter = true;
           } else {
-            getter = (doc: any) => doc[name];
+            getter = (doc: any) => readOwnField(doc, name);
             hasGetter = false;
           }
         } else {
@@ -2013,9 +2022,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           const rawStr = this.rawFieldStrings[dIdx][f] ?? '';
           const ranges = alignHighlights(rawStr, query, alignOpts);
           if (ranges.length > 0) {
-            highlights[fieldDef.name] = ranges;
+            setOwnKey(highlights, fieldDef.name, ranges);
             if (tag) {
-              highlightedText[fieldDef.name] = renderHighlightedText(rawStr, ranges, tag, escapeHtml);
+              setOwnKey(highlightedText, fieldDef.name, renderHighlightedText(rawStr, ranges, tag, escapeHtml));
             }
           }
         }
@@ -2027,9 +2036,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             const rawStr = this.rawFieldStrings[dIdx][fIdx] ?? '';
             const ranges = alignHighlights(rawStr, query, alignOpts);
             if (ranges.length > 0) {
-              highlights[fName] = ranges;
+              setOwnKey(highlights, fName, ranges);
               if (tag) {
-                highlightedText[fName] = renderHighlightedText(rawStr, ranges, tag, escapeHtml);
+                setOwnKey(highlightedText, fName, renderHighlightedText(rawStr, ranges, tag, escapeHtml));
               }
             }
           }
@@ -2040,9 +2049,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         if (primaryFIdx !== undefined) {
           const primaryRaw = this.rawFieldStrings[dIdx][primaryFIdx] ?? '';
           const ranges = alignHighlights(primaryRaw, query, alignOpts);
-          highlights[item.matchedField] = ranges;
+          setOwnKey(highlights, item.matchedField, ranges);
           if (tag) {
-            highlightedText[item.matchedField] = renderHighlightedText(primaryRaw, ranges, tag, escapeHtml);
+            setOwnKey(highlightedText, item.matchedField, renderHighlightedText(primaryRaw, ranges, tag, escapeHtml));
           }
         }
 
@@ -2054,9 +2063,9 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
               const auxRaw = this.rawFieldStrings[dIdx][auxFIdx] ?? '';
               const ranges = alignHighlights(auxRaw, query, alignOpts);
               aux.highlights = ranges;
-              highlights[aux.field] = ranges;
+              setOwnKey(highlights, aux.field, ranges);
               if (tag) {
-                highlightedText[aux.field] = renderHighlightedText(auxRaw, ranges, tag, escapeHtml);
+                setOwnKey(highlightedText, aux.field, renderHighlightedText(auxRaw, ranges, tag, escapeHtml));
               }
             }
           }
@@ -2067,7 +2076,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       if (item.matches) {
         for (let m = 0; m < item.matches.length; m++) {
           const aux = item.matches[m];
-          if (highlights[aux.field] !== undefined) {
+          if (Object.prototype.hasOwnProperty.call(highlights, aux.field)) {
             aux.highlights = highlights[aux.field];
           }
         }
@@ -2188,6 +2197,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         rawStrings: string[];
         tokens: Uint32Array[];
         tokenCount: number;
+        columnar: PreparedColumnarRow;
       }
       const preparedUpdates: PreparedDocUpdate[] = [];
       const updatedIdsInBatch = new Set<DocumentId>();
@@ -2209,8 +2219,10 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
             throw new DuplicateIdError(id);
           }
           updatedIdsInBatch.add(id);
+          // Filter getters run here (before any mutation) so a throwing
+          // getter rejects the whole batch with the index untouched.
           const prepared = this.prepareDocFields(doc, id);
-          preparedUpdates.push(prepared);
+          preparedUpdates.push({ ...prepared, columnar: this.columnarStore.prepare(doc) });
         }
       }
 
@@ -2220,6 +2232,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         rawStrings: string[];
         tokens: Uint32Array[];
         tokenCount: number;
+        columnar: PreparedColumnarRow;
       }
       const preparedAdds: PreparedDocAdd[] = [];
       const addedIdsInBatch = new Set<DocumentId>();
@@ -2247,7 +2260,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
           addedIdsInBatch.add(id);
 
           const prepared = this.prepareDocFields(doc, id);
-          preparedAdds.push(prepared);
+          preparedAdds.push({ ...prepared, columnar: this.columnarStore.prepare(doc) });
         }
       }
 
@@ -2304,7 +2317,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.docIds.push(upd.id);
         this.idToDocIndex.set(upd.id, newD);
         this.rawFieldStrings.push(upd.rawStrings);
-        this.columnarStore.add(newD, upd.doc);
+        this.columnarStore.addPrepared(newD, upd.columnar);
 
         const docRows: number[] = new Array(this.sortedFields.length);
         for (let f = 0; f < this.sortedFields.length; f++) {
@@ -2345,7 +2358,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
         this.docIds.push(ad.id);
         this.idToDocIndex.set(ad.id, newD);
         this.rawFieldStrings.push(ad.rawStrings);
-        this.columnarStore.add(newD, ad.doc);
+        this.columnarStore.addPrepared(newD, ad.columnar);
 
         const docRows: number[] = new Array(this.sortedFields.length);
         for (let f = 0; f < this.sortedFields.length; f++) {
@@ -2772,7 +2785,7 @@ export class DocumentIndex<TDoc = Record<string, unknown>> {
       if (uf && typeof uf === 'object' && typeof uf.getter === 'function') {
         getter = uf.getter;
       } else {
-        getter = (doc: any) => doc[name];
+        getter = (doc: any) => readOwnField(doc, name);
       }
       return { name, weight, getter, originalIndex };
     });

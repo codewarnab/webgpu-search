@@ -30,45 +30,6 @@
         "vite": "^8.2.2",
       },
     },
-    "apps/docs-search": {
-      "name": "docs-search",
-      "version": "0.1.0",
-      "dependencies": {
-        "fuse.js": "^7.5.0",
-        "webgpu-search": "workspace:*",
-      },
-      "devDependencies": {
-        "@webgpu/types": "^0.1.72",
-        "typescript": "~6.0.2",
-        "vite": "^8.2.2",
-      },
-    },
-    "apps/log-viewer": {
-      "name": "log-viewer",
-      "version": "0.1.0",
-      "dependencies": {
-        "fuse.js": "^7.5.0",
-        "webgpu-search": "workspace:*",
-      },
-      "devDependencies": {
-        "@webgpu/types": "^0.1.72",
-        "typescript": "~6.0.2",
-        "vite": "^8.2.2",
-      },
-    },
-    "apps/monaco-palette": {
-      "name": "monaco-palette",
-      "version": "0.1.0",
-      "dependencies": {
-        "fuse.js": "^7.5.0",
-        "webgpu-search": "workspace:*",
-      },
-      "devDependencies": {
-        "@webgpu/types": "^0.1.72",
-        "typescript": "~6.0.2",
-        "vite": "^8.2.2",
-      },
-    },
     "apps/site": {
       "name": "site",
       "version": "0.1.0",
@@ -402,8 +363,6 @@
 
     "devtools-protocol": ["devtools-protocol@0.0.1666840", "", {}, "sha512-gCcO42XCHKEs7Ag0S7aGYsnJ7hlgrO3qderYqeiY0Eqk+0GFfuvT13IA0hHreJTa2KCdDVyGMeOhdMNmrrTjVg=="],
 
-    "docs-search": ["docs-search@workspace:apps/docs-search"],
-
     "emoji-regex": ["emoji-regex@10.6.0", "", {}, "sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A=="],
 
     "entities": ["entities@7.0.1", "", {}, "sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA=="],
@@ -482,8 +441,6 @@
 
     "locate-character": ["locate-character@3.0.0", "", {}, "sha512-SW13ws7BjaeJ6p7Q6CO2nchbYEc3X3J6WrmTTDto7yMPqVSZTUyY5Tjbid+Ab8gLnATtygYtiDIJGQRRn2ZOiA=="],
 
-    "log-viewer": ["log-viewer@workspace:apps/log-viewer"],
-
     "magic-string": ["magic-string@0.30.21", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.5" } }, "sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ=="],
 
     "mitt": ["mitt@3.0.1", "", {}, "sha512-vKivATfr97l2/QBCYAkXYDbrIWPM2IIKEl7YPhjCvKlG3kE2gm+uBo6nEXK3M5/Ffh/FLpKExzOQ3JJoJGFKBw=="],
@@ -491,8 +448,6 @@
     "mlly": ["mlly@1.8.2", "", { "dependencies": { "acorn": "^8.16.0", "pathe": "^2.0.3", "pkg-types": "^1.3.1", "ufo": "^1.6.3" } }, "sha512-d+ObxMQFmbt10sretNDytwt85VrbkhhUA/JBGm1MPaWJ65Cl4wOgLaB1NYvJSZ0Ef03MMEU/0xpPMXUIQ29UfA=="],
 
     "modern-tar": ["modern-tar@0.8.5", "", {}, "sha512-snEhs+6G5Tjd4I7tLCDOaoln2RgE0bD19RzEKgvgK2hZ5VKy3MpLhLTZ2fWpXSTg4K2cyPwp+VHATFJhxfnOeA=="],
-
-    "monaco-palette": ["monaco-palette@workspace:apps/monaco-palette"],
 
     "ms": ["ms@2.1.3", "", {}, "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA=="],
 

@@ -1,10 +1,43 @@
 import './fonts.css';
 import './style.css';
 import { normalizeText, scoreExactMatches, type SearchResultItem } from 'webgpu-search';
-import { generateCorpus } from './corpus-gen';
+import { corpusRow } from './corpus-gen';
 
 const PAGE_SIZE = 100;
 const MAX_MATCHES_SHOWN = 1000;
+/** Sizes the homepage benchmark offers (apps/site/index.html #qb-size). */
+const ALLOWED_SIZES = [100000, 200000, 500000, 1000000, 2000000] as const;
+const DEFAULT_SIZE = 100000;
+const BUILD_CHUNK = 50000;
+
+/** Missing/invalid -> default; otherwise the largest offered size <= requested. */
+function parseSize(raw: string | null): number {
+  if (raw === null || raw.trim() === '') return DEFAULT_SIZE;
+  const requested = Number(raw);
+  if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_SIZE;
+  let size: number = ALLOWED_SIZES[0];
+  for (const allowed of ALLOWED_SIZES) if (allowed <= requested) size = allowed;
+  return size;
+}
+
+const yieldToBrowser = (): Promise<void> => new Promise(resolve => setTimeout(resolve, 0));
+
+/** Generates + tokenizes in chunks, yielding between them so the tab stays responsive. */
+async function buildCorpus(size: number, onProgress: (done: number) => void): Promise<{ strings: string[]; tokens: Uint32Array[] }> {
+  const strings: string[] = new Array(size);
+  const tokens: Uint32Array[] = new Array(size);
+  for (let start = 0; start < size; start += BUILD_CHUNK) {
+    const end = Math.min(size, start + BUILD_CHUNK);
+    for (let i = start; i < end; i++) {
+      const row = corpusRow(i);
+      strings[i] = row;
+      tokens[i] = normalizeText(row, true).tokens;
+    }
+    onProgress(end);
+    await yieldToBrowser();
+  }
+  return { strings, tokens };
+}
 
 const meta = document.querySelector<HTMLElement>('#c-meta');
 const matchesList = document.querySelector<HTMLOListElement>('#c-matches');
@@ -55,21 +88,21 @@ function attachPager(
   render();
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const params = new URLSearchParams(location.search);
   const query = (params.get('query') ?? params.get('q') ?? '').slice(0, 200);
-  const requested = Number(params.get('size'));
-  const size = Number.isFinite(requested)
-    ? Math.min(2000000, Math.max(1, Math.floor(requested)))
-    : 100000;
+  const size = parseSize(params.get('size'));
 
   if (!query) {
     if (meta) meta.textContent = 'No query given. Run the benchmark on the homepage first, then follow its link.';
     return;
   }
 
-  const strings = generateCorpus(size);
-  const tokens = strings.map(value => normalizeText(value, true).tokens);
+  const { strings, tokens } = await buildCorpus(size, done => {
+    if (meta) meta.textContent = `Generating ${size.toLocaleString()} records… ${Math.round((done / size) * 100)}%`;
+  });
+  if (meta) meta.textContent = `Searching ${size.toLocaleString()} records…`;
+  await yieldToBrowser();
   const queryTokens = normalizeText(query, true).tokens;
   const response = scoreExactMatches(tokens, queryTokens, 'fuzzy', MAX_MATCHES_SHOWN, strings);
   const shown: SearchResultItem[] = response.results;
@@ -96,4 +129,6 @@ function main(): void {
   }
 }
 
-main();
+void main().catch(error => {
+  if (meta) meta.textContent = `Failed to build corpus: ${error instanceof Error ? error.message : String(error)}`;
+});
