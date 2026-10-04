@@ -23,6 +23,7 @@
     "test:filtering": "bun scripts/test-filtering.ts",
     "test:faceting": "bun scripts/test-faceting.ts",
     "test:diagnostics": "bun test packages/webgpu-search/test/diagnostics.test.ts",
+    "test:regressions": "bun test packages/webgpu-search/test/document-index-integrity.test.ts packages/webgpu-search/test/engine-pool-regressions.test.ts packages/webgpu-search/test/worker-snapshot-hardening.test.ts",
     "test:search-modes": "bun test packages/webgpu-search/test/search-modes.test.ts",
     "test:parity": "bun scripts/test-parity-harness.ts",
     "test:reliability": "bun scripts/test-reliability.ts",

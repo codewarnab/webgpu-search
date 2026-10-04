@@ -1,36 +1,45 @@
 name: Release
 
+# Runs only after the CI workflow succeeded for a push to main, so an
+# untested commit can never be versioned or published.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'packages/**'
-      - '.changeset/**'
+  workflow_run:
+    workflows: [ CI ]
+    types: [ completed ]
+    branches: [ main ]
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+permissions:
+  contents: read
 
 jobs:
   release:
     name: Release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest
+    # No `id-token: write`: npm provenance is not configured.
     permissions:
       contents: write
       pull-requests: write
-      id-token: write
     steps:
       - name: Checkout Repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # Release exactly the commit CI validated.
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.4.2
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           registry-url: 'https://registry.npmjs.org'
@@ -43,7 +52,7 @@ jobs:
 
       - name: Create Release Pull Request or Publish to npm
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         with:
           publish: bun run release
           version: bun run version-packages

@@ -2,6 +2,8 @@ import uFuzzy from '@leeoniya/ufuzzy';
 import type { SearchResultItem } from './types';
 import { nowMs } from './guard';
 import { WebGPUSearchError } from './errors';
+import { normalizeText } from './text-normalization';
+import { compareExactResults, scoreSubstringTokens } from './exact-scorer';
 
 export interface CPUSearchResult {
   query: string;
@@ -85,7 +87,12 @@ export class CPUEngine {
   }
 
   /**
-   * Native JS substring search with ranking symmetry and case-sensitivity support
+   * Native JS substring scan with GPU scoring symmetry. Records and query go
+   * through the same `normalizeText` path as the GPU/exact scorer (NFC +
+   * default case folding when case-insensitive, NFC-only when
+   * case-sensitive) and are scored in code points via
+   * `scoreSubstringTokens`, so scores match the WGSL kernel bit-for-bit
+   * (no UTF-16 unit offsets, no locale-sensitive `toLowerCase`).
    */
   searchNaiveScan(
     strings: string[],
@@ -93,33 +100,31 @@ export class CPUEngine {
     maxResults: number = 1000,
     caseSensitive: boolean = false
   ): CPUSearchResult {
-    const cleanQuery = query.trim();
-    if (!cleanQuery) {
+    const normalized = !caseSensitive;
+    const nq = normalizeText(typeof query === 'string' ? query : '', normalized);
+    if (nq.isEmpty) {
       return { query: '', totalMatches: 0, results: [], durationMs: 0 };
     }
 
     const t0 = nowMs();
-    const queryTerm = caseSensitive ? cleanQuery : cleanQuery.toLowerCase();
     const candidates: SearchResultItem[] = [];
     let totalMatches = 0;
 
     for (let i = 0; i < strings.length; i++) {
       const s = strings[i] ?? '';
-      const target = caseSensitive ? s : s.toLowerCase();
-      const matchStart = target.indexOf(queryTerm);
-      if (matchStart !== -1) {
+      const rec = normalizeText(typeof s === 'string' ? s : String(s), normalized).tokens;
+      const r = scoreSubstringTokens(rec, nq.tokens);
+      if (r.matched) {
         totalMatches++;
-        // Formula matching GPU substring scoring: earlier start + shorter string
-        const score = 1000 - (matchStart * 10) - (s.length - cleanQuery.length);
         candidates.push({
           index: i,
-          score,
+          score: r.score,
           text: s
         });
       }
     }
 
-    candidates.sort((a, b) => b.score - a.score);
+    candidates.sort(compareExactResults);
     const results = candidates.slice(0, maxResults);
     const durationMs = nowMs() - t0;
 

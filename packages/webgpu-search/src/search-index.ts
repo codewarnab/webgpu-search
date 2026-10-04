@@ -191,8 +191,12 @@ export class SearchIndex {
         return index;
       }
 
+      // Hoisted so the catch can release the engine: a throw after init()
+      // succeeds (pipeline creation / loadDataset budget/OOM) would
+      // otherwise leak the pool refcount and GPU buffers.
+      let gpu: WebGPUEngine | null = null;
       try {
-        const gpu = new WebGPUEngine();
+        gpu = new WebGPUEngine();
         const initialized = await gpu.init(
           options.device !== undefined || options.powerPreference !== undefined
             ? { device: options.device, powerPreference: options.powerPreference }
@@ -218,6 +222,7 @@ export class SearchIndex {
 
           return index;
         } else {
+          try { gpu.destroy(); } catch {}
           index.engineState = transitionEngineState(
             index.engineState,
             'cpu',
@@ -227,6 +232,7 @@ export class SearchIndex {
           );
         }
       } catch (gpuErr) {
+        try { gpu?.destroy(); } catch {}
         console.warn('[webgpu-search] WebGPU initialization failed, falling back to CPU:', gpuErr);
         index.engineState = transitionEngineState(
           index.engineState,
@@ -741,8 +747,11 @@ export class SearchIndex {
       this.gpuEngine = null;
     }
     this.vramAllocatedBytes = 0;
+    // Hoisted so the catch can release a post-init failure (pipeline /
+    // loadDataset throw) instead of leaking the pool refcount + buffers.
+    let gpu: WebGPUEngine | null = null;
     try {
-      const gpu = new WebGPUEngine();
+      gpu = new WebGPUEngine();
       const initialized = await gpu.init(
         deviceToUse !== undefined || powerPreference !== undefined
           ? { device: deviceToUse, powerPreference }
@@ -773,6 +782,7 @@ export class SearchIndex {
       this.subscribeDeviceLost();
       return true;
     } catch {
+      try { gpu?.destroy(); } catch {}
       this.engineState = transitionEngineState(
         this.engineState,
         'cpu',

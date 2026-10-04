@@ -15,12 +15,25 @@ export interface HistoryRecord {
 const KEY = 'bench:history:v1';
 const MAX_ENTRIES = 20;
 
+const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+const isStr = (v: unknown): v is string => typeof v === 'string';
+
+/** Shape-checks one stored entry; anything malformed is dropped, not rendered. */
+function isHistoryRecord(v: unknown): v is HistoryRecord {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return false;
+  const r = v as Record<string, unknown>;
+  return isStr(r.at) && !Number.isNaN(Date.parse(r.at))
+    && isNum(r.corpusSize) && isStr(r.mode) && isStr(r.query)
+    && typeof r.gpuRan === 'boolean' && isNum(r.gpuMedianMs) && isNum(r.cpuMedianMs)
+    && isStr(r.gpuTier) && isStr(r.adapterShort);
+}
+
 export function loadHistory(): HistoryRecord[] {
   try {
     const raw = localStorage.getItem(KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as HistoryRecord[]).slice(0, MAX_ENTRIES) : [];
+    return Array.isArray(parsed) ? parsed.filter(isHistoryRecord).slice(0, MAX_ENTRIES) : [];
   } catch {
     return [];
   }

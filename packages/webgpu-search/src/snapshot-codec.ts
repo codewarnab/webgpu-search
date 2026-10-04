@@ -205,6 +205,56 @@ export function validateColumnarPayload(
   }
 }
 
+function isArrayBufferLike(value: unknown): value is ArrayBuffer {
+  if (typeof ArrayBuffer !== 'undefined' && value instanceof ArrayBuffer) return true;
+  // Cross-realm ArrayBuffer (e.g. from another iframe / vm context).
+  return Object.prototype.toString.call(value) === '[object ArrayBuffer]';
+}
+
+function isSharedArrayBufferLike(value: unknown): boolean {
+  return Object.prototype.toString.call(value) === '[object SharedArrayBuffer]';
+}
+
+/**
+ * Normalizes snapshot input to a standalone `ArrayBuffer`.
+ *
+ * - `ArrayBuffer` is returned as-is (zero-copy).
+ * - `ArrayBufferView` (typed arrays, `DataView`, Node `Buffer`) is narrowed
+ *   to its exact `[byteOffset, byteOffset + byteLength)` window; a view that
+ *   spans its whole non-shared backing buffer is returned zero-copy,
+ *   otherwise the window is copied.
+ * - `SharedArrayBuffer` (or views over one) is copied into a private
+ *   `ArrayBuffer` so decoding never observes concurrent writes.
+ *
+ * Returns `null` for anything else so callers can raise their own
+ * fail-closed `IncompatibleIndexError`.
+ */
+export function toSnapshotArrayBuffer(input: unknown): ArrayBuffer | null {
+  if (input === null || input === undefined) return null;
+  if (isArrayBufferLike(input)) return input;
+  if (isSharedArrayBufferLike(input)) {
+    const src = new Uint8Array(input as ArrayBufferLike);
+    const copy = new Uint8Array(src.byteLength);
+    copy.set(src);
+    return copy.buffer;
+  }
+  if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(input)) {
+    const view = input as ArrayBufferView;
+    const backing = view.buffer as ArrayBufferLike;
+    if (
+      isArrayBufferLike(backing) &&
+      view.byteOffset === 0 &&
+      view.byteLength === backing.byteLength
+    ) {
+      return backing;
+    }
+    const copy = new Uint8Array(view.byteLength);
+    copy.set(new Uint8Array(backing, view.byteOffset, view.byteLength));
+    return copy.buffer;
+  }
+  return null;
+}
+
 /**
  * Parses a snapshot header, accepting both legacy (48 bytes,
  * magic `0x55324433`, version 3) and canonical (56 bytes, magic
@@ -213,11 +263,10 @@ export function validateColumnarPayload(
  *
  * Legacy headers report `columnarByteLength: 0` (absent segment).
  */
-export function decodeSnapshotHeader(buffer: ArrayBuffer): DocumentSnapshotHeader {
-  const buf = buffer as unknown as { byteLength?: unknown; slice?: unknown };
-  const byteLen = typeof buf?.byteLength === 'number' ? (buf.byteLength as number) : NaN;
-  const canSlice = typeof (buf as any)?.slice === 'function';
-  if (!Number.isFinite(byteLen) || byteLen < LEGACY_SNAPSHOT_HEADER_BYTES || !canSlice) {
+export function decodeSnapshotHeader(input: ArrayBuffer | ArrayBufferView): DocumentSnapshotHeader {
+  const buffer = toSnapshotArrayBuffer(input);
+  const byteLen = buffer ? buffer.byteLength : NaN;
+  if (!buffer || !Number.isFinite(byteLen) || byteLen < LEGACY_SNAPSHOT_HEADER_BYTES) {
     throw new IncompatibleIndexError(LEGACY_SNAPSHOT_MAGIC, 'neutered/short');
   }
 
@@ -557,11 +606,17 @@ export interface RestoredDocumentSnapshot<TDoc = Record<string, unknown>> {
  * offsets, and document records.
  */
 export function decodeSnapshot<TDoc = Record<string, unknown>>(
-  buffer: ArrayBuffer,
+  input: ArrayBuffer | ArrayBufferView,
   options?: RestoreDocumentIndexOptions<TDoc>
 ): RestoredDocumentSnapshot<TDoc> {
-  if (!buffer || typeof (buffer as ArrayBuffer).byteLength !== 'number') {
-    throw new IncompatibleIndexError('arraybuffer', typeof buffer);
+  const inputLen = (input as { byteLength?: unknown } | null | undefined)?.byteLength;
+  if (typeof inputLen === 'number' && inputLen > MAX_SNAPSHOT_BYTES) {
+    // Cap before normalization so oversized views are never copied.
+    throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, inputLen);
+  }
+  const buffer = toSnapshotArrayBuffer(input);
+  if (!buffer) {
+    throw new IncompatibleIndexError('arraybuffer', typeof input);
   }
   if ((buffer as ArrayBuffer).byteLength > MAX_SNAPSHOT_BYTES) {
     throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
@@ -712,6 +767,26 @@ export function decodeSnapshot<TDoc = Record<string, unknown>>(
         Array.isArray(schema.docIds) ? schema.docIds.length : typeof schema.docIds
       );
     }
+    // Fail-closed id validation mirroring DocumentIndex id rules: every id
+    // must be a non-empty string or finite number, and unique (Map/Set key
+    // semantics, so `1` and `"1"` are distinct ids).
+    const seenIds = new Set<DocumentId>();
+    for (let i = 0; i < schema.docIds.length; i++) {
+      const id = schema.docIds[i] as unknown;
+      const validScalar =
+        (typeof id === 'string' && id.length > 0) ||
+        (typeof id === 'number' && Number.isFinite(id));
+      if (!validScalar) {
+        throw new IncompatibleIndexError(
+          `schema.docIds[${i}] non-empty string or finite number`,
+          id === null ? 'null' : Array.isArray(id) ? 'array' : typeof id
+        );
+      }
+      if (seenIds.has(id as DocumentId)) {
+        throw new IncompatibleIndexError(`schema.docIds unique`, `duplicate ${typeof id} id at [${i}]`);
+      }
+      seenIds.add(id as DocumentId);
+    }
     docIds = schema.docIds;
   }
 
@@ -726,6 +801,15 @@ export function decodeSnapshot<TDoc = Record<string, unknown>>(
     }
     if (!Array.isArray(records) || records.length !== header.docCount) {
       throw new IncompatibleIndexError(`array of ${header.docCount} records`, records?.length);
+    }
+    for (let i = 0; i < records.length; i++) {
+      const doc = records[i] as unknown;
+      if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+        throw new IncompatibleIndexError(
+          `docs[${i}] object`,
+          doc === null ? 'null' : Array.isArray(doc) ? 'array' : typeof doc
+        );
+      }
     }
   } else {
     // Decoupled document storage
@@ -758,7 +842,7 @@ export function decodeSnapshot<TDoc = Record<string, unknown>>(
  * (canonical + legacy migration path).
  */
 export async function restoreSnapshot<TDoc = Record<string, unknown>>(
-  buffer: ArrayBuffer,
+  buffer: ArrayBuffer | ArrayBufferView,
   options?: RestoreDocumentIndexOptions<TDoc>
 ): Promise<DocumentIndex<TDoc>> {
   const snapshot = decodeSnapshot<TDoc>(buffer, options);

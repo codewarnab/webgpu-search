@@ -127,7 +127,13 @@
  * pre-contract baseline guarantees false failures on the first commit.
  * Total index bumped 82 KB -> 90 KB and delta cap 34 KB -> 40 KB; worker entry
  * gets its own 76 KB total budget (no historical baseline: gate on total only).
- * Budget: 90 KB gzip per file (dist/index.js + dist/index.cjs);
+ * (audit hardening) batch-atomic filter prepare, posting-list filter storage
+ * (bounded memory for high-cardinality string fields), serialized worker queue +
+ * commit-after-success client, snapshot docId/buffer validation, GPU pool
+ * in-flight acquisition + binding-limit clamping: measured index.js 93,294 B
+ * gzip (+4.8 KB). Decision: bump total 90 KB -> 96 KB, delta cap 40 KB -> 46 KB.
+ * Rationale: these are correctness/memory fixes with no lazy-loadable seam.
+ * Budget: 96 KB gzip per file (dist/index.js + dist/index.cjs);
  * 76 KB gzip per file (dist/worker.js + dist/worker.cjs).
  *
  * Fail-closed: missing dist or dist older than library sources fails
@@ -141,8 +147,8 @@ import { stat, readFile } from 'node:fs/promises';
 
 const BASELINE_RAW = 234907;
 const BASELINE_GZIP = 49246;
-const DELTA_CAP_GZIP = 40 * 1024;
-const TOTAL_BUDGET_INDEX_GZIP = 90 * 1024;
+const DELTA_CAP_GZIP = 46 * 1024;
+const TOTAL_BUDGET_INDEX_GZIP = 96 * 1024;
 const TOTAL_BUDGET_WORKER_GZIP = 76 * 1024;
 
 

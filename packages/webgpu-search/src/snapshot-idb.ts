@@ -1,4 +1,4 @@
-import { restoreSnapshot } from './snapshot-codec';
+import { restoreSnapshot, toSnapshotArrayBuffer } from './snapshot-codec';
 import type { DocumentIndex } from './document-index';
 import type { SearchWorkerClient } from './worker/worker-client';
 import type {
@@ -26,31 +26,32 @@ function resolveIDBFactory(options?: IDBStorageOptions): IDBFactory {
   return idb as IDBFactory;
 }
 
-/**
- * Opens the IndexedDB database, provisioning required object stores cleanly.
- */
-export function openSearchDatabase(options?: IDBStorageOptions): Promise<IDBDatabase> {
-  const idb = resolveIDBFactory(options);
-  const dbName = options?.dbName ?? DEFAULT_IDB_DATABASE_NAME;
-  const snapshotStoreName = options?.snapshotStoreName ?? DEFAULT_SNAPSHOT_STORE_NAME;
-  const docStoreName = options?.docStoreName ?? DEFAULT_DOCUMENT_STORE_NAME;
-
+function openRequest(
+  idb: IDBFactory,
+  dbName: string,
+  version: number | undefined,
+  requiredStores: string[]
+): Promise<IDBDatabase> {
   return new Promise<IDBDatabase>((resolve, reject) => {
-    // Open with version 1 (or allow auto-increment)
-    const req = idb.open(dbName, 1);
+    const req = version === undefined ? idb.open(dbName) : idb.open(dbName, version);
 
     req.onupgradeneeded = () => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(snapshotStoreName)) {
-        db.createObjectStore(snapshotStoreName);
-      }
-      if (!db.objectStoreNames.contains(docStoreName)) {
-        db.createObjectStore(docStoreName);
+      for (const name of requiredStores) {
+        if (!db.objectStoreNames.contains(name)) {
+          db.createObjectStore(name);
+        }
       }
     };
 
     req.onsuccess = () => {
-      resolve(req.result);
+      const db = req.result;
+      // Yield to future version upgrades (e.g. another caller provisioning a
+      // custom store) instead of blocking them for the connection lifetime.
+      db.onversionchange = () => {
+        db.close();
+      };
+      resolve(db);
     };
 
     req.onerror = () => {
@@ -58,9 +59,56 @@ export function openSearchDatabase(options?: IDBStorageOptions): Promise<IDBData
     };
 
     req.onblocked = () => {
+      // The upgrade proceeds once other connections close (ours close on
+      // `versionchange`); the request stays pending until then.
       console.warn(`[webgpu-search] IndexedDB database "${dbName}" open request blocked by other open tabs/connections.`);
     };
   });
+}
+
+const MAX_STORE_PROVISION_ATTEMPTS = 3;
+
+/**
+ * Opens the IndexedDB database, provisioning required object stores cleanly.
+ *
+ * Opens at the current version first; if any required store (including a
+ * custom `snapshotStoreName` / `docStoreName`) is missing on an existing
+ * database, the connection is closed and the database is reopened at
+ * `version + 1` so `onupgradeneeded` can create the missing stores.
+ */
+export async function openSearchDatabase(options?: IDBStorageOptions): Promise<IDBDatabase> {
+  const idb = resolveIDBFactory(options);
+  const dbName = options?.dbName ?? DEFAULT_IDB_DATABASE_NAME;
+  const snapshotStoreName = options?.snapshotStoreName ?? DEFAULT_SNAPSHOT_STORE_NAME;
+  const docStoreName = options?.docStoreName ?? DEFAULT_DOCUMENT_STORE_NAME;
+  const requiredStores = snapshotStoreName === docStoreName ? [snapshotStoreName] : [snapshotStoreName, docStoreName];
+
+  let db = await openRequest(idb, dbName, undefined, requiredStores);
+  for (let attempt = 0; attempt < MAX_STORE_PROVISION_ATTEMPTS; attempt++) {
+    const missing = requiredStores.some((name) => !db.objectStoreNames.contains(name));
+    if (!missing) {
+      return db;
+    }
+    const nextVersion = db.version + 1;
+    db.close();
+    try {
+      db = await openRequest(idb, dbName, nextVersion, requiredStores);
+    } catch (err) {
+      // A concurrent opener may have upgraded past `nextVersion` first
+      // (VersionError); reopen at the current version and re-check.
+      if ((err as { name?: string } | null)?.name !== 'VersionError') {
+        throw err;
+      }
+      db = await openRequest(idb, dbName, undefined, requiredStores);
+    }
+  }
+  if (requiredStores.some((name) => !db.objectStoreNames.contains(name))) {
+    db.close();
+    throw new Error(
+      `[webgpu-search] Failed to provision IndexedDB object stores (${requiredStores.join(', ')}) in database "${dbName}".`
+    );
+  }
+  return db;
 }
 
 /**
@@ -72,7 +120,7 @@ export function openSearchDatabase(options?: IDBStorageOptions): Promise<IDBData
  * 3. Supports decoupled document persistence into a secondary document store.
  */
 export async function saveIndexToIDB(
-  indexOrBuffer: DocumentIndex<any> | SearchWorkerClient<any> | ArrayBuffer,
+  indexOrBuffer: DocumentIndex<any> | SearchWorkerClient<any> | ArrayBuffer | ArrayBufferView,
   options?: SaveIDBOptions
 ): Promise<void> {
   if (!indexOrBuffer) {
@@ -84,14 +132,13 @@ export async function saveIndexToIDB(
   let docsToStore: any[] | undefined = options?.documents;
 
   // 1. Serialization phase (OUTSIDE transaction to avoid auto-commit)
-  const isBuffer =
-    indexOrBuffer instanceof ArrayBuffer ||
-    (typeof ArrayBuffer !== 'undefined' &&
-      typeof (indexOrBuffer as any)?.byteLength === 'number' &&
-      typeof (indexOrBuffer as any)?.slice === 'function');
+  // ArrayBuffer is stored as-is; ArrayBufferViews (typed arrays, DataView,
+  // Buffer) are narrowed to their exact byte window so the stored value is
+  // always a plain ArrayBuffer that decodes correctly on load.
+  const normalizedBuffer = toSnapshotArrayBuffer(indexOrBuffer);
 
-  if (isBuffer) {
-    snapshot = indexOrBuffer as ArrayBuffer;
+  if (normalizedBuffer) {
+    snapshot = normalizedBuffer;
   } else if (typeof (indexOrBuffer as any)?.serialize === 'function') {
     snapshot = await (indexOrBuffer as any).serialize({ decoupled });
     if (decoupled && !docsToStore && typeof (indexOrBuffer as any)?.getRecords === 'function') {
@@ -187,7 +234,12 @@ export async function loadIndexFromIDB<TDoc = Record<string, unknown>>(
       const snapStore = tx.objectStore(snapshotStoreName);
       const snapReq = snapStore.get(key);
       snapReq.onsuccess = () => {
-        snapshotResult = (snapReq.result as ArrayBuffer) ?? null;
+        const raw = snapReq.result as unknown;
+        // Normalize legacy typed-array records to a plain ArrayBuffer; any
+        // other non-empty value is passed through so restore fails closed.
+        snapshotResult = raw === undefined || raw === null
+          ? null
+          : (toSnapshotArrayBuffer(raw) ?? (raw as ArrayBuffer));
       };
 
       if (shouldLoadDocs && db!.objectStoreNames.contains(docStoreName)) {

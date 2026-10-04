@@ -25,9 +25,9 @@ export function assertValidPowerPreference(value: unknown): asserts value is GPU
 
 export class GpuDevicePool {
   private static sharedDevice: GPUDevice | null = null;
-  private static sharedAdapter: GPUAdapter | null = null;
   private static sharedAdapterInfo: AdapterInfo | null = null;
   private static refCount: number = 0;
+  private static inFlight: Promise<GPUDevice | null> | null = null;
   private static deviceLostListeners: Set<(reason: string) => void> = new Set();
 
   /**
@@ -118,22 +118,57 @@ export class GpuDevicePool {
       return null;
     }
 
+    // 4. Single in-flight acquisition: concurrent callers share one
+    // requestAdapter/requestDevice so the pool never creates (and leaks) a
+    // second device or resets the refcount under a live holder. Each caller
+    // takes its own reference once the shared acquisition settles.
+    if (!this.inFlight) {
+      const p = this.createSharedDevice(options?.powerPreference);
+      this.inFlight = p;
+      const clear = () => {
+        if (this.inFlight === p) this.inFlight = null;
+      };
+      p.then(clear, clear);
+    }
+    const device = await this.inFlight;
+    // Device may have been lost between creation and this continuation.
+    if (!device || this.sharedDevice !== device) {
+      // Superseded while in flight (e.g. simulated loss): nobody holds a
+      // reference to this stale device, so release it instead of leaking.
+      if (device && this.sharedDevice !== device) device.destroy();
+      return null;
+    }
+    this.refCount++;
+    return {
+      device,
+      adapterInfo: this.sharedAdapterInfo,
+      isShared: true
+    };
+  }
+
+  /**
+   * Request adapter + device and install it as the pooled device with
+   * refCount 0 (callers increment). Resolves null on failure; never throws.
+   */
+  private static async createSharedDevice(
+    powerPreference?: GPUPowerPreference
+  ): Promise<GPUDevice | null> {
     try {
-      const powerPref = options?.powerPreference || 'high-performance';
-      this.sharedAdapter = await navigator.gpu.requestAdapter({ powerPreference: powerPref });
-      if (!this.sharedAdapter) {
-        this.sharedAdapter = await navigator.gpu.requestAdapter();
+      const powerPref = powerPreference || 'high-performance';
+      let adapter = await navigator.gpu.requestAdapter({ powerPreference: powerPref });
+      if (!adapter) {
+        adapter = await navigator.gpu.requestAdapter();
       }
 
-      if (!this.sharedAdapter) {
+      if (!adapter) {
         return null;
       }
 
       // Inspect adapter info
-      let info: any = (this.sharedAdapter as any).info || {};
-      if (!info.vendor && !info.device && 'requestAdapterInfo' in this.sharedAdapter) {
+      let info: any = (adapter as any).info || {};
+      if (!info.vendor && !info.device && 'requestAdapterInfo' in adapter) {
         try {
-          info = await (this.sharedAdapter as any).requestAdapterInfo();
+          info = await (adapter as any).requestAdapterInfo();
         } catch {
           info = {};
         }
@@ -141,35 +176,35 @@ export class GpuDevicePool {
 
       const unmaskedRenderer = this.getUnmaskedRenderer();
       let vendor = info.vendor || '';
-      let device = info.device || '';
+      let deviceName = info.device || '';
       let architecture = info.architecture || '';
       const rawAdapterType =
         typeof info.type === 'string' && info.type ? String(info.type) : undefined;
 
-      if (!device && unmaskedRenderer) device = unmaskedRenderer;
+      if (!deviceName && unmaskedRenderer) deviceName = unmaskedRenderer;
       if (!vendor) {
-        if (/nvidia/i.test(unmaskedRenderer) || /nvidia/i.test(device)) vendor = 'NVIDIA';
-        else if (/intel/i.test(unmaskedRenderer) || /intel/i.test(device)) vendor = 'Intel';
-        else if (/amd|radeon/i.test(unmaskedRenderer) || /amd|radeon/i.test(device)) vendor = 'AMD';
-        else if (/apple/i.test(unmaskedRenderer) || /apple/i.test(device)) vendor = 'Apple';
+        if (/nvidia/i.test(unmaskedRenderer) || /nvidia/i.test(deviceName)) vendor = 'NVIDIA';
+        else if (/intel/i.test(unmaskedRenderer) || /intel/i.test(deviceName)) vendor = 'Intel';
+        else if (/amd|radeon/i.test(unmaskedRenderer) || /amd|radeon/i.test(deviceName)) vendor = 'AMD';
+        else if (/apple/i.test(unmaskedRenderer) || /apple/i.test(deviceName)) vendor = 'Apple';
         else vendor = 'Unknown GPU Vendor';
       }
-      if (!device) device = 'WebGPU Generic Device';
+      if (!deviceName) deviceName = 'WebGPU Generic Device';
       if (!architecture) architecture = 'Default';
 
-      const limits = this.sharedAdapter.limits;
+      const limits = adapter.limits;
       const requiredFeatures: GPUFeatureName[] = [];
-      const hasTimestamp = this.sharedAdapter.features.has('timestamp-query');
+      const hasTimestamp = adapter.features.has('timestamp-query');
       if (hasTimestamp) {
         requiredFeatures.push('timestamp-query');
       }
 
-      this.sharedAdapterInfo = {
+      const adapterInfo: AdapterInfo = {
         vendor,
         architecture,
-        device,
+        device: deviceName,
         description: info.description || unmaskedRenderer || (typeof navigator !== 'undefined' ? navigator.userAgent : 'WebGPU Device'),
-        renderer: unmaskedRenderer || device,
+        renderer: unmaskedRenderer || deviceName,
         ...(rawAdapterType ? { adapterType: rawAdapterType } : {}),
         maxBufferSizeMB: Math.round(limits.maxBufferSize / (1024 * 1024)),
         maxStorageBindingSizeMB: Math.round(limits.maxStorageBufferBindingSize / (1024 * 1024)),
@@ -179,8 +214,9 @@ export class GpuDevicePool {
       };
 
       // Request device with graceful limit fallback
+      let device: GPUDevice;
       try {
-        this.sharedDevice = await this.sharedAdapter.requestDevice({
+        device = await adapter.requestDevice({
           requiredFeatures,
           requiredLimits: {
             maxBufferSize: limits.maxBufferSize,
@@ -190,22 +226,28 @@ export class GpuDevicePool {
         });
       } catch {
         try {
-          this.sharedDevice = await this.sharedAdapter.requestDevice({ requiredFeatures });
+          device = await adapter.requestDevice({ requiredFeatures });
         } catch {
-          this.sharedDevice = await this.sharedAdapter.requestDevice();
+          device = await adapter.requestDevice();
         }
       }
 
-      this.refCount = 1;
+      this.sharedAdapterInfo = adapterInfo;
+      this.sharedDevice = device;
+      this.refCount = 0;
 
-      // Handle device loss gracefully
-      this.sharedDevice.lost.then(lostInfo => {
-        const reason = lostInfo.message || 'WebGPU device lost';
-        console.warn('WebGPU device lost:', reason);
+      // Handle device loss gracefully. Identity-checked: a stale handler for
+      // a previously pooled device must not tear down the current one, and
+      // intentional destroy() (pool release → reason 'destroyed') is not a
+      // loss event — listeners would otherwise push healthy indexes to CPU.
+      device.lost?.then?.(lostInfo => {
+        if (this.sharedDevice !== device) return;
         this.sharedDevice = null;
-        this.sharedAdapter = null;
         this.refCount = 0;
-        for (const listener of this.deviceLostListeners) {
+        if ((lostInfo as { reason?: unknown } | undefined)?.reason === 'destroyed') return;
+        const reason = lostInfo?.message || 'WebGPU device lost';
+        console.warn('WebGPU device lost:', reason);
+        for (const listener of [...this.deviceLostListeners]) {
           try {
             listener(reason);
           } catch (e) {
@@ -214,11 +256,7 @@ export class GpuDevicePool {
         }
       }, () => {});
 
-      return {
-        device: this.sharedDevice,
-        adapterInfo: this.sharedAdapterInfo,
-        isShared: true
-      };
+      return device;
     } catch (err) {
       console.warn('Failed to acquire WebGPU device:', err);
       return null;
@@ -226,19 +264,26 @@ export class GpuDevicePool {
   }
 
   /**
-   * Release device reference. When reference count drops to 0, shared device is destroyed.
+   * Release a device reference. Only the currently pooled device is
+   * refcounted: releasing a stale device (from before a loss/re-acquire) or a
+   * non-shared injected device is a no-op, so it can never decrement — and
+   * destroy — another holder's device. When the count drops to 0 the shared
+   * device is destroyed.
    */
-  static releaseDevice(_device: GPUDevice, isShared: boolean = true): void {
+  static releaseDevice(device: GPUDevice, isShared: boolean = true): void {
     if (!isShared) return;
+    if (!device || device !== this.sharedDevice) return;
     this.refCount = Math.max(0, this.refCount - 1);
-    if (this.refCount === 0 && this.sharedDevice) {
+    if (this.refCount === 0) {
+      const dev = this.sharedDevice;
+      // Null first so the lost handler (reason 'destroyed') sees a stale
+      // identity and stays silent.
+      this.sharedDevice = null;
       try {
-        this.sharedDevice.destroy();
+        dev.destroy();
       } catch {
         // ignore
       }
-      this.sharedDevice = null;
-      this.sharedAdapter = null;
     }
   }
 
@@ -289,7 +334,6 @@ export class GpuDevicePool {
    */
   static simulateDeviceLoss(reason: string = 'Simulated device loss'): void {
     this.sharedDevice = null;
-    this.sharedAdapter = null;
     this.refCount = 0;
     for (const listener of [...this.deviceLostListeners]) {
       try {

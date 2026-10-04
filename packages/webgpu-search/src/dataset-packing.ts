@@ -457,10 +457,31 @@ export interface ClampedHeadroomOptions {
 }
 
 /**
+ * Effective per-buffer storage limit: `min(maxBufferSize,
+ * maxStorageBufferBindingSize)`. Forged/partial limits fall back to the
+ * 128 MB default (fail-closed, mirrors `checkMemoryBudget`).
+ */
+export function resolveStorageBufferLimit(device?: GPUDevice | null): number {
+  let maxLimit = 134217728; // 128 MB default safe limit
+  const l = device?.limits as unknown as { maxBufferSize?: unknown; maxStorageBufferBindingSize?: unknown } | undefined;
+  if (l !== undefined) {
+    const a = typeof l.maxBufferSize === 'number' ? l.maxBufferSize : NaN;
+    const b = typeof l.maxStorageBufferBindingSize === 'number' ? l.maxStorageBufferBindingSize : NaN;
+    if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0) {
+      maxLimit = Math.min(a as number, b as number);
+    }
+  }
+  return maxLimit;
+}
+
+/**
  * Computes buffer capacity with dynamic headroom clamped to adapter limits.
- * targetBytes = min(requiredBytes * growthFactor, maxStorageBufferBindingSize).
- * If headroom overflows the limit but requiredBytes fits, returns exact requiredBytes
- * to avoid triggering an unnecessary CPU fallback.
+ * targetBytes = min(requiredBytes * growthFactor, limit) where
+ * limit = min(maxBufferSize, maxStorageBufferBindingSize), 4-byte aligned.
+ * If headroom overflows the limit but requiredBytes fits, returns exact
+ * requiredBytes. If requiredBytes itself (a requested *capacity*) exceeds the
+ * limit, the result is clamped to the limit — never an oversized binding.
+ * Callers must separately verify the actual data fits (`checkMemoryBudget`).
  */
 export function computeClampedHeadroomBytes(
   requiredBytes: number,
@@ -473,15 +494,8 @@ export function computeClampedHeadroomBytes(
     ? options.growthFactor
     : 1.5;
 
-  let maxLimit = 134217728; // 128 MB default safe limit
-  const l = options.device?.limits as unknown as { maxBufferSize?: unknown; maxStorageBufferBindingSize?: unknown } | undefined;
-  if (l !== undefined) {
-    const a = typeof l.maxBufferSize === 'number' ? l.maxBufferSize : NaN;
-    const b = typeof l.maxStorageBufferBindingSize === 'number' ? l.maxStorageBufferBindingSize : NaN;
-    if (Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0) {
-      maxLimit = Math.min(a as number, b as number);
-    }
-  }
+  const maxLimit = resolveStorageBufferLimit(options.device);
+  const alignedLimit = Math.max(16, Math.floor(maxLimit / 4) * 4);
 
   const alignedReq = Math.max(16, Math.ceil(safeReq / 4) * 4);
   const desired = Math.max(16, Math.ceil((safeReq * growth) / 4) * 4);
@@ -492,7 +506,7 @@ export function computeClampedHeadroomBytes(
   if (alignedReq <= maxLimit) {
     return alignedReq;
   }
-  return alignedReq;
+  return alignedLimit;
 }
 
 

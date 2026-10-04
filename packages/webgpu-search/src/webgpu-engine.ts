@@ -5,6 +5,7 @@ import {
   checkMemoryBudget,
   computeClampedHeadroomBytes,
   deserializeDataset,
+  resolveStorageBufferLimit,
   packDataset,
   validatePackedOffsets,
   type PackedDataset,
@@ -161,10 +162,13 @@ export class WebGPUEngine {
   async init(
     customDevice?: GPUDevice | { device?: GPUDevice; powerPreference?: GPUPowerPreference }
   ): Promise<boolean> {
-    // Guard re-entry: dispose existing GPU buffers before re-creating so
-    // init() twice does not leak the first set (benchmark/power users).
+    // Guard re-entry: dispose existing GPU buffers AND release the previous
+    // device reference before re-acquiring, so init() twice leaks neither the
+    // first buffer set nor a pool refcount (benchmark/power users).
     if (this.device) {
+      this.generation++;
       this.disposeGpuBuffers();
+      this.releaseCurrentDevice();
     }
     // Normalize overloads: bare GPUDevice (legacy) or options bag.
     // powerPreference is validated fail-closed (unknown throws) and forwarded
@@ -203,7 +207,7 @@ export class WebGPUEngine {
         hasTimestampQuery: injected.features ? injected.features.has('timestamp-query') : false
       };
       this.attachLostHandler();
-      return await this.setupPipelinesAndBuffers();
+      return await this.setupOrTeardown();
     }
 
     const acquired = await GpuDevicePool.acquireDevice(
@@ -218,7 +222,32 @@ export class WebGPUEngine {
     this.isSharedDevice = acquired.isShared;
     this.deviceReleased = false;
     this.attachLostHandler();
-    return await this.setupPipelinesAndBuffers();
+    return await this.setupOrTeardown();
+  }
+
+  /**
+   * Pipeline/buffer setup with fail-closed teardown: a throw (shader
+   * compile, pipeline creation, OOM) destroys partial buffers and releases
+   * the device reference so a failed init never leaks a pool refcount.
+   */
+  private async setupOrTeardown(): Promise<boolean> {
+    try {
+      return await this.setupPipelinesAndBuffers();
+    } catch (err) {
+      this.destroy();
+      throw err;
+    }
+  }
+
+  /** Release the held device reference exactly once (deviceReleased guard). */
+  private releaseCurrentDevice(): void {
+    if (this.device && !this.deviceReleased) {
+      this.deviceReleased = true;
+      try {
+        GpuDevicePool.releaseDevice(this.device, this.isSharedDevice);
+      } catch {}
+    }
+    this.device = null;
   }
 
   private attachLostHandler(): void {
@@ -235,13 +264,7 @@ export class WebGPUEngine {
       this.offsetsBuffer = this.recordsBuffer = this.uniformBuffer = this.queryBuffer = null;
       this.outputBuffer = this.stagingBuffer = this.queryResolveBuffer = this.queryStagingBuffer = null;
       this.querySet = null;
-      if (this.device !== null && !this.deviceReleased) {
-        this.deviceReleased = true;
-        try {
-          GpuDevicePool.releaseDevice(this.device, this.isSharedDevice);
-        } catch {}
-      }
-      this.device = null;
+      this.releaseCurrentDevice();
       this.generation++;
     }, () => {});
   }
@@ -560,6 +583,26 @@ export class WebGPUEngine {
 
     const allocOffsets = Math.max(reqOffsets, targetOffsets);
     const allocRecords = Math.max(reqRecords, targetRecords);
+
+    // Per-buffer binding limit: headroom is clamped to the limit, so only an
+    // actual corpus above the limit can land here. Throw the budget error
+    // (callers fall back to CPU) instead of creating an oversized binding
+    // that fails validation and silently yields 0 results.
+    const bindingLimit = resolveStorageBufferLimit(this.device);
+    if (allocOffsets > bindingLimit || allocRecords > bindingLimit) {
+      Object.assign(this, {
+        currentDatasetSize: prev.size,
+        currentStrings: prev.strings,
+        currentTokens: prev.tokens,
+        currentOffsets: prev.offsets,
+        normalized: prev.normalized,
+        profileId: prev.profileId,
+        unicodeVersion: prev.unicodeVersion,
+        scoringVersion: prev.scoringVersion,
+      });
+      const over = allocRecords > bindingLimit ? 'records' : 'offsets';
+      throw new Error(`[webgpu-search] Dataset ${over} buffer too large. Falling back to CPU.`);
+    }
 
     const t0 = nowMs();
     let newOffsetsBuffer: GPUBuffer | null = null;
@@ -899,18 +942,39 @@ export class WebGPUEngine {
     const tReadbackStart = nowMs();
     let gpuExecutionMs: number | null = null;
 
-    if (this.queryStagingBuffer && !skipTimestamps) {
+    // Generation-epoch abort for in-flight mapAsync (takes no signal, so
+    // abort is cooperative discard). Captured BEFORE the first await (the
+    // timestamp readback): destroy()/ensureCandidateCapacity()/loadDataset()
+    // during that await bump the epoch and null/replace buffers, which must
+    // surface as AbortError — never a TypeError or a read of a fresh
+    // (zeroed) staging buffer. Buffers are pinned locally for the same reason.
+    // Rejected: bare Promise.race — abandons the mapping, later
+    // destroy-while-mapped error. mapAsync rejection itself (e.g. destroy
+    // raced it via unmap) also maps to AbortError when the epoch moved, so
+    // hybrid doesn't misclassify it as fallback-eligible GPU failure.
+    const gen = this.generation;
+    const stagingBuffer = this.stagingBuffer;
+    const tsStaging = this.queryStagingBuffer;
+
+    if (tsStaging && !skipTimestamps) {
       try {
-        await this.queryStagingBuffer.mapAsync(MapMode.READ);
-        const tu = new BigUint64Array(this.queryStagingBuffer.getMappedRange());
-        if (tu[1] >= (tu[0]) && (tu[0]) > 0n) {
-          gpuExecutionMs = Number((tu[1]) - (tu[0])) / 1_000_000;
+        await tsStaging.mapAsync(MapMode.READ);
+        if (gen === this.generation) {
+          const tu = new BigUint64Array(tsStaging.getMappedRange());
+          if (tu[1] >= (tu[0]) && (tu[0]) > 0n) {
+            gpuExecutionMs = Number((tu[1]) - (tu[0])) / 1_000_000;
+          }
         }
       } catch (tsErr) {
-        console.warn('timestamp read failed:', tsErr);
+        if (gen === this.generation) console.warn('timestamp read failed:', tsErr);
       } finally {
-        try { this.queryStagingBuffer.unmap(); } catch {}
+        try { tsStaging.unmap(); } catch {}
       }
+    }
+
+    // Torn down / reallocated during the timestamp await.
+    if (gen !== this.generation || !this.device || this.stagingBuffer !== stagingBuffer) {
+      throw abortError();
     }
 
     let totalMatches = 0;
@@ -918,34 +982,23 @@ export class WebGPUEngine {
     let hasOverflow = false;
     let candidates: SearchResultItem[] = [];
 
-    // Generation-epoch abort for in-flight mapAsync (takes no signal, so
-    // abort is cooperative discard). Capture before await; on mismatch unmap
-    // and discard (stale dataset / torn-down engine). Rejected: bare
-    // Promise.race — abandons the mapping, later destroy-while-mapped error.
-    // mapAsync rejection itself (e.g. destroy raced it via unmap) also maps
-    // to AbortError when the epoch moved, so hybrid doesn't misclassify it
-    // as fallback-eligible GPU failure.
-    const gen = this.generation;
     try {
-      await this.stagingBuffer.mapAsync(MapMode.READ);
+      await stagingBuffer.mapAsync(MapMode.READ);
     } catch (mapErr) {
       if (gen !== this.generation) {
-        try { this.stagingBuffer.unmap(); } catch {}
+        try { stagingBuffer.unmap(); } catch {}
         throw abortError();
       }
       throw mapErr;
     }
     try {
-      if (gen !== this.generation) {
-        try { this.stagingBuffer.unmap(); } catch {}
-        throw abortError();
-      }
-      // Re-check liveness after the await: destroy() nulls device/buffers.
-      if (!this.device || !this.stagingBuffer) {
+      // Re-check epoch + liveness after the await: destroy() nulls
+      // device/buffers, reallocation swaps them.
+      if (gen !== this.generation || !this.device || this.stagingBuffer !== stagingBuffer) {
         throw abortError();
       }
       throwIfAborted(options.signal);
-      const arrayBuffer = this.stagingBuffer.getMappedRange();
+      const arrayBuffer = stagingBuffer.getMappedRange();
       const u32Read = new Uint32Array(arrayBuffer);
       const i32Read = new Int32Array(arrayBuffer);
 
@@ -966,7 +1019,7 @@ export class WebGPUEngine {
         };
       }
     } finally {
-      try { this.stagingBuffer.unmap(); } catch {}
+      try { stagingBuffer.unmap(); } catch {}
     }
 
     throwIfAborted(options.signal);
@@ -1033,13 +1086,7 @@ export class WebGPUEngine {
     this.currentDatasetSize = 0;
     this.allocatedOffsetsByteLength = 0;
     this.allocatedRecordsByteLength = 0;
-    if (this.device && !this.deviceReleased) {
-      this.deviceReleased = true;
-      try {
-        GpuDevicePool.releaseDevice(this.device, this.isSharedDevice);
-      } catch {}
-    }
-    this.device = null;
+    this.releaseCurrentDevice();
     const p = this.searchMutex.then(() => {}, () => {});
     this.searchMutex = p.catch(() => {});
   }

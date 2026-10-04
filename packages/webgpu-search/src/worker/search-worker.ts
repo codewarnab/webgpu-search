@@ -1,5 +1,5 @@
 import { DocumentIndex } from '../document-index';
-import { restoreDocumentIndex } from '../snapshot-codec';
+import { decodeSnapshotHeader, restoreDocumentIndex } from '../snapshot-codec';
 import type { WorkerMessageType } from '../types';
 import {
   serializeError,
@@ -9,6 +9,7 @@ import {
   type WorkerRequest,
   type WorkerResponse,
   type WorkerRestorePayload,
+  type WorkerRestoreResult,
   type WorkerSearchPayload,
   type WorkerSerializePayload
 } from './protocol';
@@ -44,7 +45,56 @@ export function startSearchWorker(customScope?: any): void {
 
   let index: DocumentIndex<any> | null = null;
   let activeAbortController: AbortController | null = null;
+  let activeQueryId: number = 0;
+  // Highest SEARCH queryId seen (updated on arrival, before queueing).
   let latestQueryId: number = 0;
+  // Every queryId <= abortedUpTo was cancelled by the client.
+  let abortedUpTo: number = -1;
+
+  /**
+   * Message serialization (reader/writer queue). State-mutating requests
+   * (INIT / RESTORE / MUTATE / DESTROY) run exclusively, after every earlier
+   * request has settled. Read requests (SEARCH / SERIALIZE / STATS) wait only
+   * for earlier exclusive requests, so concurrent searches keep their
+   * supersede/abort semantics. ABORT is handled immediately on arrival.
+   */
+  let allTail: Promise<unknown> = Promise.resolve();
+  let exclusiveTail: Promise<unknown> = Promise.resolve();
+  const EXCLUSIVE_TYPES: ReadonlySet<string> = new Set(['INIT', 'RESTORE', 'MUTATE', 'DESTROY']);
+
+  /**
+   * Session epoch, bumped when DESTROY arrives. Requests are tagged with the
+   * epoch they arrived in; replies (and not-yet-started work) from an older
+   * epoch are dropped so a reused worker never answers a new client's
+   * request ids with a previous session's results.
+   */
+  let sessionEpoch = 0;
+  const requestEpoch = new WeakMap<object, number>();
+  const reply = (req: WorkerRequest, msg: WorkerResponse, transfer?: Transferable[]): void => {
+    if (requestEpoch.get(req) !== sessionEpoch) {
+      return;
+    }
+    if (transfer) {
+      scope.postMessage(msg, transfer);
+    } else {
+      scope.postMessage(msg);
+    }
+  };
+
+  const swapIndex = (next: DocumentIndex<any> | null): void => {
+    const prev = index;
+    index = next;
+    if (prev && prev !== next) {
+      prev.destroy();
+    }
+  };
+
+  const abortActiveSearch = (): void => {
+    if (activeAbortController) {
+      activeAbortController.abort();
+      activeAbortController = null;
+    }
+  };
 
   type WorkerHandler = (req: WorkerRequest) => Promise<void> | void;
 
@@ -57,16 +107,14 @@ export function startSearchWorker(customScope?: any): void {
       'INIT',
       async (req) => {
         try {
-          if (index) {
-            index.destroy();
-            index = null;
-          }
           const payload = req.payload as WorkerInitPayload<any>;
           const records = Array.isArray(payload?.records) ? payload.records : [];
-          index = await DocumentIndex.create(records, payload?.options ?? { fields: [] });
-          scope.postMessage({ id: req.id, success: true } satisfies WorkerResponse);
+          // Build-then-swap: a failed INIT leaves the previous index live.
+          const next = await DocumentIndex.create(records, payload?.options ?? { fields: [] });
+          swapIndex(next);
+          reply(req, { id: req.id, success: true } satisfies WorkerResponse);
         } catch (err) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(err)
@@ -81,7 +129,7 @@ export function startSearchWorker(customScope?: any): void {
         const queryId = payload?.queryId ?? 0;
 
         if (!index) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(
@@ -91,17 +139,16 @@ export function startSearchWorker(customScope?: any): void {
           return;
         }
 
-        if (queryId < latestQueryId) {
-          // Superseded by newer query
+        if (queryId < latestQueryId || queryId <= abortedUpTo) {
+          // Superseded by a newer query or cancelled while queued.
           return;
         }
-        latestQueryId = queryId;
 
-        if (activeAbortController) {
-          activeAbortController.abort();
-        }
-        activeAbortController = new AbortController();
-        const signal = activeAbortController.signal;
+        abortActiveSearch();
+        const controller = new AbortController();
+        activeAbortController = controller;
+        activeQueryId = queryId;
+        const signal = controller.signal;
 
         try {
           const resp = await index.search(payload.query, {
@@ -109,6 +156,9 @@ export function startSearchWorker(customScope?: any): void {
             signal
           });
 
+          if (activeAbortController === controller) {
+            activeAbortController = null;
+          }
           if (signal.aborted || queryId < latestQueryId) {
             return;
           }
@@ -118,16 +168,19 @@ export function startSearchWorker(customScope?: any): void {
             resp.results = resp.results.map((item) => ({ ...item, doc: undefined }));
           }
 
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: true,
             result: resp
           } satisfies WorkerResponse);
         } catch (err: any) {
+          if (activeAbortController === controller) {
+            activeAbortController = null;
+          }
           if (signal.aborted || queryId < latestQueryId) {
             return;
           }
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(err)
@@ -139,11 +192,15 @@ export function startSearchWorker(customScope?: any): void {
       'ABORT',
       (req) => {
         const payload = req.payload as WorkerAbortPayload;
-        if (payload && payload.queryId >= latestQueryId) {
-          if (activeAbortController) {
-            activeAbortController.abort();
-            activeAbortController = null;
-          }
+        const queryId = payload?.queryId;
+        if (typeof queryId !== 'number' || !Number.isFinite(queryId)) {
+          return;
+        }
+        if (queryId > abortedUpTo) {
+          abortedUpTo = queryId;
+        }
+        if (activeAbortController && activeQueryId <= queryId) {
+          abortActiveSearch();
         }
       }
     ],
@@ -151,7 +208,7 @@ export function startSearchWorker(customScope?: any): void {
       'MUTATE',
       async (req) => {
         if (!index) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(
@@ -163,13 +220,13 @@ export function startSearchWorker(customScope?: any): void {
         try {
           const payload = req.payload as WorkerMutatePayload<any>;
           const res = await index.applyBatch(payload.batch, payload.options);
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: true,
             result: res
           } satisfies WorkerResponse);
         } catch (err) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(err)
@@ -181,7 +238,7 @@ export function startSearchWorker(customScope?: any): void {
       'SERIALIZE',
       (req) => {
         if (!index) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(
@@ -193,12 +250,9 @@ export function startSearchWorker(customScope?: any): void {
         try {
           const payload = req.payload as WorkerSerializePayload | undefined;
           const buf = index.serialize(payload?.options);
-          scope.postMessage(
-            { id: req.id, success: true, result: buf } satisfies WorkerResponse,
-            [buf]
-          );
+          reply(req, { id: req.id, success: true, result: buf } satisfies WorkerResponse, [buf]);
         } catch (err) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(err)
@@ -211,14 +265,29 @@ export function startSearchWorker(customScope?: any): void {
       async (req) => {
         try {
           const payload = req.payload as WorkerRestorePayload;
-          if (index) {
-            index.destroy();
-            index = null;
+          const hasCallerDocs = Array.isArray(payload?.options?.documents);
+          // Validate-then-swap: a corrupt snapshot leaves the previous index live.
+          const header = decodeSnapshotHeader(payload?.buffer);
+          const next = await restoreDocumentIndex(payload?.buffer, payload?.options);
+          let result: WorkerRestoreResult;
+          try {
+            result = {
+              fields: next.getSortedFields().map((f) => ({ name: f.name, weight: f.weight })),
+              filterFields: next.getFilterFieldDefinitions().map((ff) => ({
+                name: ff.name as string,
+                ...(ff.type !== undefined ? { type: ff.type } : {})
+              })),
+              ...(typeof next.options.idField === 'string' ? { idField: next.options.idField } : {}),
+              ...(header.docsByteLength > 0 && !hasCallerDocs ? { records: next.getRecords() } : {})
+            };
+          } catch (err) {
+            next.destroy();
+            throw err;
           }
-          index = await restoreDocumentIndex(payload.buffer, payload.options);
-          scope.postMessage({ id: req.id, success: true } satisfies WorkerResponse);
+          swapIndex(next);
+          reply(req, { id: req.id, success: true, result } satisfies WorkerResponse);
         } catch (err) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(err)
@@ -230,7 +299,7 @@ export function startSearchWorker(customScope?: any): void {
       'STATS',
       (req) => {
         if (!index) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(
@@ -241,13 +310,13 @@ export function startSearchWorker(customScope?: any): void {
         }
         try {
           const stats = index.getStats();
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: true,
             result: stats
           } satisfies WorkerResponse);
         } catch (err) {
-          scope.postMessage({
+          reply(req, {
             id: req.id,
             success: false,
             error: serializeError(err)
@@ -258,23 +327,32 @@ export function startSearchWorker(customScope?: any): void {
     [
       'DESTROY',
       (req) => {
-        if (index) {
-          index.destroy();
-          index = null;
-        }
-        if (activeAbortController) {
-          activeAbortController.abort();
-          activeAbortController = null;
-        }
-        scope.postMessage({ id: req.id, success: true } satisfies WorkerResponse);
+        swapIndex(null);
+        abortActiveSearch();
+        reply(req, { id: req.id, success: true } satisfies WorkerResponse);
       }
     ]
   ]);
 
-  const onMessage = async (event: MessageEvent) => {
+  const runGuarded = (handler: WorkerHandler, req: WorkerRequest) => async (): Promise<void> => {
+    if (requestEpoch.get(req) !== sessionEpoch) {
+      return; // Superseded by a later DESTROY before it started.
+    }
+    try {
+      await handler(req);
+    } catch (err) {
+      reply(req, {
+        id: req.id,
+        success: false,
+        error: serializeError(err)
+      } satisfies WorkerResponse);
+    }
+  };
+
+  const onMessage = (event: MessageEvent): Promise<void> => {
     const req = event?.data as WorkerRequest;
     if (!req || typeof req.id !== 'number' || typeof req.type !== 'string') {
-      return;
+      return Promise.resolve();
     }
 
     const handler = handlers.get(req.type as WorkerMessageType);
@@ -286,9 +364,50 @@ export function startSearchWorker(customScope?: any): void {
           new Error(`[webgpu-search] Unknown worker request type: ${(req as any).type}`)
         )
       } satisfies WorkerResponse);
-      return;
+      return Promise.resolve();
     }
-    await handler(req);
+
+    // Never let a rejected run (e.g. reply() throwing DataCloneError) poison
+    // the queue tails and silently skip every later request.
+    const guarded = runGuarded(handler, req);
+    const run = (): Promise<void> => guarded().catch(() => undefined);
+
+    if (req.type === 'SEARCH') {
+      // Supersede on arrival so a newer query cancels the in-flight one even
+      // while it waits behind a queued state mutation.
+      const queryId = (req.payload as WorkerSearchPayload<any> | undefined)?.queryId ?? 0;
+      if (queryId > latestQueryId) {
+        latestQueryId = queryId;
+        if (activeAbortController && activeQueryId < queryId) {
+          abortActiveSearch();
+        }
+      }
+    } else if (req.type === 'DESTROY') {
+      // Cancel in-flight work early; the index teardown itself is queued
+      // behind any pending INIT/RESTORE so it cannot be undone by them.
+      // Query sequencing restarts so a reused (non-owned) worker accepts a
+      // fresh client's queryIds.
+      abortActiveSearch();
+      latestQueryId = 0;
+      abortedUpTo = -1;
+      sessionEpoch++;
+    }
+
+    requestEpoch.set(req, sessionEpoch);
+
+    if (req.type === 'ABORT') {
+      return run();
+    }
+
+    if (EXCLUSIVE_TYPES.has(req.type)) {
+      const p = allTail.then(run);
+      allTail = p;
+      exclusiveTail = p;
+      return p;
+    }
+    const p = exclusiveTail.then(run);
+    allTail = Promise.all([allTail, p]);
+    return p;
   };
 
   if (typeof scope.addEventListener === 'function') {

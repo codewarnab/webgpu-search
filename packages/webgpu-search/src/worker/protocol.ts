@@ -68,6 +68,20 @@ export interface WorkerRestorePayload {
 }
 
 /**
+ * RESTORE success result: the validated schema of the restored index, so the
+ * client commits field/id definitions only after the worker accepted the
+ * snapshot (checksum + schema validation happen once, worker-side).
+ * `records` is present only when the snapshot embedded documents and the
+ * caller did not supply `options.documents`.
+ */
+export interface WorkerRestoreResult {
+  fields: Array<{ name: string; weight: number }>;
+  filterFields: Array<{ name: string; type?: string }>;
+  idField?: string;
+  records?: Array<Record<string, unknown>>;
+}
+
+/**
  * Serialize an Error object (including custom library errors) into a structured-clone-safe format.
  */
 export function serializeError(err: unknown): SerializedWorkerError {

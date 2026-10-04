@@ -17,11 +17,12 @@ import {
   type WorkerMessageType,
   type WorkerRequest,
   type WorkerResponse,
+  type WorkerRestoreResult,
   type WorkerSearchPayload
 } from './protocol';
 import { abortError, throwIfAborted } from '../guard';
-import { decodeSnapshotHeader, MAX_SNAPSHOT_BYTES } from '../snapshot-codec';
-import { LEGACY_SNAPSHOT_HEADER_BYTES, SNAPSHOT_HEADER_BYTES, SNAPSHOT_MAGIC, IncompatibleIndexError } from '../text-profile';
+import { MAX_SNAPSHOT_BYTES, toSnapshotArrayBuffer } from '../snapshot-codec';
+import { IncompatibleIndexError } from '../text-profile';
 import { IncompatibleHookError, IncompatibleOptionError } from '../errors';
 import { hasAnyHook, normalizeSearchHooks } from '../hooks';
 
@@ -52,6 +53,16 @@ interface InternalFieldDef<TDoc> {
   getter: (doc: TDoc) => string | string[] | undefined | null;
 }
 
+/**
+ * Doc-extraction config: how the client derives ids and serializable
+ * field/filter values for records it sends to the worker.
+ */
+interface ClientIndexConfig<TDoc> {
+  getId: (doc: TDoc) => DocumentId;
+  fieldDefinitions: InternalFieldDef<TDoc>[];
+  filterDefinitions: Array<{ name: string; getter: (doc: any) => any }>;
+}
+
 interface PendingQuery<TDoc> {
   queryId: number;
   resolve: (res: DocumentSearchResponse<TDoc>) => void;
@@ -78,9 +89,39 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
   private nextQueryId: number = 1;
   private readonly stringIsolated: boolean;
   private readonly docMap: Map<DocumentId, TDoc> = new Map();
+  /**
+   * Outgoing config: matches the worker state implied by every request
+   * posted so far (assuming success). Used to serialize MUTATE payloads.
+   */
   private getId: (doc: TDoc) => DocumentId = (doc: any) => doc?.id;
   private fieldDefinitions: InternalFieldDef<TDoc>[] = [];
   private filterDefinitions: Array<{ name: string; getter: (doc: any) => any }> = [];
+  /** Config of the most recent INIT/RESTORE the worker confirmed. */
+  private committedConfig: ClientIndexConfig<TDoc> = {
+    getId: this.getId,
+    fieldDefinitions: this.fieldDefinitions,
+    filterDefinitions: this.filterDefinitions
+  };
+  /**
+   * Bumped whenever an INIT/RESTORE is posted. The worker processes
+   * requests in order and replies in order, so commits happen in completion
+   * order; a failed request only rolls the outgoing config back when no
+   * later INIT/RESTORE was posted after it.
+   */
+  private stateGeneration: number = 0;
+  /**
+   * Settles once every RESTORE posted so far has settled. The restored
+   * schema is only known after the worker validates the snapshot, so
+   * mutations issued meanwhile wait before serializing their documents.
+   */
+  private restoreBarrier: Promise<void> | null = null;
+  /**
+   * Settles once every deferred request has posted. Requests normally post
+   * synchronously (worker processes them in arrival order); while a request
+   * is deferred (a mutation awaiting a pending RESTORE), later requests queue
+   * behind it so the worker still sees them in call order.
+   */
+  private deferredPosts: Promise<void> | null = null;
   private messageListener: ((event: MessageEvent) => void) | null = null;
   private errorListener: ((err: any) => void) | null = null;
 
@@ -296,15 +337,83 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     });
   }
 
-  private extractSerializableDoc(doc: TDoc, id: DocumentId): Record<string, unknown> {
+  private currentConfig(): ClientIndexConfig<TDoc> {
+    return {
+      getId: this.getId,
+      fieldDefinitions: this.fieldDefinitions,
+      filterDefinitions: this.filterDefinitions
+    };
+  }
+
+  private setOutgoingConfig(config: ClientIndexConfig<TDoc>): void {
+    this.getId = config.getId;
+    this.fieldDefinitions = config.fieldDefinitions;
+    this.filterDefinitions = config.filterDefinitions;
+  }
+
+  /**
+   * Runs `run` (which must post its request synchronously before its first
+   * `await`) immediately when nothing is deferred, otherwise after `waitFor`
+   * and every earlier deferred request have settled/posted.
+   */
+  private runInPostOrder<T>(waitFor: Promise<void> | null, run: () => Promise<T>): Promise<T> {
+    const prior = this.deferredPosts;
+    if (!waitFor && !prior) {
+      return run();
+    }
+    let release!: () => void;
+    const posted = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.deferredPosts = posted;
+    return Promise.all([waitFor, prior]).then(() => {
+      try {
+        return run();
+      } finally {
+        release();
+        if (this.deferredPosts === posted) {
+          this.deferredPosts = null;
+        }
+      }
+    });
+  }
+
+  /** Posts an INIT/RESTORE and commits/rolls back config in completion order. */
+  private async sendStateRequest<T>(
+    type: 'INIT' | 'RESTORE',
+    payload: unknown,
+    outgoing: ClientIndexConfig<TDoc> | null,
+    transfer?: Transferable[]
+  ): Promise<{ result: T; isLatest: boolean }> {
+    const generation = ++this.stateGeneration;
+    if (outgoing) {
+      this.setOutgoingConfig(outgoing);
+    }
+    try {
+      const result = await this.sendRequest<T>(type, payload, transfer);
+      return { result, isLatest: this.stateGeneration === generation };
+    } catch (err) {
+      if (this.stateGeneration === generation) {
+        // Worker kept its previous index; mirror it.
+        this.setOutgoingConfig(this.committedConfig);
+      }
+      throw err;
+    }
+  }
+
+  private extractSerializableDoc(
+    doc: TDoc,
+    id: DocumentId,
+    config: ClientIndexConfig<TDoc> = this.currentConfig()
+  ): Record<string, unknown> {
     const out: Record<string, unknown> = { [INTERNAL_WORKER_ID_KEY]: id };
-    for (let i = 0; i < this.fieldDefinitions.length; i++) {
-      const f = this.fieldDefinitions[i];
+    for (let i = 0; i < config.fieldDefinitions.length; i++) {
+      const f = config.fieldDefinitions[i];
       const val = f.getter(doc);
       out[f.name] = val !== undefined && val !== null ? val : '';
     }
-    for (let i = 0; i < this.filterDefinitions.length; i++) {
-      const ff = this.filterDefinitions[i];
+    for (let i = 0; i < config.filterDefinitions.length; i++) {
+      const ff = config.filterDefinitions[i];
       const val = ff.getter(doc);
       if (val !== undefined) {
         out[ff.name] = val;
@@ -313,7 +422,14 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     return out;
   }
 
-  async init(
+  init(
+    optionsOrRecords?: DocumentIndexOptions<TDoc> | TDoc[],
+    maybeOptions?: DocumentIndexOptions<TDoc>
+  ): Promise<void> {
+    return this.runInPostOrder(null, () => this.initNow(optionsOrRecords, maybeOptions));
+  }
+
+  private async initNow(
     optionsOrRecords?: DocumentIndexOptions<TDoc> | TDoc[],
     maybeOptions?: DocumentIndexOptions<TDoc>
   ): Promise<void> {
@@ -343,20 +459,22 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       throw new TypeError('[webgpu-search] idField must be a string property name or function.');
     }
 
+    // Stage config locally; it is only committed once the worker confirms.
+    let stagedGetId: (doc: TDoc) => DocumentId;
     if (typeof options.idField === 'function') {
-      this.getId = options.idField;
+      stagedGetId = options.idField;
     } else if (typeof options.idField === 'string') {
       const prop = options.idField;
-      this.getId = (doc: any) => doc[prop];
+      stagedGetId = (doc: any) => doc[prop];
     } else {
-      this.getId = (doc: any) => doc.id;
+      stagedGetId = (doc: any) => doc.id;
     }
 
     if (!Array.isArray(options.fields) || options.fields.length === 0) {
       throw new TypeError('[webgpu-search] DocumentIndex expects options.fields to be a non-empty array.');
     }
 
-    this.fieldDefinitions = options.fields.map((f) => {
+    const stagedFieldDefs: InternalFieldDef<TDoc>[] = options.fields.map((f) => {
       if (typeof f === 'string') {
         if (!f) {
           throw new TypeError('[webgpu-search] Field name cannot be an empty string.');
@@ -406,16 +524,20 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
         }
       }
     }
-    this.filterDefinitions = filterDefs;
+    const staged: ClientIndexConfig<TDoc> = {
+      getId: stagedGetId,
+      fieldDefinitions: stagedFieldDefs,
+      filterDefinitions: filterDefs
+    };
 
     const nextDocMap = new Map<DocumentId, TDoc>();
     const serializableRecords: Record<string, unknown>[] = [];
     for (let i = 0; i < records.length; i++) {
       const doc = records[i];
-      const id = this.getId(doc);
+      const id = stagedGetId(doc);
       nextDocMap.set(id, doc);
       if (this.stringIsolated) {
-        serializableRecords.push(this.extractSerializableDoc(doc, id));
+        serializableRecords.push(this.extractSerializableDoc(doc, id, staged));
       } else {
         serializableRecords.push(doc as any);
       }
@@ -431,7 +553,7 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       assertNoWorkerExtensions(options.hooks, 'init');
     }
 
-    const workerFields = this.fieldDefinitions.map((f) => ({
+    const workerFields = stagedFieldDefs.map((f) => ({
       name: f.name,
       weight: f.weight
     }));
@@ -455,18 +577,27 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       fields: workerFields
     };
 
-    await this.sendRequest('INIT', {
+    await this.sendStateRequest('INIT', {
       options: workerOptions,
       records: serializableRecords
-    });
+    }, staged);
 
+    // Commit in completion order (worker replies in request order).
+    this.committedConfig = staged;
     this.docMap.clear();
     for (const [id, doc] of nextDocMap) {
       this.docMap.set(id, doc);
     }
   }
 
-  async search(
+  search(
+    query: string,
+    options?: DocumentSearchOptions<TDoc>
+  ): Promise<DocumentSearchResponse<TDoc>> {
+    return this.runInPostOrder(null, () => this.searchNow(query, options));
+  }
+
+  private async searchNow(
     query: string,
     options?: DocumentSearchOptions<TDoc>
   ): Promise<DocumentSearchResponse<TDoc>> {
@@ -596,7 +727,13 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     });
   }
 
-  async applyBatch(batch: MutationBatch<TDoc>, options?: AddOptions): Promise<MutationResult> {
+  applyBatch(batch: MutationBatch<TDoc>, options?: AddOptions): Promise<MutationResult> {
+    // Field/id definitions are unknown until a pending RESTORE settles, so
+    // the mutation (and every request issued after it) waits for it.
+    return this.runInPostOrder(this.restoreBarrier, () => this.applyBatchNow(batch, options));
+  }
+
+  private async applyBatchNow(batch: MutationBatch<TDoc>, options?: AddOptions): Promise<MutationResult> {
     if (this.isDestroyed) {
       throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
     }
@@ -678,22 +815,32 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     return Array.from(this.docMap.values());
   }
 
-  async serialize(options?: SerializeDocumentIndexOptions): Promise<ArrayBuffer> {
-    if (this.isDestroyed) {
-      throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
-    }
-    return this.sendRequest<ArrayBuffer>('SERIALIZE', { options });
+  serialize(options?: SerializeDocumentIndexOptions): Promise<ArrayBuffer> {
+    return this.runInPostOrder(null, async () => {
+      if (this.isDestroyed) {
+        throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
+      }
+      return this.sendRequest<ArrayBuffer>('SERIALIZE', { options });
+    });
   }
 
-  async restore(buffer: ArrayBuffer, options?: RestoreDocumentIndexOptions<TDoc>): Promise<void> {
+  restore(buffer: ArrayBuffer | ArrayBufferView, options?: RestoreDocumentIndexOptions<TDoc>): Promise<void> {
+    return this.runInPostOrder(null, () => this.restoreNow(buffer, options));
+  }
+
+  private async restoreNow(buffer: ArrayBuffer | ArrayBufferView, options?: RestoreDocumentIndexOptions<TDoc>): Promise<void> {
     if (this.isDestroyed) {
       throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
     }
     if (!buffer || typeof (buffer as any).byteLength !== 'number') {
       throw new TypeError('[webgpu-search] restore expects an ArrayBuffer.');
     }
-    if ((buffer as ArrayBuffer).byteLength > MAX_SNAPSHOT_BYTES) {
-      throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, (buffer as ArrayBuffer).byteLength);
+    if (buffer.byteLength > MAX_SNAPSHOT_BYTES) {
+      throw new IncompatibleIndexError(`snapshot-bytes<=${MAX_SNAPSHOT_BYTES}`, buffer.byteLength);
+    }
+    const snapshotBuffer = toSnapshotArrayBuffer(buffer);
+    if (!snapshotBuffer) {
+      throw new TypeError('[webgpu-search] restore expects an ArrayBuffer.');
     }
     if ((options?.options as unknown as Record<string, unknown> | undefined)?.extensions !== undefined) {
       throw new IncompatibleHookError(
@@ -704,118 +851,9 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
     if (options?.options?.hooks) {
       assertNoWorkerExtensions(options?.options?.hooks, 'restore');
     }
-
-    let stagedFieldDefs = this.fieldDefinitions;
-    let stagedFilterDefs = this.filterDefinitions;
-    let stagedGetId = this.getId;
-    const stagedDocMap = new Map<DocumentId, TDoc>();
-
-    try {
-      const header = decodeSnapshotHeader(buffer);
-      // Version-aware header width: snapshot is 56 B, legacy legacy snapshot is 48 B.
-      // Derive before the length guard so truncated snapshot buffers cannot
-      // slip through the legacy 48 B threshold.
-      const headerBytesForGuard = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
-      const userFields = options?.options?.fields;
-      const userFieldMap = new Map<string, any>();
-      if (Array.isArray(userFields)) {
-        for (const uf of userFields) {
-          if (typeof uf === 'string') {
-            userFieldMap.set(uf, uf);
-          } else if (uf && typeof uf === 'object' && typeof uf.name === 'string') {
-            userFieldMap.set(uf.name, uf);
-          }
-        }
-      }
-
-      if (buffer.byteLength >= headerBytesForGuard + header.schemaByteLength) {
-        // snapshot inserts a columnar segment between offsets and docs; derive
-        // header width and columnar length from the parsed header so legacy
-        // legacy snapshot snapshots (no columnar segment) still stage correctly.
-        const headerBytes = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
-        const schemaBytes = new Uint8Array(buffer, headerBytes, header.schemaByteLength);
-        const schemaStr = new TextDecoder().decode(schemaBytes);
-        const schema = JSON.parse(schemaStr);
-        if (schema && Array.isArray(schema.fields)) {
-          stagedFieldDefs = schema.fields.map((f: any) => {
-            const uf = userFieldMap.get(f.name);
-            const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
-              ? uf.getter
-              : (doc: any) => doc[f.name];
-            return {
-              name: f.name,
-              weight: f.weight ?? 1.0,
-              getter
-            };
-          });
-        }
-        if (schema && Array.isArray(schema.filterFields)) {
-          const userFilterFields = options?.options?.filterFields;
-          const userFilterMap = new Map<string, any>();
-          if (Array.isArray(userFilterFields)) {
-            for (const uff of userFilterFields) {
-              if (typeof uff === 'string') {
-                userFilterMap.set(uff, uff);
-              } else if (uff && typeof uff === 'object' && typeof uff.name === 'string') {
-                userFilterMap.set(uff.name, uff);
-              }
-            }
-          }
-          stagedFilterDefs = schema.filterFields.map((ff: any) => {
-            const uf = userFilterMap.get(ff.name);
-            const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
-              ? uf.getter
-              : (doc: any) => doc[ff.name];
-            return {
-              name: ff.name,
-              getter
-            };
-          });
-        }
-        if (typeof options?.options?.idField === 'function') {
-          stagedGetId = options.options.idField;
-        } else if (typeof options?.options?.idField === 'string') {
-          const prop = options.options.idField;
-          stagedGetId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
-        } else if (schema.idField && typeof schema.idField === 'string') {
-          const prop = schema.idField;
-          stagedGetId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
-        } else {
-          stagedGetId = (doc: any) => doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
-        }
-      }
-
-      // Repopulate stagedDocMap if documents are provided or embedded
-      if (options?.documents && Array.isArray(options.documents)) {
-        for (const doc of options.documents) {
-          const id = stagedGetId(doc);
-          stagedDocMap.set(id, doc);
-        }
-      } else if (header.docsByteLength > 0) {
-        const headerBytes = header.magic === SNAPSHOT_MAGIC ? SNAPSHOT_HEADER_BYTES : LEGACY_SNAPSHOT_HEADER_BYTES;
-        const columnarLen = header.columnarByteLength ?? 0;
-        const docsOffset =
-          headerBytes +
-          header.schemaByteLength +
-          header.tokenCount * 4 +
-          (header.rowCount + 1) * 4 +
-          columnarLen;
-        const docsBytes = new Uint8Array(buffer, docsOffset, header.docsByteLength);
-        const docsStr = new TextDecoder().decode(docsBytes);
-        const docs = JSON.parse(docsStr);
-        if (Array.isArray(docs)) {
-          for (const doc of docs) {
-            const id = stagedGetId(doc);
-            if (doc && doc[INTERNAL_WORKER_ID_KEY] !== undefined && doc.id === undefined) {
-              doc.id = doc[INTERNAL_WORKER_ID_KEY];
-            }
-            stagedDocMap.set(id, doc);
-          }
-        }
-      }
-    } catch {
-      // Allow worker to handle fail-closed validation and throw IncompatibleIndexError
-    }
+    // Header, checksum, schema, docIds and documents are validated once,
+    // worker-side; client state commits only after the worker succeeds and
+    // worker errors (IncompatibleIndexError, ...) propagate rehydrated.
 
     // Sanitize options to avoid DataCloneError over postMessage.
     // Hooks are rejected fail-closed above; strip them defensively so
@@ -841,25 +879,122 @@ export class SearchWorkerClient<TDoc = Record<string, unknown>> {
       } : undefined
     } : undefined;
 
+    // Transfer only on opt-in; partial views were already copied by
+    // toSnapshotArrayBuffer, so a view's wider backing store is never detached.
     const shouldTransfer = options?.transfer === true;
-    const toSend = shouldTransfer ? buffer : buffer.slice(0);
-    await this.sendRequest('RESTORE', { buffer: toSend, options: sanitizedOptions }, [toSend]);
+    const toSend = shouldTransfer ? snapshotBuffer : snapshotBuffer.slice(0);
 
-    // Commit only after successful restore response from worker
-    this.fieldDefinitions = stagedFieldDefs;
-    this.filterDefinitions = stagedFilterDefs;
-    this.getId = stagedGetId;
+    const request = this.sendStateRequest<WorkerRestoreResult>(
+      'RESTORE',
+      { buffer: toSend, options: sanitizedOptions },
+      null,
+      [toSend]
+    );
+    const barrier: Promise<void> = Promise.all([this.restoreBarrier, request]).then(
+      () => undefined,
+      () => undefined
+    );
+    this.restoreBarrier = barrier;
+    let outcome: { result: WorkerRestoreResult; isLatest: boolean };
+    try {
+      outcome = await request;
+    } finally {
+      // Clear once the latest pending restore settles (no-op if superseded).
+      void barrier.then(() => {
+        if (this.restoreBarrier === barrier) this.restoreBarrier = null;
+      });
+    }
+
+    // Commit only after the worker validated and swapped in the snapshot.
+    const staged = this.buildRestoredConfig(outcome.result, options);
+    const stagedDocMap = new Map<DocumentId, TDoc>();
+    if (options?.documents && Array.isArray(options.documents)) {
+      for (const doc of options.documents) {
+        stagedDocMap.set(staged.getId(doc), doc);
+      }
+    } else if (Array.isArray(outcome.result?.records)) {
+      for (const doc of outcome.result.records as any[]) {
+        if (doc && typeof doc === 'object') {
+          if (doc[INTERNAL_WORKER_ID_KEY] !== undefined && doc.id === undefined) {
+            doc.id = doc[INTERNAL_WORKER_ID_KEY];
+          }
+          stagedDocMap.set(staged.getId(doc), doc as TDoc);
+        }
+      }
+    }
+
+    this.committedConfig = staged;
+    if (outcome.isLatest) {
+      this.setOutgoingConfig(staged);
+    }
     this.docMap.clear();
     for (const [k, v] of stagedDocMap) {
       this.docMap.set(k, v);
     }
   }
 
-  async getStats(): Promise<DocumentIndexStats> {
-    if (this.isDestroyed) {
-      throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
+  private buildRestoredConfig(
+    result: WorkerRestoreResult | undefined,
+    options?: RestoreDocumentIndexOptions<TDoc>
+  ): ClientIndexConfig<TDoc> {
+    if (!result || !Array.isArray(result.fields) || !Array.isArray(result.filterFields)) {
+      throw new IncompatibleIndexError('worker restore schema', typeof result);
     }
-    return this.sendRequest<DocumentIndexStats>('STATS');
+    const userFieldMap = new Map<string, any>();
+    for (const uf of options?.options?.fields ?? []) {
+      if (typeof uf === 'string') {
+        userFieldMap.set(uf, uf);
+      } else if (uf && typeof uf === 'object' && typeof uf.name === 'string') {
+        userFieldMap.set(uf.name, uf);
+      }
+    }
+    const fieldDefinitions: InternalFieldDef<TDoc>[] = result.fields.map((f) => {
+      const uf = userFieldMap.get(f.name);
+      const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
+        ? uf.getter
+        : (doc: any) => doc[f.name];
+      return { name: f.name, weight: f.weight ?? 1.0, getter };
+    });
+
+    const userFilterMap = new Map<string, any>();
+    for (const uff of options?.options?.filterFields ?? []) {
+      if (typeof uff === 'string') {
+        userFilterMap.set(uff, uff);
+      } else if (uff && typeof uff === 'object' && typeof uff.name === 'string') {
+        userFilterMap.set(uff.name, uff);
+      }
+    }
+    const filterDefinitions = result.filterFields.map((ff) => {
+      const uf = userFilterMap.get(ff.name);
+      const getter = typeof uf === 'object' && uf !== null && typeof uf.getter === 'function'
+        ? uf.getter
+        : (doc: any) => doc[ff.name];
+      return { name: ff.name, getter };
+    });
+
+    let getId: (doc: TDoc) => DocumentId;
+    const userIdField = options?.options?.idField;
+    if (typeof userIdField === 'function') {
+      getId = userIdField;
+    } else if (typeof userIdField === 'string') {
+      const prop = userIdField;
+      getId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+    } else if (typeof result.idField === 'string' && result.idField) {
+      const prop = result.idField;
+      getId = (doc: any) => doc[prop] ?? doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+    } else {
+      getId = (doc: any) => doc[INTERNAL_WORKER_ID_KEY] ?? doc.id;
+    }
+    return { getId, fieldDefinitions, filterDefinitions };
+  }
+
+  getStats(): Promise<DocumentIndexStats> {
+    return this.runInPostOrder(null, async () => {
+      if (this.isDestroyed) {
+        throw new Error('[webgpu-search] SearchWorkerClient has been destroyed.');
+      }
+      return this.sendRequest<DocumentIndexStats>('STATS');
+    });
   }
 
   async destroy(): Promise<void> {
