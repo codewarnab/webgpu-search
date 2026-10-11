@@ -1,6 +1,5 @@
 # Snapshot Format + Index-Format Compatibility (1.0 Contract)
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 3.
 > Status: frozen for `1.x`. The write path is canonical v4 only; the read
 > path accepts v3 (legacy, read-only migration) + v4. Any persisted index
 > restores or rejects with an actionable migration reason — never reads

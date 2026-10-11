@@ -1,3 +1,4 @@
+import { BENCHMARK_DATASET_SIZES } from '../../../scripts/bench-data/dataset-sizes';
 import { CPUEngine, WebGPUEngine } from 'webgpu-search';
 import './style.css';
 import { BenchmarkRunner, type BenchmarkRowResult } from './benchmark';
@@ -23,6 +24,18 @@ const details = document.querySelector<HTMLElement>('#benchmark-details');
 const exportCsv = document.querySelector<HTMLButtonElement>('#export-csv');
 const exportMarkdown = document.querySelector<HTMLButtonElement>('#export-markdown');
 const exportChart = document.querySelector<HTMLButtonElement>('#export-chart');
+
+document.querySelector('.size-options')?.replaceChildren(...BENCHMARK_DATASET_SIZES.map(size => {
+  const label = document.createElement('label');
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.name = 'size';
+  input.value = String(size);
+  input.checked = size <= 100_000;
+  const text = size >= 1_000_000 ? `${size / 1_000_000}M` : `${size / 1000}k`;
+  label.append(input, ` ${text}`);
+  return label;
+}));
 
 let currentRows: BenchmarkRowResult[] = [];
 let currentMode: 'substring' | 'fuzzy' = 'substring';

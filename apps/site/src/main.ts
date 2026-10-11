@@ -1,3 +1,4 @@
+import { SITE_DATASET_SIZES } from '../../../scripts/bench-data/dataset-sizes';
 import './fonts.css';
 import './style.css';
 import { formatMs } from './format';
@@ -5,6 +6,13 @@ import { formatMs } from './format';
 const copyButton = document.querySelector<HTMLButtonElement>('#copy-install');
 
 const qbSize = document.querySelector<HTMLSelectElement>('#qb-size');
+if (qbSize) {
+  qbSize.replaceChildren(...SITE_DATASET_SIZES.map(size => {
+    const option = new Option(`${size.toLocaleString('en-US')} records`, String(size));
+    option.selected = size === 500_000;
+    return option;
+  }));
+}
 const qbQuery = document.querySelector<HTMLInputElement>('#qb-query');
 const qbRun = document.querySelector<HTMLButtonElement>('#qb-run');
 const qbStatus = document.querySelector<HTMLElement>('#qb-status');

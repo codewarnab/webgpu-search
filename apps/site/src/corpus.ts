@@ -2,11 +2,10 @@ import './fonts.css';
 import './style.css';
 import { normalizeText, scoreExactMatches, type SearchResultItem } from 'webgpu-search';
 import { corpusRow } from './corpus-gen';
+import { SITE_DATASET_SIZES } from '../../../scripts/bench-data/dataset-sizes';
 
 const PAGE_SIZE = 100;
 const MAX_MATCHES_SHOWN = 1000;
-/** Sizes the homepage benchmark offers (apps/site/index.html #qb-size). */
-const ALLOWED_SIZES = [100000, 200000, 500000, 1000000, 2000000] as const;
 const DEFAULT_SIZE = 100000;
 const BUILD_CHUNK = 50000;
 
@@ -15,8 +14,8 @@ function parseSize(raw: string | null): number {
   if (raw === null || raw.trim() === '') return DEFAULT_SIZE;
   const requested = Number(raw);
   if (!Number.isFinite(requested) || requested <= 0) return DEFAULT_SIZE;
-  let size: number = ALLOWED_SIZES[0];
-  for (const allowed of ALLOWED_SIZES) if (allowed <= requested) size = allowed;
+  let size: number = SITE_DATASET_SIZES[0]!;
+  for (const allowed of SITE_DATASET_SIZES) if (allowed <= requested) size = allowed;
   return size;
 }
 

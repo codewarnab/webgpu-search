@@ -1,5 +1,5 @@
 /**
- * Phase 2 reliability proofs (docs/ISSUE-11-PLAN.md):
+ * Reliability proofs (docs/reliability.md):
  * device-loss rebuild, resource cleanup, concurrent-query isolation,
  * deterministic fallback.
  *

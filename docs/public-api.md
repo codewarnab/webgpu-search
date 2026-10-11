@@ -1,6 +1,5 @@
 # Public API Freeze (1.0 Contract)
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 0.
 > Status: frozen for `1.x`. Hosts can pin `^1.0.0` and rely on everything
 > documented here: entry points, class contracts, result ordering, response
 > echoes, errors, version constants, and the breaking-change / deprecation rules.

@@ -1,6 +1,5 @@
 # Reliability Proofs (Phase 2)
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 2.
 > Proves device-loss rebuild, resource cleanup, concurrent-query isolation,
 > and deterministic fallback — not just handling.
 

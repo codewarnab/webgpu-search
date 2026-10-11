@@ -7,7 +7,7 @@
  * versioned corpora, record sizes, queries, modes, filters, and facets
  * cannot drift between the runner, the checked-in baseline, and the docs.
  *
- * Plan ref: `docs/ISSUE-11-PLAN.md` Phase 5. Normative doc:
+ * Normative doc:
  * `docs/benchmarks.md`.
  *
  * Portability: DOM-free (no `window` / `document`); safe in workers,

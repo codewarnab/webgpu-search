@@ -1,6 +1,5 @@
 # Security & Privacy Boundaries
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 6.
 > Wire compat: `docs/snapshot-format.md`; runtime matrix:
 > `docs/support-matrix.md` §§3–4; packaging: `docs/packaging.md`.
 

@@ -1,6 +1,5 @@
 # Diagnostics, Budgets & Issue-Report Data
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 6.
 > API freeze: `docs/public-api.md` §§2.5/5. Field types: `src/types.ts`,
 > policy: `src/diagnostics.ts`, guards: `src/guard.ts`.
 

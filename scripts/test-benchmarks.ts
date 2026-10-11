@@ -9,7 +9,7 @@
  * - Frozen query shapes serve live on small smoke indexes (ordering,
  *   filters, facets, autocomplete, snapshot serialize/restore with
  *   bytes + time, memory `vramBytes` / `ramBytes`, build costs).
- * - Checked-in baseline `benchmark_snapshot_matrix.json` exists, matches the
+ * - Checked-in baseline `docs/benchmarks/benchmark_snapshot_matrix.json` exists, matches the
  *   frozen version, covers every (scenario, operation) pair, and keeps
  *   headless-CPU / browser-WebGPU reports separate (non-comparable label).
  * - `docs/benchmarks.md` publishes the per-scenario table + environments.
@@ -232,8 +232,8 @@ async function main(): Promise<void> {
 
   // ------------------------------------------------ 4. Checked-in baseline
   console.log('4. Checked-in baseline artifacts');
-  const jsonPath = path.join(rootDir, 'benchmark_snapshot_matrix.json');
-  const mdPath = path.join(rootDir, 'benchmark_snapshot_matrix.md');
+  const jsonPath = path.join(rootDir, 'docs/benchmarks/benchmark_snapshot_matrix.json');
+  const mdPath = path.join(rootDir, 'docs/benchmarks/benchmark_snapshot_matrix.md');
   check('baseline JSON checked in', fs.existsSync(jsonPath));
   check('baseline markdown checked in', fs.existsSync(mdPath));
   if (fs.existsSync(jsonPath)) {
