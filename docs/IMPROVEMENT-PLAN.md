@@ -38,6 +38,8 @@ There are about 300 tests, but several core modules have none of their own. This
 - **Why:** the format in `docs/snapshot-format.md` is a public promise to keep old snapshots loading.
 
 ### 2.3 Text pipeline tests
+- **Existing coverage verified:** normalization and case folding pass 98 checks in both default and Turkish locales; the highlighting suite covers NFC/NFD, folding expansions, surrogate pairs, and emoji.
+- **Fallback bug fixed:** without `Intl.Segmenter`, highlights could split joined emoji and flags. Shared fallback boundaries now preserve ZWJ sequences and regional-indicator pairs; regression cases run with segmentation disabled before the normal suite. See `docs/public-api.md` §2.5.
 - Add `test/text-normalization.test.ts`, covering NFC, case folding with `CaseFolding-16.0.0` (ß→ss, the Turkish dotless i, Greek final sigma), surrogate pairs, and `u32` packing.
 - Add `test/highlight.test.ts`, checking that highlight ranges land on whole characters in multi-byte text.
 

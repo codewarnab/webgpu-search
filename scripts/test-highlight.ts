@@ -39,6 +39,43 @@ interface DocItem {
 async function runM3Tests() {
   console.log('--- Running  Unicode-Safe Highlighting Engine Tests ---');
 
+  // Run before any normal highlighting call can cache Intl.Segmenter.
+  console.log('0. Testing emoji boundaries without Intl.Segmenter...');
+  const segmenterDescriptor = Object.getOwnPropertyDescriptor(Intl, 'Segmenter');
+  Object.defineProperty(Intl, 'Segmenter', { value: undefined, configurable: true });
+  try {
+    const cases = [
+      { raw: 'Dev 👩‍💻 at work', query: '💻', start: 4, end: 9 },
+      { raw: 'Dev 👩‍💻 at work', query: '👩', start: 4, end: 9 },
+      { raw: '  👨‍👩‍👧‍👦!', query: '👧', start: 2, end: 13 },
+      { raw: 'Flag 🇺🇸 here', query: '🇸', start: 5, end: 9 },
+      { raw: '🇺🇸🇨🇦!', query: '🇨', start: 4, end: 8 },
+      { raw: '🇺🇸🇨!', query: '🇨', start: 4, end: 6 },
+      { raw: '👍🏽!', query: '🏽', start: 0, end: 4 },
+      { raw: '👩🏽‍💻!', query: '💻', start: 0, end: 7 },
+      { raw: 'Café!', query: 'é', start: 3, end: 5 },
+      { raw: '👩‍💻💡!', query: '💡', start: 5, end: 7 },
+      { raw: 'a\u200Db', query: 'b', start: 2, end: 3 },
+      { raw: 'plain text', query: 'text', start: 6, end: 10 }
+    ];
+    for (const { raw, query, start, end } of cases) {
+      for (const mode of ['substring', 'fuzzy'] as const) {
+        const ranges = alignHighlights(raw, query, { mode });
+        assert.deepStrictEqual(ranges, [{ start, end }], `${mode}: ${raw} / ${query}`);
+        assert.strictEqual(renderHighlightedText(raw, ranges, 'mark'),
+          `${raw.slice(0, start)}<mark>${raw.slice(start, end)}</mark>${raw.slice(end)}`);
+      }
+    }
+    assert.strictEqual(guardClusterBoundary('👩‍💻!', 2), 5);
+    assert.strictEqual(guardClusterBoundary('🇺🇸🇨🇦!', 2), 4);
+    assert.strictEqual(guardClusterBoundary('🇺🇸🇨🇦!', 4), 4);
+    assert.strictEqual(guardClusterBoundary('🇺🇸🇨🇦!', 6), 8);
+  } finally {
+    if (segmenterDescriptor) Object.defineProperty(Intl, 'Segmenter', segmenterDescriptor);
+    else Reflect.deleteProperty(Intl, 'Segmenter');
+  }
+
+
   // =========================================================================
   // 1. Indentation Trim Compensation (leadingTrimOffset)
   // =========================================================================

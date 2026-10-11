@@ -61,9 +61,37 @@ export interface RenderHighlightOptions {
   escapeHtml?: boolean;
 }
 
-const COMBINING_MARK_REGEX = /^\p{M}/u;
 const EXTEND_OR_JOINER_REGEX = /^[\p{M}\p{Sk}\u200D\uFE0F]/u;
 const JAMO_V_OR_T_REGEX = /^[\u1160-\u11FF\uD7B0-\uD7FB]/u;
+const REGIONAL_INDICATOR_REGEX = /^\p{Regional_Indicator}/u;
+const PICTOGRAPHIC_REGEX = /^\p{Extended_Pictographic}/u;
+
+/**
+ * Shared fallback boundaries for source maps and end guards. Consume the
+ * pictograph after a ZWJ as well as the joiner itself; otherwise a match on 💻
+ * inside 👩‍💻 gets a start offset in the middle of the displayed emoji.
+ * Pair regional indicators from the start of each run (UAX #29 GB12/GB13),
+ * so adjacent flags remain separate. This is a targeted fallback, not a full
+ * implementation of the Unicode grapheme segmentation algorithm.
+ */
+function fallbackClusterEnd(raw: string, start: number): number {
+  const first = String.fromCodePoint(raw.codePointAt(start)!);
+  let end = start + first.length;
+  if (REGIONAL_INDICATOR_REGEX.test(first) && REGIONAL_INDICATOR_REGEX.test(raw.slice(end))) {
+    end += 2;
+  }
+  const pictographic = PICTOGRAPHIC_REGEX.test(first);
+  while (end < raw.length) {
+    const next = String.fromCodePoint(raw.codePointAt(end)!);
+    if (!EXTEND_OR_JOINER_REGEX.test(next) && !JAMO_V_OR_T_REGEX.test(next)) break;
+    end += next.length;
+    // UAX #29 GB11: pictograph + extensions + ZWJ + pictograph.
+    if (next === '\u200D' && pictographic && PICTOGRAPHIC_REGEX.test(raw.slice(end))) {
+      end += String.fromCodePoint(raw.codePointAt(end)!).length;
+    }
+  }
+  return end;
+}
 
 let cachedSegmenter: Intl.Segmenter | null = null;
 function getSegmenter(): Intl.Segmenter | null {
@@ -215,24 +243,7 @@ export function normalizeWithSourceMap(raw: string, normalized: boolean): Source
     const wfLen = wellFormed.length;
     while (i < wfLen) {
       const segStart = i;
-      const cp = wellFormed.codePointAt(i) as number;
-      i += cp > 0xffff ? 2 : 1;
-
-      // Extend across following combining marks, modifiers, joiners, and Jamo
-      while (i < wfLen) {
-        const nextCp = wellFormed.codePointAt(i) as number;
-        const nextLen = nextCp > 0xffff ? 2 : 1;
-        const slice = wellFormed.slice(i, i + nextLen);
-        if (
-          COMBINING_MARK_REGEX.test(slice) ||
-          EXTEND_OR_JOINER_REGEX.test(slice) ||
-          JAMO_V_OR_T_REGEX.test(slice)
-        ) {
-          i += nextLen;
-        } else {
-          break;
-        }
-      }
+      i = fallbackClusterEnd(wellFormed, segStart);
 
       const segStr = wellFormed.slice(segStart, i);
       const spanStart = leadingTrimOffset + segStart;
@@ -285,17 +296,16 @@ export function guardClusterBoundary(raw: string, end: number): number {
     return cur;
   }
 
-  // Regex fallback for environments without Intl.Segmenter
-  while (cur < len) {
-    const cp = raw.codePointAt(cur);
-    if (cp === undefined || cp < 0x0300) break;
-    const charLen = cp > 0xffff ? 2 : 1;
-    const slice = raw.slice(cur, cur + charLen);
-    if (EXTEND_OR_JOINER_REGEX.test(slice) || JAMO_V_OR_T_REGEX.test(slice)) {
-      cur += charLen;
-    } else {
-      break;
-    }
+  // ASCII cannot extend an emoji/mark cluster. Keep ordinary fuzzy highlights
+  // from rescanning their prefix for every matched token in the fallback.
+  if (raw.charCodeAt(cur) < 0x80) return cur;
+
+  // Use the same boundaries as source mapping, including flag-pair parity.
+  let start = 0;
+  while (start < cur) {
+    const clusterEnd = fallbackClusterEnd(raw, start);
+    if (cur < clusterEnd) return clusterEnd;
+    start = clusterEnd;
   }
   return cur;
 }
