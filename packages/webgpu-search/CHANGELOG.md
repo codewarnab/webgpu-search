@@ -1,5 +1,11 @@
 # webgpu-search
 
+## 1.0.2
+
+### Patch Changes
+
+- d005cf6: Preserve whole emoji ZWJ sequences and regional-indicator flag pairs in highlight ranges when Intl.Segmenter is unavailable.
+
 ## 1.0.1
 
 ### Patch Changes
