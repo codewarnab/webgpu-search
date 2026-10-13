@@ -1,3 +1,4 @@
+import { BENCHMARK_DATASET_SIZES } from '../../../scripts/bench-data/dataset-sizes';
 /**
  * Full Matrix Benchmark Engine & Performance Characterization Runner.
  *
@@ -282,7 +283,7 @@ export class BenchmarkRunner {
    * execution, median + p95 statistics, and real UI thread telemetry.
    */
   async runBenchmark(
-    sizes: number[] = [10_000, 100_000, 500_000, 1_000_000, 2_000_000],
+    sizes: number[] = [...BENCHMARK_DATASET_SIZES],
     query: string = 'AuthController',
     mode: 'substring' | 'fuzzy' = 'substring',
     iterationsOrOptions?: number | BenchmarkOptions,

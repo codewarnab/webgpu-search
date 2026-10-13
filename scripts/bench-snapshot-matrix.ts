@@ -15,7 +15,7 @@
  * Frozen fixtures live in `scripts/benchmark-fixtures.ts`
  * (`BENCHMARK_FIXTURE_VERSION`, corpora, sizes, queries, modes, filters,
  * facets). Normative doc: `docs/benchmarks.md`. Checked-in baseline:
- * `benchmark_snapshot_matrix.json` + `benchmark_snapshot_matrix.md`.
+ * `docs/benchmarks/benchmark_snapshot_matrix.json` + `docs/benchmarks/benchmark_snapshot_matrix.md`.
  *
  * Environment: headless CPU only (`preferGpu: false`) for determinism.
  * Numbers are NOT comparable to browser/WebGPU runs. The JSON report records
@@ -88,8 +88,8 @@ interface MatrixRow {
 }
 
 function resolveOutPath(raw: string | undefined): string {
-  const fallback = 'benchmark_snapshot_matrix.json';
-  if (!raw) return fallback;
+  const fallback = 'docs/benchmarks/benchmark_snapshot_matrix.json';
+  if (!raw || raw === fallback) return fallback;
   // Allow explicit absolute paths under cwd or /tmp (CI uses /tmp), otherwise
   // sanitize to basename inside cwd to avoid arbitrary writes (e.g. /etc/passwd).
   if (raw.startsWith('/tmp/') || raw.startsWith(`${process.cwd()}/`)) return raw;
@@ -308,7 +308,9 @@ async function main(): Promise<void> {
   console.log('');
 
   if (outPath) {
-    const { writeFileSync } = await import('node:fs');
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    const { dirname } = await import('node:path');
+    mkdirSync(dirname(outPath), { recursive: true });
     const generatedAt = new Date().toISOString();
     const environment = {
       engine: 'cpu',

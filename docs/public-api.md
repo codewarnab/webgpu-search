@@ -1,6 +1,5 @@
 # Public API Freeze (1.0 Contract)
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 0.
 > Status: frozen for `1.x`. Hosts can pin `^1.0.0` and rely on everything
 > documented here: entry points, class contracts, result ordering, response
 > echoes, errors, version constants, and the breaking-change / deprecation rules.
@@ -168,6 +167,20 @@ Ranking (`src/ranking.ts:32`): `DEFAULT_TIE_BREAKERS`, `normalizeTieBreakers`,
 `compareRanked`, `sortRanked`, `compareIdsAsc`, `isExactTokenMatch`.
 Highlight (`src/highlight.ts`): `alignHighlights`, `normalizeWithSourceMap`,
 `guardClusterBoundary`, `mergeHighlightRanges`, `renderHighlightedText`.
+Highlight ranges use UTF-16 offsets in the original string. With
+`Intl.Segmenter`, source mapping uses the runtime's grapheme segmentation.
+Without it, the dependency-free fallback preserves combining marks, skin-tone
+modifiers, emoji ZWJ sequences (such as 👩‍💻), and regional-indicator flag
+pairs (such as 🇺🇸). Matching a component highlights the whole sequence:
+searching for 💻 in 👩‍💻 renders `<mark>👩‍💻</mark>`. Adjacent flags remain
+separate. Source mapping and end-boundary guards share this fallback so neither
+end of a range splits these sequences.
+
+The fallback covers these cases; it does not implement every rule in
+[Unicode grapheme segmentation](https://www.unicode.org/reports/tr29/).
+`bun run test:highlight` checks these boundaries with `Intl.Segmenter` disabled,
+then restores it for the normal highlighting suite.
+
 Hooks (`src/hooks.ts`): `defaultTokenizer`, `codeTokenizer`,
 `normalizeSearchHooks`, `resolveEffectiveHooks`, `hasAnyHook`, `getHookId`,
 `collectHookIds`, `assertHooksSatisfied`, `tokenizeWithHook`,

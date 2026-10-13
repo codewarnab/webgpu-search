@@ -1,6 +1,5 @@
 # Packaging, Bundle Budgets, Setup & Example-UI Accessibility
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 6.
 > Status: frozen guidance for `1.x`. Budgets are enforced by
 > `bun run check:bundle-size` (`scripts/check-bundle-size.ts`).
 

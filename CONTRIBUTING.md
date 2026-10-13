@@ -110,7 +110,7 @@ on `127.0.0.1:5173` before running `scripts/test-regression.ts`.
    restore, CRC, caps, getters, hooks, and profile guards in
    `bun run test:snapshot`.
 4. For benchmark fixture changes, bump `BENCHMARK_FIXTURE_VERSION`, regenerate
-   `benchmark_snapshot_matrix.json` + `.md`, and update `docs/benchmarks.md` §3.
+   `docs/benchmarks/benchmark_snapshot_matrix.json` + `.md`, and update `docs/benchmarks.md` §3.
 5. Run the relevant gates before opening a PR (at minimum `check:shaders`,
    `typecheck`, `build`, `test:mock`, plus any suite covering your area).
 

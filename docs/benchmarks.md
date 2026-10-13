@@ -1,10 +1,9 @@
 # Reproducible Benchmarks (Phase 5)
 
-> Plan ref: `docs/ISSUE-11-PLAN.md` Phase 5.
 > Fixtures: `scripts/benchmark-fixtures.ts` (`BENCHMARK_FIXTURE_VERSION = 1.0.0`).
 > Runner: `scripts/bench-snapshot-matrix.ts` (`bun run bench:snapshot-matrix`).
 > Pin: `scripts/test-benchmarks.ts` (`bun run test:benchmarks`).
-> Baseline: `benchmark_snapshot_matrix.json` + `benchmark_snapshot_matrix.md` (repo root).
+> Baseline: `docs/benchmarks/benchmark_snapshot_matrix.json` + `docs/benchmarks/benchmark_snapshot_matrix.md` (under `docs/benchmarks/`).
 
 Performance claims trace to named fixtures and environments. There are two
 report families — headless-CPU and browser-WebGPU — and they are never
@@ -52,7 +51,7 @@ interpolation, samples checked in). `index-build` rows are single-shot
 
 | Report | Command | Engine | Runtime / browser / GPU | Memory | Comparability |
 | --- | --- | --- | --- | --- | --- |
-| Headless CPU baseline (this doc, §§3–4) | `bun run bench:snapshot-matrix -- --out benchmark_snapshot_matrix.json` | CPU (`preferGpu: false`, exact scorer) | Bun/Node version + `platform` recorded in JSON `environment` | `vramBytes: 0` (no GPU upload), `ramBytes` from `getStats()`, `uploadMs: 0` | Headless CPU numbers are **NOT comparable to browser/WebGPU runs** |
+| Headless CPU baseline (this doc, §§3–4) | `bun run bench:snapshot-matrix -- --out docs/benchmarks/benchmark_snapshot_matrix.json` | CPU (`preferGpu: false`, exact scorer) | Bun/Node version + `platform` recorded in JSON `environment` | `vramBytes: 0` (no GPU upload), `ramBytes` from `getStats()`, `uploadMs: 0` | Headless CPU numbers are **NOT comparable to browser/WebGPU runs** |
 | Browser WebGPU matrix | `bun run test:benchmark` / `test:benchmark:fuzzy` (`scripts/run-all-benchmarks.ts`, `apps/benchmark`) | WebGPU retained buffers vs CPU parity vs uFuzzy vs JS native | Chrome version, adapter (`vendor`/`device`/`architecture`), driver, OS recorded per row; software adapters report `pending-hardware` | Per-buffer VRAM (`records`/`offsets`/`query` 512 B/`output` 65,544 B) + packing pipeline (`normalizeMs`/`packMs`/`uploadMs`) | Browser numbers compare only against same-hardware runs; `pending-hardware` cells never qualify |
 
 Browser reports (`benchmark_results.json` / `benchmark_summary.md` from the
@@ -65,8 +64,8 @@ not checked in as the 1.0 frozen baseline.
 
 Generated `2026-09-22T13:35:10.488Z`, `runtime=bun/1.4.2`,
 `platform=linux-arm64`, `engine=cpu`, `preferGpu=false`, `headless=true`.
-Full samples + `environment` + `fixtures` in `benchmark_snapshot_matrix.json`;
-same table in `benchmark_snapshot_matrix.md`.
+Full samples + `environment` + `fixtures` in `docs/benchmarks/benchmark_snapshot_matrix.json`;
+same table in `docs/benchmarks/benchmark_snapshot_matrix.md`.
 
 | Scenario | Docs | Operation | Median (ms) | p95 (ms) | Costs |
 |---|---|---|---:|---:|---|
@@ -101,8 +100,8 @@ WebGPU reports carry real `vramBytes` per §2 and are not mixed into this table.
 
 ```bash
 # Full headless matrix (several minutes: 100k build + 10 samples/op).
-# Writes benchmark_snapshot_matrix.json + benchmark_snapshot_matrix.md.
-bun run bench:snapshot-matrix -- --out benchmark_snapshot_matrix.json
+# Writes docs/benchmarks/benchmark_snapshot_matrix.json + docs/benchmarks/benchmark_snapshot_matrix.md.
+bun run bench:snapshot-matrix -- --out docs/benchmarks/benchmark_snapshot_matrix.json
 
 # CI shape (throwaway copy, does not touch the checked-in baseline):
 bun scripts/bench-snapshot-matrix.ts --out /tmp/benchmark_snapshot_matrix.json

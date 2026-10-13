@@ -6,7 +6,7 @@ logs
 benchmark_*.json
 # Phase 5 frozen baseline (Issue #11): the checked-in headless matrix is the
 # exception to the benchmark_*.json ignore above.
-!benchmark_snapshot_matrix.json
+!docs/benchmarks/benchmark_snapshot_matrix.json
 fuzzy-benchmark-results.json
 chart_*.png
 *chart*.png

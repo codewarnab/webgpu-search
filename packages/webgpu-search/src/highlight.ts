@@ -61,9 +61,104 @@ export interface RenderHighlightOptions {
   escapeHtml?: boolean;
 }
 
-const COMBINING_MARK_REGEX = /^\p{M}/u;
-const EXTEND_OR_JOINER_REGEX = /^[\p{M}\p{Sk}\u200D\uFE0F]/u;
-const JAMO_V_OR_T_REGEX = /^[\u1160-\u11FF\uD7B0-\uD7FB]/u;
+const STICKY_EXTEND_MODIFIER_REGEX = /(?:\p{M}|\p{Sk}|\uFE0F)/yu;
+const STICKY_JAMO_V_OR_T_REGEX = /[\u1160-\u11FF\uD7B0-\uD7FB]/yu;
+const STICKY_EMOJI_MODIFIER_REGEX = /[\u{1F3FB}-\u{1F3FF}]/yu;
+const REGIONAL_INDICATOR_REGEX = /^\p{Regional_Indicator}/u;
+const PICTOGRAPHIC_REGEX = /^\p{Extended_Pictographic}/u;
+
+/**
+ * Shared fallback boundaries for source maps and end guards. Consume the
+ * pictograph after a ZWJ as well as the joiner itself; otherwise a match on 💻
+ * inside 👩‍💻 gets a start offset in the middle of the displayed emoji.
+ * Pair regional indicators from the start of each run (UAX #29 GB12/GB13),
+ * so adjacent flags remain separate. This is a targeted fallback, not a full
+ * implementation of the Unicode grapheme segmentation algorithm.
+ */
+function fallbackClusterEnd(raw: string, start: number): number {
+  const first = String.fromCodePoint(raw.codePointAt(start)!);
+  let end = start + first.length;
+  if (REGIONAL_INDICATOR_REGEX.test(first) && REGIONAL_INDICATOR_REGEX.test(raw.slice(end))) {
+    end += 2;
+  }
+  const pictographic = PICTOGRAPHIC_REGEX.test(first);
+  // GB9a: an emoji modifier (U+1F3FB..U+1F3FF) extends its base even with no
+  // ZWJ, so 👍 + 🏽 cluster together and queries never split the tone.
+  if (pictographic) {
+    STICKY_EMOJI_MODIFIER_REGEX.lastIndex = end;
+    if (end < raw.length && STICKY_EMOJI_MODIFIER_REGEX.test(raw)) {
+      end += 2; // modifiers are astral (one surrogate pair)
+    }
+  }
+  // GB11 core: consume Extend* ZWJ before checking for a trailing pictograph,
+  // so 👩‍💻 and 👩🏽‍💻 cluster as one even with a modifier before the joiner.
+  // Grapheme_Extend covers marks, ZWJ-adjacent glue (U+FE0F), and the
+  // emoji modifier range U+1F3FB..U+1F3FF (General_Category=Sk). ASCII
+  // Sk symbols like ` and ^ are excluded by the \x80 gate below so
+  // code identifiers such as "a`b" keep 1:1 source spans. Sticky regexes
+  // test one code point at `lastIndex` without slicing.
+  for (;;) {
+    while (end < raw.length) {
+      const cu = raw.charCodeAt(end);
+      if (cu < 0x80) break; // ASCII fast path: ASCII never extends a cluster
+      STICKY_EXTEND_MODIFIER_REGEX.lastIndex = end;
+      STICKY_JAMO_V_OR_T_REGEX.lastIndex = end;
+      if (!STICKY_EXTEND_MODIFIER_REGEX.test(raw) && !STICKY_JAMO_V_OR_T_REGEX.test(raw)) break;
+      end += String.fromCodePoint(raw.codePointAt(end)!).length;
+    }
+    if (end < raw.length && raw[end] === '\u200D' && pictographic) {
+      const afterJoiner = end + 1;
+      let scan = afterJoiner;
+      while (scan < raw.length) {
+        const scu = raw.charCodeAt(scan);
+        if (scu < 0x80) break;
+        STICKY_EXTEND_MODIFIER_REGEX.lastIndex = scan;
+        STICKY_JAMO_V_OR_T_REGEX.lastIndex = scan;
+        if (!STICKY_EXTEND_MODIFIER_REGEX.test(raw) && !STICKY_JAMO_V_OR_T_REGEX.test(raw)) break;
+        scan += String.fromCodePoint(raw.codePointAt(scan)!).length;
+      }
+      const tail = String.fromCodePoint(raw.codePointAt(scan) ?? 0x10ffff);
+      if (scan < raw.length && PICTOGRAPHIC_REGEX.test(tail)) {
+        end = scan + tail.length;
+        continue;
+      }
+    }
+    break;
+  }
+  return end;
+}
+
+/**
+ * True when the piece at `pos` continues the cluster headed at `head`:
+ * a modifier/tone tail, a ZWJ tail, or a pictograph reached through
+ * Extend* ZWJ from a pictographic head (GB11 core). Used only to group
+ * shared source spans in the no-Segmenter fallback.
+ */
+function isClusterContinuation(raw: string, head: number, pos: number): boolean {
+  const headFirst = String.fromCodePoint(raw.codePointAt(head)!);
+  if (REGIONAL_INDICATOR_REGEX.test(headFirst)) {
+    return pos === head + headFirst.length && REGIONAL_INDICATOR_REGEX.test(raw.slice(pos));
+  }
+  if (!PICTOGRAPHIC_REGEX.test(headFirst)) return false;
+  let scan = head + headFirst.length;
+  if (scan === pos) {
+    STICKY_EMOJI_MODIFIER_REGEX.lastIndex = scan;
+    if (scan < raw.length && STICKY_EMOJI_MODIFIER_REGEX.test(raw)) return true;
+  }
+  for (;;) {
+    while (scan < raw.length && scan < pos) {
+      const cu = raw.charCodeAt(scan);
+      if (cu < 0x80) return false;
+      STICKY_EXTEND_MODIFIER_REGEX.lastIndex = scan;
+      STICKY_JAMO_V_OR_T_REGEX.lastIndex = scan;
+      if (!STICKY_EXTEND_MODIFIER_REGEX.test(raw) && !STICKY_JAMO_V_OR_T_REGEX.test(raw)) return false;
+      scan += String.fromCodePoint(raw.codePointAt(scan)!).length;
+    }
+    if (scan !== pos) return scan > pos;
+    if (scan < raw.length && raw[scan] === '\u200D') return true;
+    return scan > pos;
+  }
+}
 
 let cachedSegmenter: Intl.Segmenter | null = null;
 function getSegmenter(): Intl.Segmenter | null {
@@ -210,32 +305,22 @@ export function normalizeWithSourceMap(raw: string, normalized: boolean): Source
       appendSegmentTokens(segStr, normalized, spanStart, spanEnd, allTokens, allStarts, allEnds);
     }
   } else {
-    // Fallback grapheme iteration for environments without Intl.Segmenter
+    // Fallback grapheme iteration for environments without Intl.Segmenter.
+    // Modifier-continuation pieces (tone/VS16 after a base, ZWJ tail after a
+    // joiner) share the cluster head's span, mirroring Intl.Segmenter: a
+    // component query then highlights the whole displayed sequence.
     let i = 0;
     const wfLen = wellFormed.length;
+    let clusterHead = 0;
     while (i < wfLen) {
       const segStart = i;
-      const cp = wellFormed.codePointAt(i) as number;
-      i += cp > 0xffff ? 2 : 1;
-
-      // Extend across following combining marks, modifiers, joiners, and Jamo
-      while (i < wfLen) {
-        const nextCp = wellFormed.codePointAt(i) as number;
-        const nextLen = nextCp > 0xffff ? 2 : 1;
-        const slice = wellFormed.slice(i, i + nextLen);
-        if (
-          COMBINING_MARK_REGEX.test(slice) ||
-          EXTEND_OR_JOINER_REGEX.test(slice) ||
-          JAMO_V_OR_T_REGEX.test(slice)
-        ) {
-          i += nextLen;
-        } else {
-          break;
-        }
-      }
+      i = fallbackClusterEnd(wellFormed, segStart);
+      const continuesCluster =
+        segStart > clusterHead && isClusterContinuation(wellFormed, clusterHead, segStart);
+      if (!continuesCluster) clusterHead = segStart;
 
       const segStr = wellFormed.slice(segStart, i);
-      const spanStart = leadingTrimOffset + segStart;
+      const spanStart = leadingTrimOffset + clusterHead;
       const spanEnd = leadingTrimOffset + i;
       appendSegmentTokens(segStr, normalized, spanStart, spanEnd, allTokens, allStarts, allEnds);
     }
@@ -285,17 +370,18 @@ export function guardClusterBoundary(raw: string, end: number): number {
     return cur;
   }
 
-  // Regex fallback for environments without Intl.Segmenter
-  while (cur < len) {
-    const cp = raw.codePointAt(cur);
-    if (cp === undefined || cp < 0x0300) break;
-    const charLen = cp > 0xffff ? 2 : 1;
-    const slice = raw.slice(cur, cur + charLen);
-    if (EXTEND_OR_JOINER_REGEX.test(slice) || JAMO_V_OR_T_REGEX.test(slice)) {
-      cur += charLen;
-    } else {
-      break;
-    }
+  // ASCII cannot extend an emoji/mark cluster. Keep ordinary fuzzy highlights
+  // from rescanning their prefix for every matched token in the fallback.
+  // 0x80 is the ASCII boundary (0x7f is the highest ASCII unit); charCodeAt
+  // here is an ASCII-only fast path (see parity-lint auto-allow rule).
+  if (raw.charCodeAt(cur) < 0x80) return cur;
+
+  // Use the same boundaries as source mapping, including flag-pair parity.
+  let start = 0;
+  while (start < cur) {
+    const clusterEnd = fallbackClusterEnd(raw, start);
+    if (cur < clusterEnd) return clusterEnd;
+    start = clusterEnd;
   }
   return cur;
 }
@@ -485,7 +571,11 @@ export function alignHighlights(
     return [{ start, end }];
   }
 
-  // Fuzzy mode: greedy forward subsequence matching (identical to scoreFuzzyTokens & fuzzy.wgsl)
+  // Fuzzy mode: greedy forward subsequence matching (identical to scoreFuzzyTokens & fuzzy.wgsl).
+  // Per-token ranges use the token's own source span; the trailing boundary is
+  // cluster-guarded while the start is not rewound, so a component query
+  // (e.g. laptop inside woman-technologist) never swallows its whole cluster.
+  // Range merging keeps adjacent cluster pieces contiguous.
   let q = 0;
   const strLen = sourceMap.tokenCount;
   const rawRanges: HighlightRange[] = [];
