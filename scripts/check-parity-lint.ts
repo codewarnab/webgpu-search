@@ -107,13 +107,15 @@ for (const rel of strictTargets) {
   });
   if (ccHits.length > 0) {
     const allowed = new Set(charCodeAtAllowlist[name] ?? []);
-    // Auto-allow vetted unit accesses: ASCII fast path (0x7f/0x41) and the
+    // Auto-allow vetted unit accesses: ASCII fast path (0x7f/0x80 boundary,
+    // 0x41 case-fold) and the
     // lone-surrogate last-resort scan, which must inspect UTF-16 units
     // (0xd800/0xdbff/0xdc00) to detect lone surrogates on pre-2020 engines.
     const autoOk = ccHits.filter((ln) => {
       const ctx = lines.slice(Math.max(0, ln - 6), ln + 2).join('\n');
       return (
         ctx.includes('0x7f') ||
+        ctx.includes('0x80') ||
         ctx.includes('0x41') ||
         ctx.includes('isAscii') ||
         ctx.includes('asciiToTokens') ||

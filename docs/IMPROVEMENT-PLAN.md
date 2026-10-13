@@ -50,7 +50,7 @@ There are about 300 tests, but several core modules have none of their own. This
 
 ## Phase 3: Public results page for the collected benchmarks (≈ 3–4 days)
 
-Benchmark results already go to Upstash automatically (by design; see the memory note), but nobody can see them.
+Benchmark results already go to Upstash automatically (the opt-in `api/submit-benchmark.ts` intake), but nobody can see them.
 
 | # | Task |
 |---|------|

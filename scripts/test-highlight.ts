@@ -52,7 +52,12 @@ async function runM3Tests() {
       { raw: '🇺🇸🇨🇦!', query: '🇨', start: 4, end: 8 },
       { raw: '🇺🇸🇨!', query: '🇨', start: 4, end: 6 },
       { raw: '👍🏽!', query: '🏽', start: 0, end: 4 },
+      { raw: '👍🏽!', query: '👍🏽', start: 0, end: 4 },
       { raw: '👩🏽‍💻!', query: '💻', start: 0, end: 7 },
+      { raw: '👩🏽‍💻!', query: '👩🏽‍💻', start: 0, end: 7 },
+      { raw: 'Press 1️⃣ now', query: '1️⃣', start: 6, end: 9 },
+      { raw: 'I ❤️ WS', query: '❤️', start: 2, end: 4 },
+      { raw: 'Fly 🏴‍☠️!', query: '🏴‍☠️', start: 4, end: 9 },
       { raw: 'Café!', query: 'é', start: 3, end: 5 },
       { raw: '👩‍💻💡!', query: '💡', start: 5, end: 7 },
       { raw: 'a\u200Db', query: 'b', start: 2, end: 3 },
@@ -66,6 +71,8 @@ async function runM3Tests() {
           `${raw.slice(0, start)}<mark>${raw.slice(start, end)}</mark>${raw.slice(end)}`);
       }
     }
+    assert.strictEqual(guardClusterBoundary('👍🏽!', 2), 4);
+    assert.strictEqual(guardClusterBoundary('👩🏽‍💻!', 2), 7);
     assert.strictEqual(guardClusterBoundary('👩‍💻!', 2), 5);
     assert.strictEqual(guardClusterBoundary('🇺🇸🇨🇦!', 2), 4);
     assert.strictEqual(guardClusterBoundary('🇺🇸🇨🇦!', 4), 4);

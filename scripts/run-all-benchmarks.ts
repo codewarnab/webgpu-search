@@ -1,4 +1,5 @@
 import puppeteer from 'puppeteer-core';
+import { BENCHMARK_DATASET_SIZES } from './bench-data/dataset-sizes';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -20,7 +21,7 @@ async function main() {
     };
     const isFast = args.includes('--fast');
 
-    const sizesArg = getArg('sizes') || (isFast ? '10000,100000' : '10000,100000,500000,1000000,2000000');
+    const sizesArg = getArg('sizes') || (isFast ? '10000,100000' : BENCHMARK_DATASET_SIZES.join(','));
     const corpusArg = getArg('corpus') || 'ascii';
     const queryArg = getArg('query');
     const warmupsArg = getArg('warmups') || (isFast ? '2' : '5');
