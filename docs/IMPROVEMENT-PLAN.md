@@ -31,6 +31,7 @@ There are about 300 tests, but several core modules have none of their own. This
 - **Why:** AGENTS.md §2.4 requires the two paths to score the same, and nothing enforces it today.
 
 ### 2.2 Snapshot codec tests
+- **Historical compatibility covered:** `scripts/test-snapshot.ts` loads the frozen `test/fixtures/snapshot-1.0.1.bin` written by the published npm package, with provenance and fixed search expectations in its JSON manifest. Existing round-trip and typed corruption/profile error checks remain in the same suite, which CI runs through `test:snapshot`.
 - Add `test/snapshot-codec.test.ts`:
   - Saving an index and loading it back gives identical search results.
   - Bad input is rejected with the right typed error: wrong magic bytes, wrong version, truncated data, a corrupted checksum, a mismatched text profile.
