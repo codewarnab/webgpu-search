@@ -25,6 +25,7 @@ Low-risk housekeeping that clears the way for the bigger phases.
 There are about 300 tests, but several core modules have none of their own. This phase covers the guarantees that 1.0 commits to.
 
 ### 2.1 Tests that GPU and CPU return the same scores
+- **Browser coverage extended:** the existing `scripts/test-regression.ts` differential gate now includes joined emoji and component queries, plus 128-token ASCII and case-fold-expanded queries in substring and fuzzy modes. Matching records and last-token near misses exercise the actual WGSL path against the CPU reference. CI already runs this gate on every PR.
 - Add `test/scoring-parity.test.ts`. It runs a fixed set of queries through the mock WebGPU path and through `cpu-reference.ts` / `exact-scorer.ts`.
 - Check that both return the same `SearchResultItem[]`: same order, same integer scores, scores in descending order.
 - Cover ASCII, CJK, emoji/ZWJ, mixed case, and queries at the maximum length.

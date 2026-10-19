@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer-core';
 import path from 'path';
 import fs from 'fs';
-import { normalizeText, scoreExactMatches } from '../packages/webgpu-search/src/index';
+import { normalizeText, scoreExactMatches, QUERY_TOKENS_MAX } from '../packages/webgpu-search/src/index';
 import {
     getChromeExecutablePath,
     getChromeLaunchArgs,
@@ -180,6 +180,12 @@ async function main() {
         // agree on NFC for this ASCII-heavy corpus (negligible risk here;
         // cross-runtime NFC is probed/reported, not gated).
         const FCP = String.fromCodePoint;
+        const joinedEmoji = FCP(0x1f469, 0x200d, 0x1f4bb);
+        // A distinct final token catches dispatch/scoring paths that truncate
+        // the query at 127 tokens. The folded query reaches the same cap with
+        // only 64 input characters, so the limit is measured after folding.
+        const maxQuery = 'a'.repeat(QUERY_TOKENS_MAX - 1) + 'z';
+        const foldedMaxQuery = FCP(0xdf).repeat(QUERY_TOKENS_MAX / 2);
         const parityStrings: string[] = [];
         for (let i = 0; i < 200; i++) {
             parityStrings.push(`src/services/Auth${i % 7 === 0 ? FCP(0xdf) : 's'}Controller_${i}.ts`);
@@ -189,7 +195,16 @@ async function main() {
             FCP(0x5317) + FCP(0x4eac) + 'city',
             FCP(0x1f600) + 'smile',
             'caf' + FCP(0xe9),
-            'plain'
+            'plain',
+            joinedEmoji,
+            'Dev ' + joinedEmoji + ' at work',
+            FCP(0x1f469) + ' ' + FCP(0x1f4bb), // Separate scalars are not the ZWJ sequence.
+            maxQuery,
+            'prefix ' + maxQuery + ' suffix',
+            'a'.repeat(QUERY_TOKENS_MAX - 1) + 'x', // Differs only at the last token.
+            foldedMaxQuery,
+            'ss'.repeat(QUERY_TOKENS_MAX / 2),
+            'ss'.repeat(QUERY_TOKENS_MAX / 2 - 1) + 'sx'
         );
         const parityCells = [
             { query: 'auth', mode: 'substring', limit: 50 },
@@ -200,6 +215,14 @@ async function main() {
             { query: 'SS', mode: 'substring', limit: 50 },
             { query: FCP(0x5317), mode: 'substring', limit: 10 },
             { query: FCP(0x1f600), mode: 'substring', limit: 10 },
+            { query: joinedEmoji, mode: 'substring', limit: 10 },
+            { query: joinedEmoji, mode: 'fuzzy', limit: 10 },
+            { query: FCP(0x1f4bb), mode: 'substring', limit: 10 },
+            { query: FCP(0x1f4bb), mode: 'fuzzy', limit: 10 },
+            { query: maxQuery, mode: 'substring', limit: 10 },
+            { query: maxQuery, mode: 'fuzzy', limit: 10 },
+            { query: foldedMaxQuery, mode: 'substring', limit: 10 },
+            { query: foldedMaxQuery, mode: 'fuzzy', limit: 10 },
             { query: 'zzz-no-match', mode: 'substring', limit: 50 },
             { query: 'zzz-no-match', mode: 'fuzzy', limit: 50 },
         ] as Array<{ query: string; mode: 'substring' | 'fuzzy'; limit: number }>;
@@ -258,7 +281,7 @@ async function main() {
                         }
                     }
                     (testResults as any).results.push({
-                        name: `parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (ordered index/score/text)`,
+                        name: `parity ${cell.mode} ${JSON.stringify(cell.query.slice(0, 12))} (${qT.length} tokens; ordered index/score/text)`,
                         passed: pass,
                         details: { totalMatches: got.totalMatches, candidateCount: got.candidateCount, expected: expected.totalMatches }
                     });
