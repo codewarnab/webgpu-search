@@ -1,4 +1,7 @@
 import assert from 'node:assert';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import snapshotFixture from '../packages/webgpu-search/test/fixtures/snapshot-1.0.1.json';
 import {
   DocumentIndex,
   SearchWorkerClient,
@@ -1569,6 +1572,38 @@ async function runSnapshotTests() {
     sensitiveLive.destroy();
     insensitiveLive.destroy();
     console.log('   ✅ Profile guards + live-format semantics confirmed');
+  }
+
+  // Unlike live round-trips, these bytes and expectations come from the
+  // published 1.0.1 writer and must survive changes to the current encoder.
+  console.log('18. Testing the frozen webgpu-search@1.0.1 snapshot...');
+  {
+    const bytes = await readFile(new URL(
+      '../packages/webgpu-search/test/fixtures/snapshot-1.0.1.bin', import.meta.url
+    ));
+    assert.strictEqual(createHash('sha256').update(bytes).digest('hex'), snapshotFixture.snapshotSha256);
+    const snapshot = Uint8Array.from(bytes).buffer;
+    assert.strictEqual(decodeSnapshotHeader(snapshot).formatVersion, snapshotFixture.snapshotFormatVersion);
+    const restored = await DocumentIndex.fromSnapshot(snapshot, { options: { preferGpu: false } });
+    try {
+      assert.strictEqual(restored.getStats().docCount, snapshotFixture.documents.length);
+      for (const entry of snapshotFixture.queries) {
+        const response = await restored.search(entry.query, {
+          mode: entry.mode as 'fuzzy' | 'substring',
+          cpuScorer: 'exact',
+        });
+        assert.deepStrictEqual({
+          totalMatches: response.totalMatches,
+          results: response.results.map(({ id, score, matchedField }) => ({ id, score, matchedField })),
+        }, entry.expected, `1.0.1 snapshot search changed for ${JSON.stringify(entry.query)}`);
+        for (const hit of response.results) {
+          assert.deepStrictEqual(hit.doc, snapshotFixture.documents.find(doc => doc.id === hit.id));
+        }
+      }
+    } finally {
+      restored.destroy();
+    }
+    console.log('   ✅ Published 1.0.1 snapshot compatibility confirmed');
   }
 
   console.log('\n--- All Persistence Tests Passed Successfully! ✅ ---');

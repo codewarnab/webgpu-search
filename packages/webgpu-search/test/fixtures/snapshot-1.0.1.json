@@ -1,0 +1,187 @@
+{
+  "producer": {
+    "package": "webgpu-search",
+    "version": "1.0.1",
+    "tarball": "https://registry.npmjs.org/webgpu-search/-/webgpu-search-1.0.1.tgz",
+    "integrity": "sha512-psu6FVagazLpKH1miZez3PqIYhZ2rqBLDupogh7D5nZIr6teC6RpvgYEtm0v3m3MEuV2ll/JTdzz0JVwAPmApQ=="
+  },
+  "options": {
+    "fields": [
+      {
+        "name": "title",
+        "weight": 2
+      },
+      {
+        "name": "content",
+        "weight": 1
+      }
+    ],
+    "preferGpu": false
+  },
+  "documents": [
+    {
+      "id": "ascii-1",
+      "title": "WebGPU search",
+      "content": "Fast parallel search for documents."
+    },
+    {
+      "id": "ascii-2",
+      "title": "Search guide",
+      "content": "WebGPU search with a CPU fallback."
+    },
+    {
+      "id": "unicode",
+      "title": "Straße café",
+      "content": "İstanbul and Greek Σ σ ς."
+    },
+    {
+      "id": "cjk",
+      "title": "東京 検索",
+      "content": "日本語 search guide."
+    },
+    {
+      "id": "emoji",
+      "title": "Developer 👩‍💻",
+      "content": "Launch 🚀 with emoji."
+    }
+  ],
+  "queries": [
+    {
+      "query": "webgpu",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 2,
+        "results": [
+          {
+            "id": "ascii-1",
+            "score": 1986,
+            "matchedField": "title"
+          },
+          {
+            "id": "ascii-2",
+            "score": 972,
+            "matchedField": "content"
+          }
+        ]
+      }
+    },
+    {
+      "query": "search",
+      "mode": "fuzzy",
+      "expected": {
+        "totalMatches": 3,
+        "results": [
+          {
+            "id": "ascii-2",
+            "score": 748,
+            "matchedField": "title"
+          },
+          {
+            "id": "ascii-1",
+            "score": 726,
+            "matchedField": "title"
+          },
+          {
+            "id": "cjk",
+            "score": 359,
+            "matchedField": "content"
+          }
+        ]
+      }
+    },
+    {
+      "query": "strasse",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 1,
+        "results": [
+          {
+            "id": "unicode",
+            "score": 1990,
+            "matchedField": "title"
+          }
+        ]
+      }
+    },
+    {
+      "query": "café",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 1,
+        "results": [
+          {
+            "id": "unicode",
+            "score": 1824,
+            "matchedField": "title"
+          }
+        ]
+      }
+    },
+    {
+      "query": "σ",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 1,
+        "results": [
+          {
+            "id": "unicode",
+            "score": 775,
+            "matchedField": "content"
+          }
+        ]
+      }
+    },
+    {
+      "query": "東京",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 1,
+        "results": [
+          {
+            "id": "cjk",
+            "score": 1994,
+            "matchedField": "title"
+          }
+        ]
+      }
+    },
+    {
+      "query": "👩‍💻",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 1,
+        "results": [
+          {
+            "id": "emoji",
+            "score": 1780,
+            "matchedField": "title"
+          }
+        ]
+      }
+    },
+    {
+      "query": "🚀",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 1,
+        "results": [
+          {
+            "id": "emoji",
+            "score": 911,
+            "matchedField": "content"
+          }
+        ]
+      }
+    },
+    {
+      "query": "absent-query",
+      "mode": "substring",
+      "expected": {
+        "totalMatches": 0,
+        "results": []
+      }
+    }
+  ],
+  "snapshotSha256": "b34c39e7698e5b1d0054b57b6f4d07b5ca1a41661787cf8267ea1f9241297ff2",
+  "snapshotFormatVersion": 4
+}
