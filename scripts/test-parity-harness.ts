@@ -141,6 +141,36 @@ function multisetsEqual(a: Map<number, number>, b: Map<number, number>): boolean
   return true;
 }
 
+/**
+ * Capture an engine's output staging buffer through the injected-device
+ * boundary: window-wrap `device.createBuffer` (same pattern as the
+ * records-OOM injection below) around `create()` and pick out the
+ * 'Staging Buffer' label. Mock-boundary injection only -- never reads engine
+ * private state. `create()` must be the only staging-allocating call; the
+ * first 'Staging Buffer' created is captured.
+ */
+async function withCapturedStaging<T>(
+  device: GPUDevice,
+  create: () => Promise<T>
+): Promise<{ value: T; staging: GPUBuffer | null }> {
+  const mutable = device as unknown as {
+    createBuffer: (descriptor: GPUBufferDescriptor) => GPUBuffer;
+  };
+  const realCreate = mutable.createBuffer.bind(device);
+  let staging: GPUBuffer | null = null;
+  mutable.createBuffer = (descriptor: GPUBufferDescriptor): GPUBuffer => {
+    const buf = realCreate(descriptor);
+    if (descriptor.label === 'Staging Buffer' && staging === null) staging = buf;
+    return buf;
+  };
+  try {
+    const value = await create();
+    return { value, staging };
+  } finally {
+    mutable.createBuffer = realCreate;
+  }
+}
+
 const CELL_TIMEOUT_MS = 15000;
 function parseShardEnv(raw: string | undefined, def: number): number {
   if (raw === undefined || raw === '') return def;
@@ -581,19 +611,29 @@ async function main(): Promise<void> {
       '(m) fast-path timestamp key well-formed',
       'gpuExecutionMs' in fast.timings && (fast.timings.gpuExecutionMs === null || Number.isFinite(fast.timings.gpuExecutionMs))
     );
-    // Force chunked: maxDim=1 -> step=128 rows, 300 rows -> 3 chunks + clear + copy = 5 encoders.
-    const realDevice = (eng as unknown as { device: GPUDevice }).device;
-    (eng as unknown as { device: GPUDevice }).device = {
-      ...realDevice,
-      limits: { ...(realDevice as unknown as { limits: Record<string, number> }).limits, maxComputeWorkgroupsPerDimension: 1 },
+    // Force chunked through the public device boundary: init a second engine on
+    // a cloned injected mock device whose dimension limit is 1. The dispatcher
+    // reads maxComputeWorkgroupsPerDimension from the public device.limits at
+    // dispatch time; the clone shares the mock's instrumentation object, so
+    // encoder deltas stay comparable. No engine private state is touched.
+    const limitedDevice = {
+      ...mockDevice,
+      limits: { ...(mockDevice as unknown as { limits: Record<string, number> }).limits, maxComputeWorkgroupsPerDimension: 1 },
     } as unknown as GPUDevice;
+    const engLimited = new WebGPUEngine();
+    const initLim = await engLimited.init(limitedDevice);
+    ok('(m) limited-dimension engine inits', initLim);
+    await engLimited.loadDataset(rows);
     const e1 = calls.createCommandEncoder;
-    const chunked = await eng.search('chunk-row-1', { mode: 'substring' });
+    const chunked = await engLimited.search('chunk-row-1', { mode: 'substring' });
     const delta = calls.createCommandEncoder - e1;
     ok('(m) chunked multi-dispatch (5 encoders)', delta === 5, `delta=${delta}`);
     ok('(m) chunked skips timestamps (null)', chunked.timings.gpuExecutionMs === null);
-    (eng as unknown as { device: GPUDevice }).device = realDevice;
-    ok('(m) grow-only output 65544 B', (eng as unknown as { outputByteLength: number }).outputByteLength === 65544);
+    // Grow-only output: base candidate pool stays 8192 slots after loads
+    // (65544 B = 8 B counter + 8192 x 8 B) -- pinned via the public capacity
+    // getter, which the output/staging allocation derives byte length from.
+    ok('(m) grow-only output 65544 B', eng.currentCandidateCapacity === 8192 && 8 + eng.currentCandidateCapacity * 8 === 65544 && engLimited.currentCandidateCapacity === 8192);
+    engLimited.destroy();
     await eng.loadDataset([]);
     const e2 = calls.createCommandEncoder;
     const zr = await eng.search('chunk-row-1', { mode: 'substring' });
@@ -875,70 +915,93 @@ async function main(): Promise<void> {
 
     // mapAsync reject: epoch intact -> raw error (fallback-eligible); epoch moved -> AbortError.
     {
-      const eng = new WebGPUEngine();
-      await eng.init(mockDevice);
-      await eng.loadDataset(['apple']);
-      const sb = (eng as unknown as { stagingBuffer: { mapAsync: () => Promise<void> } }).stagingBuffer;
-      const orig = sb.mapAsync.bind(sb);
-      try {
-        sb.mapAsync = () => Promise.reject(new Error('injected mapAsync failure'));
-        let raw = false;
+      // Capture the engine's output staging buffer through the injected-device
+      // boundary (windowed createBuffer wrap, same pattern as the records-OOM
+      // injection); map-failure injection then patches only that buffer, and
+      // the epoch plays out through real public lifecycle operations.
+      const { value: eng, staging } = await withCapturedStaging(mockDevice, async () => {
+        const e = new WebGPUEngine();
+        await e.init(mockDevice);
+        await e.loadDataset(['apple']);
+        return e;
+      });
+      const sb = staging as unknown as { mapAsync: (mode?: number) => Promise<void> } | null;
+      ok('mapAsync probe captured staging via device boundary', sb !== null);
+      if (sb) {
+        const orig = sb.mapAsync.bind(sb);
         try {
-          await eng.search('apple', { mode: 'substring' });
-        } catch (e) {
-          raw = (e as Error).message === 'injected mapAsync failure';
+          sb.mapAsync = (): Promise<void> => Promise.reject(new Error('injected mapAsync failure'));
+          let raw = false;
+          try {
+            await eng.search('apple', { mode: 'substring' });
+          } catch (e) {
+            raw = (e as Error).message === 'injected mapAsync failure';
+          }
+          ok('mapAsync reject propagates when epoch intact', raw);
+          // Move the epoch *inside* the in-flight await (destroy-race shape):
+          // gen is captured before mapAsync, so a bump during the await reads
+          // as moved and must map to AbortError (never fallback-eligible).
+          // The bump is a real public lifecycle operation:
+          // ensureCandidateCapacity reallocates output/staging and advances
+          // the epoch (no private generation mutation).
+          sb.mapAsync = (): Promise<void> => {
+            eng.ensureCandidateCapacity(10000);
+            return Promise.reject(new Error('injected mapAsync failure'));
+          };
+          let aborted = false;
+          try {
+            await eng.search('apple', { mode: 'substring' });
+          } catch (e) {
+            aborted = (e as { name?: string }).name === 'AbortError';
+          }
+          ok('mapAsync reject + moved epoch -> AbortError', aborted);
+        } finally {
+          try {
+            sb.mapAsync = orig;
+          } catch {
+            // Engine may have torn down stagingBuffer; restore best-effort.
+          }
+          eng.destroy();
         }
-        ok('mapAsync reject propagates when epoch intact', raw);
-        // Move the epoch *inside* the in-flight await (destroy-race shape):
-        // gen is captured before mapAsync, so a bump during the await reads
-        // as moved and must map to AbortError (never fallback-eligible).
-        sb.mapAsync = () => {
-          (eng as unknown as { generation: number }).generation += 1;
-          return Promise.reject(new Error('injected mapAsync failure'));
-        };
-        let aborted = false;
-        try {
-          await eng.search('apple', { mode: 'substring' });
-        } catch (e) {
-          aborted = (e as { name?: string }).name === 'AbortError';
-        }
-        ok('mapAsync reject + moved epoch -> AbortError', aborted);
-      } finally {
-        try {
-          sb.mapAsync = orig;
-        } catch {
-          // Engine may have torn down stagingBuffer; restore best-effort.
-        }
+      } else {
         eng.destroy();
       }
     }
 
     // AbortError through SearchIndex never converts to CPU fallback.
     {
-      const idx = await SearchIndex.create(['apple'], { device: mockDevice, preferGpu: true });
-      const engHandle = (idx as unknown as { gpuEngine: WebGPUEngine }).gpuEngine;
-      const sb = (engHandle as unknown as { stagingBuffer: { mapAsync: () => Promise<void> } }).stagingBuffer;
-      const orig = sb.mapAsync.bind(sb);
-      try {
-        // Epoch moves mid-flight (destroy-race shape) -> AbortError, which the
-        // hybrid must rethrow instead of converting to a CPU fallback.
-        sb.mapAsync = () => {
-          (engHandle as unknown as { generation: number }).generation += 1;
-          return Promise.reject(new Error('injected mid-flight failure'));
-        };
-        let aborted = false;
+      // Staging captured via the injected-device boundary; the mid-flight
+      // epoch bump is the real public lifecycle destroy() (exactly the
+      // destroy-race the abort guard exists for). The hybrid must rethrow
+      // the resulting AbortError instead of converting to a CPU fallback.
+      const { value: idx, staging } = await withCapturedStaging(mockDevice, () =>
+        SearchIndex.create(['apple'], { device: mockDevice, preferGpu: true })
+      );
+      const sb = staging as unknown as { mapAsync: (mode?: number) => Promise<void> } | null;
+      ok('AbortError probe captured staging via device boundary', sb !== null);
+      if (sb) {
+        const orig = sb.mapAsync.bind(sb);
         try {
-          await idx.search('apple', { mode: 'substring' });
-        } catch (e) {
-          aborted = (e as { name?: string }).name === 'AbortError';
+          sb.mapAsync = (): Promise<void> => {
+            idx.destroy();
+            return Promise.reject(new Error('injected mid-flight failure'));
+          };
+          let aborted = false;
+          try {
+            await idx.search('apple', { mode: 'substring' });
+          } catch (e) {
+            aborted = (e as { name?: string }).name === 'AbortError';
+          }
+          ok('AbortError propagates through SearchIndex (no fallback)', aborted);
+        } finally {
+          try {
+            sb.mapAsync = orig;
+          } catch {
+            // Best-effort restore; index destroy below still runs.
+          }
+          idx.destroy();
         }
-        ok('AbortError propagates through SearchIndex (no fallback)', aborted);
-      } finally {
-        try {
-          sb.mapAsync = orig;
-        } catch {
-          // Best-effort restore; index destroy below still runs.
-        }
+      } else {
         idx.destroy();
       }
     }
@@ -1061,30 +1124,39 @@ async function main(): Promise<void> {
     }
     // Abort mid-mapAsync via controller (deterministic: abort inside mapAsync).
     {
-      const eng = new WebGPUEngine();
-      await eng.init(mockDevice);
-      await eng.loadDataset(['apple']);
-      const sb = (eng as unknown as { stagingBuffer: { mapAsync: () => Promise<void> } }).stagingBuffer;
-      const orig = sb.mapAsync.bind(sb);
-      try {
-        const ac = new AbortController();
-        sb.mapAsync = async (): Promise<void> => {
-          ac.abort();
-          return orig();
-        };
-        let aborted = false;
+      // Staging captured via the injected-device boundary (windowed createBuffer).
+      const { value: eng, staging } = await withCapturedStaging(mockDevice, async () => {
+        const e = new WebGPUEngine();
+        await e.init(mockDevice);
+        await e.loadDataset(['apple']);
+        return e;
+      });
+      const sb = staging as unknown as { mapAsync: (mode?: number) => Promise<void> } | null;
+      ok('abort probe captured staging via device boundary', sb !== null);
+      if (sb) {
+        const orig = sb.mapAsync.bind(sb);
         try {
-          await eng.search('apple', { mode: 'substring', signal: ac.signal });
-        } catch (e) {
-          aborted = (e as { name?: string }).name === 'AbortError';
+          const ac = new AbortController();
+          sb.mapAsync = async (): Promise<void> => {
+            ac.abort();
+            return orig();
+          };
+          let aborted = false;
+          try {
+            await eng.search('apple', { mode: 'substring', signal: ac.signal });
+          } catch (e) {
+            aborted = (e as { name?: string }).name === 'AbortError';
+          }
+          ok('abort during mapAsync -> AbortError (epoch discard)', aborted);
+        } finally {
+          try {
+            sb.mapAsync = orig;
+          } catch {
+            // Best-effort restore.
+          }
+          eng.destroy();
         }
-        ok('abort during mapAsync -> AbortError (epoch discard)', aborted);
-      } finally {
-        try {
-          sb.mapAsync = orig;
-        } catch {
-          // Best-effort restore.
-        }
+      } else {
         eng.destroy();
       }
     }

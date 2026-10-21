@@ -427,16 +427,27 @@ async function runMockTests() {
     });
     console.log('   ✅ Concurrent searches stay isolated with no cross-talk');
 
-    const gpuEngine = (concurrentIndex as any).gpuEngine;
-    const originalSearch = gpuEngine.search.bind(gpuEngine);
-    gpuEngine.search = async () => { throw new Error('injected GPU query failure'); };
+    // GPU failure must fall back to CPU results — injected at the REAL
+    // boundary the engine talks to (the mock device queue submit), the same
+    // seam an actual driver failure surfaces through (cf. the gpu-execution-
+    // error fallback contract verified in test-observability.ts). No private
+    // engine reference is reached into; the submit hook is restored so the
+    // shared mock device stays healthy for later sections.
+    const originalSubmit = mockDevice.queue.submit;
+    (mockDevice.queue as any).submit = () => {
+        throw new Error('injected GPU query failure');
+    };
+    let fallbackResult: SearchResponse;
     try {
-        const fallbackResult = await concurrentIndex.search('Auth', { mode: 'substring', limit: 20 });
-        if (fallbackResult.engine !== 'cpu' || fallbackResult.results.length === 0) {
-            throw new Error('A GPU query failure must fall back to CPU results');
-        }
+        fallbackResult = await concurrentIndex.search('Auth', { mode: 'substring', limit: 20 });
     } finally {
-        gpuEngine.search = originalSearch;
+        mockDevice.queue.submit = originalSubmit;
+    }
+    if (fallbackResult.engine !== 'cpu' || fallbackResult.results.length === 0) {
+        throw new Error('A GPU query failure must fall back to CPU results');
+    }
+    if (fallbackResult.fallbackReason !== 'gpu-execution-error') {
+        throw new Error(`GPU failure fallback must report gpu-execution-error, got: ${fallbackResult.fallbackReason}`);
     }
     concurrentIndex.destroy();
     console.log('   ✅ GPU query errors fall back to CPU results');
@@ -669,10 +680,14 @@ async function runMockTests() {
     // Mock has no clearBuffer: search must still succeed via writeBuffer fallback.
     await abortEngine.search('x', { mode: 'substring' });
     // Forged maxDim 0 must not hang (clamped to 65535 → fast path).
+    // The hostile device is injected through the public init() seam on a
+    // dedicated engine instead of mutating the private device reference.
     const zeroDimDevice = { ...mockDevice, limits: { ...(mockDevice as any).limits, maxComputeWorkgroupsPerDimension: 0 } } as unknown as GPUDevice;
-    (abortEngine as any).device = zeroDimDevice;
-    await abortEngine.search('x', { mode: 'substring' });
-    (abortEngine as any).device = mockDevice;
+    const zeroDimEngine = new WebGPUEngine();
+    await zeroDimEngine.init(zeroDimDevice);
+    await zeroDimEngine.loadDataset(['x']);
+    await zeroDimEngine.search('x', { mode: 'substring' });
+    zeroDimEngine.destroy();
     // Re-init must not leak/throw.
     await abortEngine.init(mockDevice);
     await abortEngine.loadDataset(['re', 'init']);

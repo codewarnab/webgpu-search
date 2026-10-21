@@ -204,34 +204,42 @@ describe('headroom clamp vs binding limit (finding 2)', () => {
 });
 
 describe('teardown during timestamp readback (finding 3)', () => {
-  async function readyEngine() {
+  async function readyEngine(onTsMapAsync: (engine: WebGPUEngine) => void) {
+    // Inject at the real allocation boundary: the fake `ts-staging` buffer is
+    // handed out by device.createBuffer for the timestamp staging descriptor,
+    // so no engine-private field or test-only seam is touched. The vgpu mock
+    // adapter does not propagate `features` onto the device, so advertise
+    // timestamp-query explicitly — readTimestampGpuMs only runs when the
+    // device exposes the feature (as production would).
+    const dev = await mockDevice();
+    dev.features = new Set(['timestamp-query']) as any;
+    const createBuffer = (dev.createBuffer as any).bind(dev);
+    (dev as any).createBuffer = (d: GPUBufferDescriptor) => {
+      if (d.label === 'ts-staging') {
+        return {
+          mapAsync: async () => { onTsMapAsync(engine); },
+          getMappedRange: () => new ArrayBuffer(16),
+          unmap() {},
+          destroy() {},
+        };
+      }
+      return createBuffer(d);
+    };
     const engine = new WebGPUEngine();
-    await engine.init(await mockDevice());
+    await engine.init(dev);
     await engine.loadDataset(['hello world', 'help']);
     return engine;
   }
 
   test('destroy() during timestamp mapAsync rejects with AbortError', async () => {
-    const engine = await readyEngine();
-    (engine as any).queryStagingBuffer = {
-      mapAsync: async () => { engine.destroy(); },
-      getMappedRange: () => new ArrayBuffer(16),
-      unmap() {},
-      destroy() {},
-    };
+    const engine = await readyEngine((e) => e.destroy());
     const err = await engine.search('hel', { mode: 'fuzzy' }).then(() => null, (e) => e);
     expect(err).not.toBeNull();
     expect((err as Error).name).toBe('AbortError');
   });
 
   test('output reallocation during timestamp mapAsync rejects with AbortError', async () => {
-    const engine = await readyEngine();
-    (engine as any).queryStagingBuffer = {
-      mapAsync: async () => { engine.ensureCandidateCapacity(20_000); },
-      getMappedRange: () => new ArrayBuffer(16),
-      unmap() {},
-      destroy() {},
-    };
+    const engine = await readyEngine((e) => e.ensureCandidateCapacity(20_000));
     const err = await engine.search('hel', { mode: 'fuzzy' }).then(() => null, (e) => e);
     expect((err as Error | null)?.name).toBe('AbortError');
     engine.destroy();

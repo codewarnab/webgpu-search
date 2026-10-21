@@ -58,6 +58,103 @@ function productIndexOpts(extra?: Partial<DocumentIndexOptions<Product>>): Docum
   };
 }
 
+// ===========================================================================
+// GPU-boundary output simulator
+//
+// The vgpu mock never executes compute (dispatchWorkgroups is a no-op), so a
+// real WebGPUEngine readback always decodes an empty candidate pool. To
+// exercise overflow routing through the production path, the mock device is
+// wrapped so a test can *program* the search output buffer with the kernel's
+// readback layout — u32[0] = total match count, then (u32 row index, i32
+// score) pairs. The programmed bytes land when the engine copies the output
+// buffer to its MAP_READ staging twin (the post-dispatch moment a real GPU
+// would have filled it), and are decoded by the engine's own mapAsync →
+// readMappedOutput path. Injection only fires for STORAGE-backed copies large
+// enough to carry the payload, so the 16-byte timestamp staging copy is never
+// touched. Candidate slots beyond the programmed pairs decode as (row 0,
+// score 0), which dedupes into doc row 0 — harmless padding. No production
+// seams: the wrapper is a plain WebGPU-device facade over public APIs.
+// ===========================================================================
+
+/** GPUBufferUsage.STORAGE (spec value; Node/Bun has no WebGPU global). */
+const GPU_BUFFER_USAGE_STORAGE = 0x0080;
+
+interface SimulatedGpuSearchOutput {
+  /** Decoded `totalMatches`; drives `hasOverflow = total > candidateCapacity`. */
+  totalMatches: number;
+  /** Candidate pool: field-stratified row indices + raw match scores. */
+  rows: Array<{ index: number; score: number }>;
+}
+
+function createSearchOutputSimulator(device: GPUDevice): {
+  device: GPUDevice;
+  /** Arm (or disarm with `null`) the simulated output for the next searches. */
+  program: (output: SimulatedGpuSearchOutput | null) => void;
+} {
+  let pending: SimulatedGpuSearchOutput | null = null;
+
+  const encodeOutput = (out: SimulatedGpuSearchOutput): Uint8Array => {
+    // Readback layout (GpuDispatcher.readMappedOutput): u32[0] total matches,
+    // u32[1] padding, then (u32 row index, i32 score) pairs.
+    const u32 = new Uint32Array(2 + out.rows.length * 2);
+    const i32 = new Int32Array(u32.buffer);
+    u32[0] = out.totalMatches;
+    for (let i = 0; i < out.rows.length; i++) {
+      u32[2 + i * 2] = out.rows[i].index;
+      i32[3 + i * 2] = out.rows[i].score;
+    }
+    return new Uint8Array(u32.buffer);
+  };
+
+  const simulated = new Proxy(device, {
+    get(target, prop) {
+      if (prop === 'createCommandEncoder') {
+        return (desc?: GPUCommandEncoderDescriptor) => {
+          const enc = target.createCommandEncoder(desc);
+          return new Proxy(enc, {
+            get(encTarget, encProp) {
+              if (encProp === 'copyBufferToBuffer') {
+                return (
+                  source: GPUBuffer,
+                  sourceOffset: number,
+                  destination: GPUBuffer,
+                  destinationOffset: number,
+                  size?: number
+                ) => {
+                  const copyBytes = size ?? source.size - sourceOffset;
+                  if (pending) {
+                    const payload = encodeOutput(pending);
+                    if (
+                      (source.usage & GPU_BUFFER_USAGE_STORAGE) !== 0 &&
+                      copyBytes >= payload.byteLength &&
+                      source.size >= payload.byteLength
+                    ) {
+                      // The compute dispatch has "run": the output buffer now
+                      // holds the programmed pool for the engine to copy into
+                      // its staging twin and decode.
+                      target.queue.writeBuffer(source, 0, payload);
+                    }
+                  }
+                  return enc.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
+                };
+              }
+              const value = Reflect.get(encTarget, encProp);
+              return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(encTarget) : value;
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+    },
+  });
+
+  return {
+    device: simulated,
+    program: (output) => { pending = output; },
+  };
+}
+
 async function runTests() {
   console.log('=== Running Issue #10  Facet Aggregation Engine ===\n');
 
@@ -428,13 +525,14 @@ async function runTests() {
   }
 
   // =========================================================================
-  // 7. GPU parity + overflow semantics (mock adapter + stubbed engine)
+  // 7. GPU parity + overflow semantics (mock adapter + programmed output)
   //
   // NOTE: the vgpu mock stubs compute dispatch (it never produces match
   // rows), so the repo-wide convention (test-vgpu-mock.ts, filter tests)
   // asserts GPU *routing*, not GPU match quality. Overflow/approximate
-  // routing — which needs a capped candidate pool — is covered with a
-  // stubbed WebGPUEngine behind the same readback contract.
+  // routing — which needs a capped candidate pool — programs the search
+  // output buffer on the same mock device (the kernel's readback format)
+  // and runs the engine's real copy → mapAsync → decode path.
   // =========================================================================
   console.log('7. Testing GPU facet parity and overflow semantics...');
   {
@@ -458,40 +556,32 @@ async function runTests() {
     assert.strictEqual(mockRes.facets!.c.isApproximate, false);
     assert.deepStrictEqual(mockRes.facets!.c.buckets, []);
 
-    // 7b. Stubbed engine: rows are field-stratified, so title rows for the
-    // 8-doc corpus are 0..7 and body rows are 8..15.
-    const stubGpu = (poolRows: number[], hasOverflow: boolean) => ({
-      isReady: true,
-      destroy() {},
-      search: async (query: string, opts: { mode?: string }) => ({
-        query,
-        mode: opts.mode ?? 'fuzzy',
-        engine: 'webgpu',
-        totalMatches: poolRows.length + (hasOverflow ? 5000 : 0),
-        candidateCount: poolRows.length,
-        hasOverflow,
-        results: poolRows.map((index) => ({ index, score: 500, text: '' })),
-        timings: {
-          queryUploadMs: 0, encodeSubmitMs: 0, gpuExecutionMs: null,
-          readbackMs: 0, totalMs: 1, gpuDispatchMs: 0,
-        },
-        profileId: 'unicode-default',
-        scoringVersion: 'parity-v1',
-        cpuScorer: 'exact',
-      }),
+    // 7b. Overflow semantics through the real engine, simulated at the GPU
+    // boundary. The mock device is extended so each search's output buffer
+    // carries a programmed candidate pool (the kernel's readback format);
+    // everything downstream — staging copy, mapAsync decode, pool-driven
+    // facet aggregation, overflow routing — is the production path.
+    // Rows are field-stratified: title rows 0..7 map to docs p1..p8, so
+    // rows 0..2 match docs p1..p3 (all 'tech').
+    const { device: simulatedDevice, program } = createSearchOutputSimulator(mockDevice);
+    const simulatedIndex = await DocumentIndex.create(
+      CORPUS,
+      productIndexOpts({ device: simulatedDevice, preferGpu: true })
+    );
+
+    // Capped pool (docs p1..p3) with the match counter one past the 8192
+    // candidate capacity -> overflow, auto mode -> approximate facets over
+    // the pool only.
+    program({
+      totalMatches: 8193, // GPU candidate capacity (8192) + 1
+      rows: [0, 1, 2].map((index) => ({ index, score: 500 })),
     });
-
-    const stubIndex = await DocumentIndex.create(CORPUS, productIndexOpts());
-    (stubIndex as unknown as { engineState: { engine: string } }).engineState = { engine: 'webgpu' };
-
-    // Capped pool (docs p1..p3) with overflow, auto mode -> approximate.
-    (stubIndex as unknown as { gpuEngine: unknown }).gpuEngine = stubGpu([0, 1, 2], true);
-    const autoRes = await stubIndex.search('Widget', {
+    const autoRes = await simulatedIndex.search('Widget', {
       facets: { c: { type: 'terms', field: 'category' } },
     });
     assert.strictEqual(autoRes.engine, 'webgpu');
     assert.strictEqual(autoRes.hasOverflow, true);
-    assert.strictEqual(autoRes.totalMatches, 3);
+    assert.strictEqual(autoRes.totalMatches, 3); // pool decodes to 3 distinct docs
     if (autoRes.facets!.c.type !== 'terms') throw new Error('unreachable');
     assert.strictEqual(autoRes.facets!.c.isApproximate, true);
     assert.deepStrictEqual(
@@ -499,8 +589,10 @@ async function runTests() {
       [['tech', 3]]
     );
 
-    // Same capped pool with force-exact -> full CPU rescan, exact counts.
-    const exactRes = await stubIndex.search('Widget', {
+    // Same capped pool with force-exact -> full CPU rescan: hits still come
+    // from the GPU pool, but facets cover the whole corpus exactly (all four
+    // categories, matching the CPU reference).
+    const exactRes = await simulatedIndex.search('Widget', {
       facets: { c: { type: 'terms', field: 'category' } },
       faceting: 'force-exact',
     });
@@ -512,8 +604,11 @@ async function runTests() {
     assert.deepStrictEqual(exactRes.facets!.c.buckets, cpuRef.facets!.c.buckets);
 
     // Capped pool without overflow flag -> exact over the pool.
-    (stubIndex as unknown as { gpuEngine: unknown }).gpuEngine = stubGpu([0, 1, 2], false);
-    const noOverflowRes = await stubIndex.search('Widget', {
+    program({
+      totalMatches: 3,
+      rows: [0, 1, 2].map((index) => ({ index, score: 500 })),
+    });
+    const noOverflowRes = await simulatedIndex.search('Widget', {
       facets: {
         c: { type: 'terms', field: 'category' },
         p: { type: 'range', field: 'price', ranges: [{ to: 150 }, { from: 150 }] },
@@ -532,6 +627,9 @@ async function runTests() {
       noOverflowRes.facets!.p.buckets.map((b) => b.count),
       [2, 1] // 49.99, 129.50 vs 199.99
     );
+
+    // Disarm so later sections never see stale simulated output.
+    program(null);
 
     // 7c. CPU route stays exact past candidate capacity (9000 docs).
     const N = 9000;
@@ -557,7 +655,7 @@ async function runTests() {
 
     gpuIndex.destroy();
     cpuIndex.destroy();
-    stubIndex.destroy();
+    simulatedIndex.destroy();
     cpuBulk.destroy();
     console.log('   ✅ GPU parity & overflow semantics verified 100%');
   }

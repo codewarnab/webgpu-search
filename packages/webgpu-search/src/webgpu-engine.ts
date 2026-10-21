@@ -1,5 +1,3 @@
-import SUBSTRING_WGSL from './shaders/substring.wgsl';
-import FUZZY_WGSL from './shaders/fuzzy.wgsl';
 import { GpuDevicePool, assertValidPowerPreference } from './gpu-device-pool';
 import {
   checkMemoryBudget,
@@ -12,7 +10,7 @@ import {
 } from './dataset-packing';
 import { normalizeText } from './text-normalization';
 import { compareExactResults } from './exact-scorer';
-import { clampLimit, nowMs, throwIfAborted, abortError, assertValidMode } from './guard';
+import { clampLimit, nowMs, throwIfAborted, assertValidMode } from './guard';
 import {
   PROFILE_TO_ENUM,
   QUERY_TOKENS_MAX,
@@ -28,24 +26,10 @@ import {
 import { normalizeTypoTolerance } from './search/typo-tolerance';
 import { WebGPUSearchError } from './errors';
 import type { AdapterInfo, SearchOptions, SearchResultItem, SearchTimings, SearchMode } from './types';
-
-const BufferUsage = (typeof globalThis !== 'undefined' && 'GPUBufferUsage' in globalThis ? (globalThis as any).GPUBufferUsage : {
-  MAP_READ: 0x0001,
-  MAP_WRITE: 0x0002,
-  COPY_SRC: 0x0004,
-  COPY_DST: 0x0008,
-  INDEX: 0x0010,
-  VERTEX: 0x0020,
-  UNIFORM: 0x0040,
-  STORAGE: 0x0080,
-  INDIRECT: 0x0100,
-  QUERY_RESOLVE: 0x0200
-});
-
-const MapMode = (typeof globalThis !== 'undefined' && 'GPUMapMode' in globalThis ? (globalThis as any).GPUMapMode : {
-  READ: 0x0001,
-  WRITE: 0x0002
-});
+import { createGpuEngineState } from './gpu/state';
+import { GpuBufferManager } from './gpu/buffers';
+import { GpuPipelineManager } from './gpu/pipelines';
+import { GpuDispatcher, WORKGROUP_SIZE } from './gpu/dispatch';
 
 export interface DatasetLike {
   // `strings?` optional: search-index enriches `text` from its own `items`, so
@@ -88,24 +72,17 @@ export interface ColdSearchResult extends WebGPUSearchResult {
   coldTotalMs: number;
 }
 
+/** Search-engine facade over the gpu/ managers: device pool, CPU dataset metadata, mutex, fail-closed gates. */
 export class WebGPUEngine {
-  private device: GPUDevice | null = null;
+  private readonly state = createGpuEngineState();
+  private readonly pipelines = new GpuPipelineManager(this.state);
+  private readonly buffers = new GpuBufferManager(this.state);
+  private readonly dispatch = new GpuDispatcher(this.state);
+
   private isSharedDevice: boolean = false;
   private deviceReleased: boolean = false;
-  private substringPipeline: GPUComputePipeline | null = null;
-  private fuzzyPipeline: GPUComputePipeline | null = null;
 
-  private offsetsBuffer: GPUBuffer | null = null;
-  private recordsBuffer: GPUBuffer | null = null;
-  private uniformBuffer: GPUBuffer | null = null;
-  private queryBuffer: GPUBuffer | null = null;
-  private outputBuffer: GPUBuffer | null = null;
-  private stagingBuffer: GPUBuffer | null = null;
-
-  private querySet: GPUQuerySet | null = null;
-  private queryResolveBuffer: GPUBuffer | null = null;
-  private queryStagingBuffer: GPUBuffer | null = null;
-
+  // Dataset CPU metadata (engine-owned; buffer writes flow through managers).
   private currentDatasetSize: number = 0;
   private currentStrings: string[] | null = null;
   private currentTokens: Uint32Array | null = null;
@@ -114,45 +91,32 @@ export class WebGPUEngine {
   private profileId: string = 'unicode-default';
   private unicodeVersion: string = UNICODE_VERSION;
   private scoringVersion: string = SCORING_VERSION;
-  private candidateCapacity: number = 8192;
-  private outputByteLength: number = 0;
   private searchMutex: Promise<any> = Promise.resolve();
-  private generation: number = 0;
 
   public adapterInfo: AdapterInfo | null = null;
 
   get isReady(): boolean {
-    return this.device !== null;
+    return this.state.device !== null;
   }
 
   get currentSize(): number {
     return this.currentDatasetSize;
   }
 
-  private allocatedOffsetsByteLength: number = 0;
-  private allocatedRecordsByteLength: number = 0;
-
   get allocatedOffsetsBytes(): number {
-    return this.allocatedOffsetsByteLength;
+    return this.state.allocatedOffsetsByteLength;
   }
 
   get allocatedRecordsBytes(): number {
-    return this.allocatedRecordsByteLength;
+    return this.state.allocatedRecordsByteLength;
   }
 
   get vramAllocatedBytes(): number {
-    return this.allocatedOffsetsByteLength + this.allocatedRecordsByteLength;
+    return this.state.allocatedOffsetsByteLength + this.state.allocatedRecordsByteLength;
   }
 
   canFitHeadroom(requiredRows: number, requiredTokens: number): boolean {
-    const needOffsets = (requiredRows + 1) * 4;
-    const needRecords = requiredTokens * 4;
-    return (
-      this.offsetsBuffer !== null &&
-      this.recordsBuffer !== null &&
-      needOffsets <= this.allocatedOffsetsByteLength &&
-      needRecords <= this.allocatedRecordsByteLength
-    );
+    return this.buffers.hasDatasetBufferCapacity(requiredRows, requiredTokens);
   }
 
   isHeadroomExhausted(requiredRows: number, requiredTokens: number): boolean {
@@ -165,9 +129,10 @@ export class WebGPUEngine {
     // Guard re-entry: dispose existing GPU buffers AND release the previous
     // device reference before re-acquiring, so init() twice leaks neither the
     // first buffer set nor a pool refcount (benchmark/power users).
-    if (this.device) {
-      this.generation++;
-      this.disposeGpuBuffers();
+    if (this.state.device) {
+      this.state.generation++;
+      this.buffers.disposeForReinit();
+      this.pipelines.drop();
       this.releaseCurrentDevice();
     }
     // Normalize overloads: bare GPUDevice (legacy) or options bag.
@@ -191,7 +156,7 @@ export class WebGPUEngine {
     }
     if (injected) {
       assertValidPowerPreference(powerPreference);
-      this.device = injected;
+      this.state.device = injected;
       this.isSharedDevice = false;
       this.deviceReleased = false;
       this.adapterInfo = {
@@ -217,7 +182,7 @@ export class WebGPUEngine {
       return false;
     }
 
-    this.device = acquired.device;
+    this.state.device = acquired.device;
     this.adapterInfo = acquired.adapterInfo;
     this.isSharedDevice = acquired.isShared;
     this.deviceReleased = false;
@@ -241,130 +206,42 @@ export class WebGPUEngine {
 
   /** Release the held device reference exactly once (deviceReleased guard). */
   private releaseCurrentDevice(): void {
-    if (this.device && !this.deviceReleased) {
+    if (this.state.device && !this.deviceReleased) {
       this.deviceReleased = true;
       try {
-        GpuDevicePool.releaseDevice(this.device, this.isSharedDevice);
+        GpuDevicePool.releaseDevice(this.state.device, this.isSharedDevice);
       } catch {}
     }
-    this.device = null;
+    this.state.device = null;
   }
 
   private attachLostHandler(): void {
-    const dev = this.device as unknown as { lost?: Promise<any> } | null;
+    const dev = this.state.device as unknown as { lost?: Promise<any> } | null;
     if (!dev?.lost?.then) return;
     // Capture identity: re-init() attaches a new handler per device; a stale
     // handler for a previous device must not tear down the live engine.
-    const mine = this.device;
+    const mine = this.state.device;
     dev.lost.then(() => {
-      if (this.device !== mine) return;
+      if (this.state.device !== mine) return;
       // Device loss: null handles, mark unready. Shared refCount decremented
       // once (deviceReleased guard) so live siblings keep the device.
-      this.substringPipeline = this.fuzzyPipeline = null;
-      this.offsetsBuffer = this.recordsBuffer = this.uniformBuffer = this.queryBuffer = null;
-      this.outputBuffer = this.stagingBuffer = this.queryResolveBuffer = this.queryStagingBuffer = null;
-      this.querySet = null;
+      this.pipelines.drop();
+      this.buffers.dropDeviceRefs();
       this.releaseCurrentDevice();
-      this.generation++;
+      this.state.generation++;
     }, () => {});
   }
 
-  private disposeGpuBuffers(): void {
-    for (const b of [this.offsetsBuffer, this.recordsBuffer, this.uniformBuffer, this.queryBuffer, this.outputBuffer, this.stagingBuffer, this.queryResolveBuffer, this.queryStagingBuffer]) {
-      try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
-      try { (b as GPUBuffer | null)?.destroy(); } catch {}
-    }
-    this.offsetsBuffer = this.recordsBuffer = this.uniformBuffer = this.queryBuffer = null;
-    this.outputBuffer = this.stagingBuffer = this.queryResolveBuffer = this.queryStagingBuffer = null;
-    if (this.querySet) {
-      try { this.querySet.destroy(); } catch {}
-      this.querySet = null;
-    }
-    this.substringPipeline = this.fuzzyPipeline = null;
-    this.allocatedOffsetsByteLength = 0;
-    this.allocatedRecordsByteLength = 0;
-  }
-
   private async setupPipelinesAndBuffers(): Promise<boolean> {
-    if (!this.device) return false;
+    if (!this.state.device) return false;
 
-    const substringModule = this.device.createShaderModule({
-      label: 'substring',
-      code: SUBSTRING_WGSL
-    });
+    // Verbatim original order: substring module → fuzzy module → substring pipeline → fuzzy pipeline → uniform → query → timestamps → output buffers (mock/spy compatibility).
+    await this.pipelines.setup();
 
-    const fuzzyModule = this.device.createShaderModule({
-      label: 'fuzzy',
-      code: FUZZY_WGSL
-    });
+    this.buffers.createFixedBuffers();
+    this.buffers.createTimestampResources();
 
-    const createPipeline = async (desc: GPUComputePipelineDescriptor) => {
-      if (typeof (this.device as any).createComputePipelineAsync === 'function') {
-        return await this.device!.createComputePipelineAsync(desc);
-      }
-      return (this.device as any).createComputePipeline(desc);
-    };
-
-    this.substringPipeline = await createPipeline({
-      label: 'substring',
-      layout: 'auto',
-      compute: {
-        module: substringModule,
-        entryPoint: 'main'
-      }
-    });
-
-    this.fuzzyPipeline = await createPipeline({
-      label: 'fuzzy',
-      layout: 'auto',
-      compute: {
-        module: fuzzyModule,
-        entryPoint: 'main'
-      }
-    });
-
-    // Uniform header: 32 B, 16 B-aligned. Query buffer: 512 B persistent
-    // storage (QUERY_TOKENS_MAX*4, min 16 B), written per query.
-    this.uniformBuffer = this.device.createBuffer({
-      label: 'Uniform Buffer',
-      size: 32,
-      usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST
-    });
-
-    // Persistent storage query buffer: QUERY_TOKENS_MAX * 4 = 512 B, min 16 B,
-    // written per query via queue.writeBuffer, destroyed under mutex.
-    this.queryBuffer = this.device.createBuffer({
-      label: 'Query Buffer',
-      size: Math.max(QUERY_TOKENS_MAX * 4, 16),
-      usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
-    });
-
-    if (this.device.features && this.device.features.has('timestamp-query')) {
-      try {
-        this.querySet = this.device.createQuerySet({
-          label: 'ts-query',
-          type: 'timestamp',
-          count: 2
-        });
-        this.queryResolveBuffer = this.device.createBuffer({
-          label: 'ts-resolve',
-          size: 16,
-          usage: BufferUsage.QUERY_RESOLVE | BufferUsage.COPY_SRC
-        });
-        this.queryStagingBuffer = this.device.createBuffer({
-          label: 'ts-staging',
-          size: 16,
-          usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST
-        });
-      } catch (qErr) {
-        console.warn('timestamp alloc failed:', qErr);
-        this.querySet = null;
-        this.queryResolveBuffer = null;
-        this.queryStagingBuffer = null;
-      }
-    }
-
-    this.allocateOutputBuffers(this.candidateCapacity);
+    this.buffers.allocateOutputBuffers(this.state.candidateCapacity);
     return true;
   }
 
@@ -372,7 +249,7 @@ export class WebGPUEngine {
    * Current candidate capacity allocated for the output buffer.
    */
   get currentCandidateCapacity(): number {
-    return this.candidateCapacity;
+    return this.state.candidateCapacity;
   }
 
   /**
@@ -380,50 +257,11 @@ export class WebGPUEngine {
    * (clamped between 8,192 and 32,768).
    */
   ensureCandidateCapacity(capacity: number): void {
-    const safeCap = typeof capacity === 'number' && Number.isFinite(capacity) && capacity > 0
-      ? Math.floor(capacity)
-      : 8192;
-    const clamped = Math.min(32768, Math.max(8192, safeCap));
-    if (clamped !== this.candidateCapacity || !this.outputBuffer) {
-      this.candidateCapacity = clamped;
-      if (this.device) {
-        this.allocateOutputBuffers(clamped);
-      }
-    }
+    this.buffers.ensureCandidateCapacity(capacity);
   }
 
   allocateOutputBuffers(candidateCapacity: number = 8192): void {
-    if (!this.device) return;
-    const safeCap = typeof candidateCapacity === 'number' && Number.isFinite(candidateCapacity) && candidateCapacity > 0
-      ? Math.floor(candidateCapacity)
-      : 8192;
-    const clampedCap = Math.min(32768, Math.max(safeCap, 8192));
-    if (this.outputBuffer && clampedCap <= this.candidateCapacity && this.outputByteLength >= 8 + clampedCap * 8) return;
-    this.candidateCapacity = clampedCap;
-    this.outputByteLength = 8 + this.candidateCapacity * 8;
-
-    // Advance generation to discard any in-flight reads against old staging buffers
-    this.generation++;
-
-    // Unmap-before-destroy (symmetric with destroy()): destroying a mapped
-    // buffer throws / leaves torn state on some implementations.
-    for (const b of [this.outputBuffer, this.stagingBuffer]) {
-      try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
-    }
-    if (this.outputBuffer) this.outputBuffer.destroy();
-    if (this.stagingBuffer) this.stagingBuffer.destroy();
-
-    this.outputBuffer = this.device.createBuffer({
-      label: 'Output Buffer',
-      size: this.outputByteLength,
-      usage: BufferUsage.STORAGE | BufferUsage.COPY_SRC | BufferUsage.COPY_DST
-    });
-
-    this.stagingBuffer = this.device.createBuffer({
-      label: 'Staging Buffer',
-      size: this.outputByteLength,
-      usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST
-    });
+    this.buffers.allocateOutputBuffers(candidateCapacity);
   }
 
   private queued<T>(fn: () => Promise<T>): Promise<T> {
@@ -509,7 +347,7 @@ export class WebGPUEngine {
     dataset: EngineDataset,
     options?: { rowCapacity?: number; tokenCapacity?: number; growthFactor?: number }
   ): Promise<{ uploadTimeMs: number }> {
-    this.generation++;
+    this.state.generation++;
     const { packed, strings } = this.resolvePacked(dataset);
     const count = packed.rowCount;
 
@@ -534,7 +372,7 @@ export class WebGPUEngine {
     this.unicodeVersion = packed.unicodeVersion;
     this.scoringVersion = packed.scoringVersion;
 
-    if (!this.device) {
+    if (!this.state.device) {
       Object.assign(this, {
         currentDatasetSize: prev.size,
         currentStrings: prev.strings,
@@ -554,7 +392,7 @@ export class WebGPUEngine {
     // to check would churn GPU contexts (rejected: acquire-always), while
     // allocation-time-only would OOM mid-load leaving half-state (rejected).
     const avgBytes = count === 0 ? 0 : packed.recordsByteLength / count;
-    const budget = checkMemoryBudget(count, avgBytes, this.device, this.candidateCapacity);
+    const budget = checkMemoryBudget(count, avgBytes, this.state.device, this.state.candidateCapacity);
     if (!budget.allowed) {
       Object.assign(this, {
         currentDatasetSize: prev.size,
@@ -574,11 +412,11 @@ export class WebGPUEngine {
 
     const targetOffsets = computeClampedHeadroomBytes(
       Math.max((options?.rowCapacity !== undefined ? options.rowCapacity + 1 : count + 1) * 4, reqOffsets),
-      { growthFactor: options?.growthFactor, device: this.device }
+      { growthFactor: options?.growthFactor, device: this.state.device }
     );
     const targetRecords = computeClampedHeadroomBytes(
       Math.max((options?.tokenCapacity !== undefined ? options.tokenCapacity : packed.tokenCount) * 4, reqRecords),
-      { growthFactor: options?.growthFactor, device: this.device }
+      { growthFactor: options?.growthFactor, device: this.state.device }
     );
 
     const allocOffsets = Math.max(reqOffsets, targetOffsets);
@@ -588,7 +426,7 @@ export class WebGPUEngine {
     // actual corpus above the limit can land here. Throw the budget error
     // (callers fall back to CPU) instead of creating an oversized binding
     // that fails validation and silently yields 0 results.
-    const bindingLimit = resolveStorageBufferLimit(this.device);
+    const bindingLimit = resolveStorageBufferLimit(this.state.device);
     if (allocOffsets > bindingLimit || allocRecords > bindingLimit) {
       Object.assign(this, {
         currentDatasetSize: prev.size,
@@ -605,39 +443,9 @@ export class WebGPUEngine {
     }
 
     const t0 = nowMs();
-    let newOffsetsBuffer: GPUBuffer | null = null;
-    let newRecordsBuffer: GPUBuffer | null = null;
-
     try {
-      newOffsetsBuffer = this.device.createBuffer({
-        label: `Offsets (${count})`,
-        size: allocOffsets,
-        usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
-      });
-
-      newRecordsBuffer = this.device.createBuffer({
-        label: `Records (${count})`,
-        size: allocRecords,
-        usage: BufferUsage.STORAGE | BufferUsage.COPY_DST
-      });
-
-      this.device.queue.writeBuffer(newOffsetsBuffer, 0, packed.offsetsBufferData);
-      if (packed.recordsByteLength > 0) {
-        this.device.queue.writeBuffer(newRecordsBuffer, 0, packed.recordsBufferData);
-      }
-
-      // Safe swap: only unmap/destroy previous buffers after new allocations succeed
-      for (const b of [this.offsetsBuffer, this.recordsBuffer]) {
-        try { (b as GPUBuffer | null)?.unmap?.(); } catch {}
-        try { b?.destroy(); } catch {}
-      }
-      this.offsetsBuffer = newOffsetsBuffer;
-      this.recordsBuffer = newRecordsBuffer;
-      this.allocatedOffsetsByteLength = allocOffsets;
-      this.allocatedRecordsByteLength = allocRecords;
+      this.buffers.swapDatasetBuffers(count, packed, allocOffsets, allocRecords);
     } catch (allocErr) {
-      try { newOffsetsBuffer?.destroy(); } catch {}
-      try { newRecordsBuffer?.destroy(); } catch {}
       // Restore previous CPU metadata so stats don't lie after OOM.
       Object.assign(this, {
         currentDatasetSize: prev.size,
@@ -663,24 +471,9 @@ export class WebGPUEngine {
     newTotalRows: number
   ): Promise<void> {
     return this.queued(async () => {
-      if (!this.device || !this.offsetsBuffer || !this.recordsBuffer) {
-        throw new Error('[webgpu-search] Cannot append rows: GPU buffers not initialized.');
-      }
       const prevRows = this.currentDatasetSize;
       const prevTokens = this.currentTokens ? this.currentTokens.length : 0;
-      const needOffsetsBytes = (prevRows + 1) * 4 + newOffsets.byteLength;
-      const needRecordsBytes = prevTokens * 4 + newTokens.byteLength;
-      if (needOffsetsBytes > this.allocatedOffsetsByteLength || needRecordsBytes > this.allocatedRecordsByteLength) {
-        throw new Error('[webgpu-search] appendRows exceeds allocated buffer headroom.');
-      }
-      this.generation++;
-
-      // Write new offsets: row offsets starting at (prevRows + 1) * 4
-      this.device.queue.writeBuffer(this.offsetsBuffer, (prevRows + 1) * 4, newOffsets);
-      // Write new tokens at prevTokens * 4
-      if (newTokens.byteLength > 0) {
-        this.device.queue.writeBuffer(this.recordsBuffer, prevTokens * 4, newTokens);
-      }
+      this.buffers.writeAppendedRows(prevRows, prevTokens, newTokens, newOffsets);
 
       const combinedTokens = new Uint32Array(prevTokens + newTokens.length);
       if (this.currentTokens) combinedTokens.set(this.currentTokens, 0);
@@ -698,107 +491,6 @@ export class WebGPUEngine {
 
   async search(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
     return this.queued(() => this.searchInternal(query, options));
-  }
-
-  /**
-   * Zero the atomic counter fallback for Safari without `clearBuffer`.
-   * 8-byte zero write (count + _pad0), queue-ordered before dispatch.
-   * Never skip the reset (stale count corruption). No scoring change.
-   */
-  private writeZeroCounterFallback(): void {
-    this.device!.queue.writeBuffer(this.outputBuffer!, 0, new Uint8Array(8));
-  }
-
-  /**
-   * Single-pass dispatch (extracted). Fast path — keeps timestamps.
-   * Encodes counter reset + compute pass + timestamp resolve + readback
-   * copy in one command buffer. No scoring change.
-   */
-  private dispatchSinglePass(
-    pipeline: GPUComputePipeline,
-    bg: GPUBindGroup,
-    totalWorkgroups: number
-  ): void {
-    const passDesc: GPUComputePassDescriptor = {
-      label: 'search-pass'
-    };
-    if (this.querySet) {
-      (passDesc as any).timestampWrites = {
-        querySet: this.querySet,
-        beginningOfPassWriteIndex: 0,
-        endOfPassWriteIndex: 1
-      };
-    }
-    const enc = this.device!.createCommandEncoder({ label: 'search' });
-
-    if (typeof (enc as any).clearBuffer === 'function') {
-      enc.clearBuffer(this.outputBuffer!, 0, this.outputByteLength);
-    } else {
-      // No clearBuffer: encode the zero via copy path — submit the
-      // queue write before the compute submit (serial ordering).
-      this.writeZeroCounterFallback();
-    }
-
-    const pass = enc.beginComputePass(passDesc);
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, bg);
-    pass.dispatchWorkgroups(totalWorkgroups);
-    pass.end();
-
-    if (this.querySet && this.queryResolveBuffer && this.queryStagingBuffer) {
-      enc.resolveQuerySet(this.querySet, 0, 2, this.queryResolveBuffer, 0);
-      enc.copyBufferToBuffer(this.queryResolveBuffer, 0, this.queryStagingBuffer, 0, 16);
-    }
-
-    enc.copyBufferToBuffer(this.outputBuffer!, 0, this.stagingBuffer!, 0, this.outputByteLength);
-    this.device!.queue.submit([enc.finish()]);
-  }
-
-  /**
-   * Chunked dispatch (extracted). When ceil(rows/128) exceeds the device
-   * dimension limit, each chunk re-writes the uniform (_pad.x = base row)
-   * and submits its own pass; the shared atomic counter accumulates.
-   * Queue-ordering dependency: WebGPU guarantees serial queue execution,
-   * so each dispatch samples only prior uniform writes (chunk counts are
-   * tiny in practice: step ≈ 8.4M rows/chunk). Timestamps skipped (null).
-   * No scoring change.
-   */
-  private dispatchChunked(
-    pipeline: GPUComputePipeline,
-    bg: GPUBindGroup,
-    udata: ArrayBuffer,
-    U32: Uint32Array,
-    maxDim: number,
-    workgroupSize: number
-  ): void {
-    const step = maxDim * workgroupSize;
-    const clr = this.device!.createCommandEncoder({ label: 'clear' });
-    if (typeof (clr as any).clearBuffer === 'function') {
-      (clr as any).clearBuffer(this.outputBuffer!, 0, this.outputByteLength);
-      this.device!.queue.submit([clr.finish()]);
-    } else {
-      this.writeZeroCounterFallback();
-    }
-    let base = 0;
-    let left = this.currentDatasetSize;
-    while (left > 0) {
-      const n = left > step ? step : left;
-      const wgs = Math.ceil(n / workgroupSize);
-      U32[4] = base;
-      this.device!.queue.writeBuffer(this.uniformBuffer!, 0, udata);
-      const chunkEnc = this.device!.createCommandEncoder({ label: 'chunk' });
-      const chunkPass = chunkEnc.beginComputePass({ label: 'chunk-pass' });
-      chunkPass.setPipeline(pipeline);
-      chunkPass.setBindGroup(0, bg);
-      chunkPass.dispatchWorkgroups(wgs);
-      chunkPass.end();
-      this.device!.queue.submit([chunkEnc.finish()]);
-      base += n;
-      left -= n;
-    }
-    const cp = this.device!.createCommandEncoder({ label: 'copy' });
-    cp.copyBufferToBuffer(this.outputBuffer!, 0, this.stagingBuffer!, 0, this.outputByteLength);
-    this.device!.queue.submit([cp.finish()]);
   }
 
   private async searchInternal(query: string, options: SearchOptions): Promise<WebGPUSearchResult> {
@@ -862,7 +554,7 @@ export class WebGPUEngine {
       throw new ProfileMismatchError(!this.normalized, options.caseSensitive);
     }
 
-    if (!this.device || !this.recordsBuffer || !this.offsetsBuffer || !this.uniformBuffer || !this.queryBuffer || !this.outputBuffer || !this.stagingBuffer || !this.substringPipeline || !this.fuzzyPipeline) {
+    if (!this.buffers.isSearchReady()) {
       return noHits(query);
     }
 
@@ -872,19 +564,18 @@ export class WebGPUEngine {
       return noHits(query);
     }
 
-    const pipeline = mode === 'fuzzy' ? this.fuzzyPipeline! : this.substringPipeline!;
+    const pipeline = mode === 'fuzzy' ? this.state.fuzzyPipeline! : this.state.substringPipeline!;
     const caseSensitive = qcs;
     const queryLen = nq.tokens.length;
 
     const totalStart = nowMs();
 
     const tQueryStart = nowMs();
-    this.device.queue.writeBuffer(this.queryBuffer, 0, nq.tokens);
     const udata = new ArrayBuffer(32);
     const U32 = new Uint32Array(udata);
     U32[0] = this.currentDatasetSize;
     U32[1] = queryLen;
-    U32[2] = this.candidateCapacity;
+    U32[2] = this.state.candidateCapacity;
     // flagsAndProfile: caseSensitive:1b + normalized:1b + profile:6b + unicode:8b
     // + scoring:8b. Reserved for harness/debug — shaders are pure-`==` by
     // construction and do not read it (host enforces ProfileMismatchError).
@@ -896,24 +587,14 @@ export class WebGPUEngine {
     U32[5] = 0;
     U32[6] = 0;
     U32[7] = 0;
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, udata);
+    this.dispatch.uploadSearchRequest(nq.tokens, udata);
     const queryUploadMs = nowMs() - tQueryStart;
 
     throwIfAborted(options.signal);
 
     const tDispatchStart = nowMs();
 
-    const bg = this.device.createBindGroup({
-      label: 'search-bg',
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: { buffer: this.offsetsBuffer } },
-        { binding: 2, resource: { buffer: this.recordsBuffer } },
-        { binding: 3, resource: { buffer: this.queryBuffer } },
-        { binding: 4, resource: { buffer: this.outputBuffer } }
-      ]
-    });
+    const bg = this.dispatch.createSearchBindGroup(pipeline);
 
     // Chunked dispatch: when ceil(rows/128) exceeds the device dimension
     // limit, each chunk re-writes the uniform (_pad.x = base row) and submits
@@ -921,18 +602,18 @@ export class WebGPUEngine {
     // timestamps. Queue-ordering dependency: WebGPU guarantees serial
     // queue execution, so each dispatch samples only prior uniform writes
     // (chunk counts are tiny in practice: step ≈ 8.4M rows/chunk).
-    const md = (this.device.limits as unknown as Record<string, unknown>).maxComputeWorkgroupsPerDimension;
+    const md = (this.state.device!.limits as unknown as Record<string, unknown>).maxComputeWorkgroupsPerDimension;
     const maxDim = typeof md === 'number' && Number.isFinite(md) && md >= 1 ? Math.floor(md) : 65535;
-    const workgroupSize = 128;
+    const workgroupSize = WORKGROUP_SIZE;
     const totalWorkgroups = Math.ceil(this.currentDatasetSize / workgroupSize);
 
     // searchInternal only routes; single vs chunked lives above.
     // Chunked corpora exceed any latency budget; timestamps skipped (null).
     let skipTimestamps = false;
     if (totalWorkgroups <= maxDim) {
-      this.dispatchSinglePass(pipeline, bg, totalWorkgroups);
+      this.dispatch.dispatchSinglePass(pipeline, bg, totalWorkgroups);
     } else {
-      this.dispatchChunked(pipeline, bg, udata, U32, maxDim, workgroupSize);
+      this.dispatch.dispatchChunked(pipeline, bg, udata, U32, maxDim, this.currentDatasetSize);
       skipTimestamps = true;
     }
     const encodeSubmitMs = nowMs() - tDispatchStart;
@@ -952,72 +633,37 @@ export class WebGPUEngine {
     // destroy-while-mapped error. mapAsync rejection itself (e.g. destroy
     // raced it via unmap) also maps to AbortError when the epoch moved, so
     // hybrid doesn't misclassify it as fallback-eligible GPU failure.
-    const gen = this.generation;
-    const stagingBuffer = this.stagingBuffer;
-    const tsStaging = this.queryStagingBuffer;
+    const gen = this.state.generation;
+    const stagingBuffer = this.state.stagingBuffer!;
+    const tsStaging = this.state.queryStagingBuffer;
 
     if (tsStaging && !skipTimestamps) {
-      try {
-        await tsStaging.mapAsync(MapMode.READ);
-        if (gen === this.generation) {
-          const tu = new BigUint64Array(tsStaging.getMappedRange());
-          if (tu[1] >= (tu[0]) && (tu[0]) > 0n) {
-            gpuExecutionMs = Number((tu[1]) - (tu[0])) / 1_000_000;
-          }
-        }
-      } catch (tsErr) {
-        if (gen === this.generation) console.warn('timestamp read failed:', tsErr);
-      } finally {
-        try { tsStaging.unmap(); } catch {}
-      }
+      gpuExecutionMs = await this.dispatch.readTimestampGpuMs(tsStaging, gen);
     }
 
     // Torn down / reallocated during the timestamp await.
-    if (gen !== this.generation || !this.device || this.stagingBuffer !== stagingBuffer) {
-      throw abortError();
-    }
+    this.dispatch.assertStagingLive(stagingBuffer, gen);
 
     let totalMatches = 0;
     let candidateCount = 0;
     let hasOverflow = false;
     let candidates: SearchResultItem[] = [];
 
-    try {
-      await stagingBuffer.mapAsync(MapMode.READ);
-    } catch (mapErr) {
-      if (gen !== this.generation) {
-        try { stagingBuffer.unmap(); } catch {}
-        throw abortError();
-      }
-      throw mapErr;
-    }
+    await this.dispatch.mapStagedOutput(stagingBuffer, gen);
     try {
       // Re-check epoch + liveness after the await: destroy() nulls
       // device/buffers, reallocation swaps them.
-      if (gen !== this.generation || !this.device || this.stagingBuffer !== stagingBuffer) {
-        throw abortError();
-      }
+      this.dispatch.assertStagingLive(stagingBuffer, gen);
       throwIfAborted(options.signal);
-      const arrayBuffer = stagingBuffer.getMappedRange();
-      const u32Read = new Uint32Array(arrayBuffer);
-      const i32Read = new Int32Array(arrayBuffer);
-
-      totalMatches = u32Read[0];
-      candidateCount = Math.min(totalMatches, this.candidateCapacity);
-      hasOverflow = totalMatches > this.candidateCapacity;
-
-      candidates = new Array(candidateCount);
-      for (let i = 0; i < candidateCount; i++) {
-        const index = u32Read[2 + i * 2];
-        const score = i32Read[3 + i * 2];
-        // Token-only datasets carry no strings: resolve `text` to `''`
-        // (documented degradation; see DatasetLike).
-        candidates[i] = {
-          index,
-          score,
-          text: this.currentStrings ? (this.currentStrings[index] ?? '') : ''
-        };
-      }
+      const decoded = this.dispatch.readMappedOutput(
+        stagingBuffer,
+        this.state.candidateCapacity,
+        (index: number) => (this.currentStrings ? (this.currentStrings[index] ?? '') : '')
+      );
+      totalMatches = decoded.totalMatches;
+      candidateCount = decoded.candidateCount;
+      hasOverflow = decoded.hasOverflow;
+      candidates = decoded.candidates;
     } finally {
       try { stagingBuffer.unmap(); } catch {}
     }
@@ -1067,25 +713,13 @@ export class WebGPUEngine {
     // readback site; rejected: Promise.race abandons the mapping). Unmap
     // (never destroy a mapped buffer), destroy, then park a barrier on the
     // mutex so queued ops observe the torn-down state.
-    this.generation++;
-    try { this.stagingBuffer?.unmap(); } catch {}
-    try { this.queryStagingBuffer?.unmap(); } catch {}
-    const bufs = [this.offsetsBuffer, this.recordsBuffer, this.uniformBuffer, this.queryBuffer, this.outputBuffer, this.stagingBuffer, this.queryResolveBuffer, this.queryStagingBuffer];
-    for (const b of bufs) { try { b?.destroy(); } catch {} }
-    this.offsetsBuffer = this.recordsBuffer = this.uniformBuffer = this.queryBuffer = null;
-    this.outputBuffer = this.stagingBuffer = this.queryResolveBuffer = this.queryStagingBuffer = null;
-    if (this.querySet) {
-      try { this.querySet.destroy(); } catch {}
-      this.querySet = null;
-    }
-    this.substringPipeline = null;
-    this.fuzzyPipeline = null;
+    this.state.generation++;
+    this.buffers.destroyForTeardown();
+    this.pipelines.drop();
     this.currentStrings = null;
     this.currentTokens = null;
     this.currentOffsets = null;
     this.currentDatasetSize = 0;
-    this.allocatedOffsetsByteLength = 0;
-    this.allocatedRecordsByteLength = 0;
     this.releaseCurrentDevice();
     const p = this.searchMutex.then(() => {}, () => {});
     this.searchMutex = p.catch(() => {});
