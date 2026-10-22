@@ -102,12 +102,48 @@ for (const key of ['profileId', 'scoringVersion', 'cpuScorer', 'fallbackReason',
   if (!types.includes(key)) fail(`SearchResponse echo key missing in src/types.ts: ${key}`);
 }
 
-// --- 5. limit/maxResults alias ----------------------------------------------
-const guardFiles = [join(pkgDir, 'src', 'search-index.ts'), join(pkgDir, 'src', 'document-index.ts'), join(pkgDir, 'src', 'webgpu-engine.ts')];
-for (const f of guardFiles) {
-  const body = read(f);
-  if (!body.includes('options.limit ?? options.maxResults ?? 50') && !body.includes('limit ?? maxResults ?? 50')) {
-    fail(`limit/maxResults alias broken in ${f} (expected "limit ?? maxResults ?? 50" with limit precedence).`);
+// --- 5. limit/maxResults alias (public behavioral check) ---------------------
+// Frozen contract: default 50, maxResults honored, limit honored, and limit
+// wins when both are set. Checked at RUNTIME through both public gates
+// (SearchIndex + DocumentIndex) instead of grepping source files, so the alias
+// expression may move between internal modules (e.g. document/query.ts) with
+// the modular refactor without breaking the gate; breaking the behavior does.
+type AliasSearchable = {
+  search(query: string, options?: Record<string, unknown>): Promise<{ results: unknown[] }>;
+  destroy?(): void;
+};
+{
+  const aliasVecs: Array<[Record<string, unknown>, number, string]> = [
+    [{}, 50, 'default clamps to 50'],
+    [{ maxResults: 7 }, 7, 'maxResults alias honored'],
+    [{ limit: 3 }, 3, 'limit honored'],
+    [{ limit: 2, maxResults: 9 }, 2, 'limit precedes maxResults'],
+  ];
+  const gates: Array<[string, AliasSearchable]> = [];
+  const si = await ((mod as Record<string, unknown>)['SearchIndex'] as {
+    create(items: unknown[], options?: Record<string, unknown>): Promise<AliasSearchable>;
+  }).create(
+    Array.from({ length: 60 }, (_, i) => `aliasdoc-${i}`),
+    { preferGpu: false }
+  );
+  gates.push(['SearchIndex', si]);
+  const di = await ((mod as Record<string, unknown>)['DocumentIndex'] as {
+    create<T>(records: T[], options: Record<string, unknown>): Promise<AliasSearchable>;
+  }).create(
+    Array.from({ length: 60 }, (_, i) => ({ id: i, title: `aliasdoc-${i} note` })),
+    { fields: [{ name: 'title' }], preferGpu: false }
+  );
+  gates.push(['DocumentIndex', di]);
+  for (const [gate, searcher] of gates) {
+    for (const [opts, want, label] of aliasVecs) {
+      const res = await searcher.search('aliasdoc', { ...opts, mode: 'substring' });
+      if (res.results.length !== want) {
+        fail(`${gate} limit/maxResults alias broken: ${label} (got ${res.results.length}, want ${want})`);
+      }
+    }
+  }
+  for (const [, searcher] of gates) {
+    if (typeof searcher.destroy === 'function') searcher.destroy();
   }
 }
 if (!types.includes('maxResults?: number')) fail('SearchOptions.maxResults alias missing in src/types.ts.');

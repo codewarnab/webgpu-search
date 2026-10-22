@@ -93,8 +93,8 @@ async function runM2Tests() {
   console.log('2. Testing field-stratified packing priority (descending weights)...');
   {
     const items: ArticleDoc[] = [
-      { id: '1', title: 'Alpha', content: 'Beta', tags: ['Gamma'] },
-      { id: '2', title: 'Delta', content: 'Epsilon', tags: ['Zeta'] }
+      { id: '1', title: 'Hi', content: 'Beta Gamma Delta', tags: ['Uno Duo'] },
+      { id: '2', title: 'Hi', content: 'Beta Gamma Delta', tags: ['Uno Duo'] }
     ];
 
     // Give 'content' highest weight (3.0), 'tags' (2.0), 'title' (0.5)
@@ -113,20 +113,20 @@ async function runM2Tests() {
     assert.strictEqual(stats.docCount, 2);
     assert.strictEqual(stats.rowCount, 6); // 2 docs * 3 fields
 
-    // Inspect internal sortedFields: content (3.0), tags (2.0), title (0.5)
-    const sorted = (index as any).sortedFields;
-    assert.strictEqual(sorted[0].name, 'content');
-    assert.strictEqual(sorted[1].name, 'tags');
-    assert.strictEqual(sorted[2].name, 'title');
+    // Stratification verified through the public getter surface instead of
+    // private state: `getSortedFields()` reports the descending weight order
+    // (content 3.0, tags 2.0, title 0.5).
+    const sorted = index.getSortedFields().map((f) => f.name);
+    assert.deepStrictEqual(sorted, ['content', 'tags', 'title']);
 
-    // Inspect internal rowToFieldIndex: rows 0,1 -> field 0 (content); rows 2,3 -> field 1 (tags); rows 4,5 -> field 2 (title)
-    const rowToField = (index as any).rowToFieldIndex;
-    assert.strictEqual(rowToField[0], 0);
-    assert.strictEqual(rowToField[1], 0);
-    assert.strictEqual(rowToField[2], 1);
-    assert.strictEqual(rowToField[3], 1);
-    assert.strictEqual(rowToField[4], 2);
-    assert.strictEqual(rowToField[5], 2);
+    // Row stratification verified via `getRowTokens()`: each row holds one
+    // token stream per (doc, field), and each field uses a distinct folded
+    // text length so a row's length identifies its field: content rows
+    // (weight 3.0) are packed first ('Beta Gamma Delta' = 16), tags rows
+    // (weight 2.0) next ('Uno Duo' = 7), title rows (weight 0.5) last
+    // ('Hi' = 2).
+    const rowLengths = index.getRowTokens().map((row) => row.length);
+    assert.deepStrictEqual(rowLengths, [16, 16, 7, 7, 2, 2]);
 
     console.log('   ✅ Field-stratified packing in descending weight order verified');
   }
@@ -137,51 +137,98 @@ async function runM2Tests() {
   console.log('3. Testing dynamic candidate capacity scaling (up to 32,768)...');
   {
     // Formula: min(32768, max(8192, docCount * fieldCount * 0.1))
-    // Small corpus: 10 docs * 2 fields * 0.1 = 2 -> min capacity = 8192
-    const smallDocs = Array.from({ length: 10 }, (_, i) => ({
-      id: `id-${i}`,
-      title: `Title ${i}`
-    }));
-    const smallIndex = await DocumentIndex.create(smallDocs, {
-      fields: ['title'],
-      preferGpu: false
-    });
-    assert.strictEqual((smallIndex as any).candidateCapacity, 8192);
+    //
+    // `candidateCapacity` is an internal budget with no public getter, so it
+    // is verified through the caller-visible overflow contract instead of a
+    // private field read:
+    //   candidateCount = min(totalMatches, candidateCapacity)
+    //   hasOverflow    = totalMatches > candidateCapacity
+    //   + the diagnostics overflow warning literally names the effective
+    //     capacity ("candidate pool capacity N"), so an unclamped 50000,
+    //     an unclamped 100, a leaked NaN, or a missing scaling formula each
+    //     produce a distinguishable observation.
 
-    // Explicit candidateCapacity override clamped to 32,768
-    const largeCapIndex = await DocumentIndex.create(smallDocs, {
-      fields: ['title'],
-      candidateCapacity: 50000,
-      preferGpu: false
-    });
-    assert.strictEqual((largeCapIndex as any).candidateCapacity, 32768);
-
-    // Explicit candidateCapacity clamped to minimum 8192
-    const minCapIndex = await DocumentIndex.create(smallDocs, {
-      fields: ['title'],
-      candidateCapacity: 100,
-      preferGpu: false
-    });
-    assert.strictEqual((minCapIndex as any).candidateCapacity, 8192);
-
-    // Large simulated corpus scaling
-    const largeDocs = Array.from({ length: 20000 }, (_, i) => ({
+    // Default formula scaling: 100000 docs * 1 field * 0.1 = 10000
+    const scaledDocs = Array.from({ length: 100000 }, (_, i) => ({
       id: `id-${i}`,
-      f1: `v1-${i}`,
-      f2: `v2-${i}`
+      f1: 'boost'
     }));
-    // 20,000 docs * 2 fields * 0.1 = 4,000 -> still 8192
-    // If 100,000 docs * 2 fields * 0.1 = 20,000 -> 20,000
-    const mediumDocs = Array.from({ length: 100000 }, (_, i) => ({
-      id: `id-${i}`,
-      f1: `v1-${i}`
-    }));
-    // 100,000 docs * 1 field * 0.1 = 10,000
-    const scaledIndex = await DocumentIndex.create(mediumDocs, {
+    const scaledIndex = await DocumentIndex.create(scaledDocs, {
       fields: ['f1'],
       preferGpu: false
     });
-    assert.strictEqual((scaledIndex as any).candidateCapacity, 10000);
+    try {
+      const scaledRes = await scaledIndex.search('boost', { mode: 'substring', diagnostics: true, limit: 5 });
+      assert.strictEqual(scaledRes.totalMatches, 100000, 'Every scaled-corpus document must match');
+      assert.strictEqual(scaledRes.hasOverflow, true, 'Scaled corpus must exceed the computed capacity');
+      assert.strictEqual(scaledRes.candidateCount, 10000, 'Effective capacity must scale to 10000 (100000 * 1 * 0.1)');
+      assert(
+        scaledRes.diagnostics?.warnings?.some((w) => w.includes('candidate pool capacity 10000')),
+        'Overflow warning must report the computed 10000 capacity'
+      );
+    } finally {
+      scaledIndex.destroy();
+    }
+
+    // Explicit candidateCapacity override clamped to 32,768:
+    // 35000 matches overflow ONLY because the 50000 request was clamped down
+    // to 32768 (unclamped, 35000 < 50000 would not overflow).
+    const largeCapDocs = Array.from({ length: 35000 }, (_, i) => ({
+      id: `id-${i}`,
+      f1: 'boost'
+    }));
+    const largeCapIndex = await DocumentIndex.create(largeCapDocs, {
+      fields: ['f1'],
+      candidateCapacity: 50000,
+      preferGpu: false
+    });
+    try {
+      const clampRes = await largeCapIndex.search('boost', { mode: 'substring', diagnostics: true, limit: 5 });
+      assert.strictEqual(clampRes.hasOverflow, true, '35000 matches must overflow the clamped 32768 capacity');
+      assert.strictEqual(clampRes.candidateCount, 32768, 'An override of 50000 must clamp down to 32768');
+      assert(
+        clampRes.diagnostics?.warnings?.some((w) => w.includes('candidate pool capacity 32768')),
+        'Overflow warning must report the clamped 32768 capacity'
+      );
+    } finally {
+      largeCapIndex.destroy();
+    }
+
+    // Explicit low override clamped up to minimum 8192, and NaN resets to
+    // 8192: an unclamped user cap of 100 (or a leaked NaN) would name a
+    // different capacity in the overflow warning.
+    const minCapDocs = Array.from({ length: 9000 }, (_, i) => ({
+      id: `id-${i}`,
+      f1: 'boost'
+    }));
+    const minCapIndex = await DocumentIndex.create(minCapDocs, {
+      fields: ['f1'],
+      candidateCapacity: 100,
+      preferGpu: false
+    });
+    const nanCapIndex = await DocumentIndex.create(minCapDocs, {
+      fields: ['f1'],
+      candidateCapacity: NaN,
+      preferGpu: false
+    });
+    try {
+      const clampedScenarios = [
+        { name: 'candidateCapacity:100 clamps up to 8192', idx: minCapIndex },
+        { name: 'candidateCapacity:NaN resets to 8192', idx: nanCapIndex }
+      ] as const;
+      for (const scenario of clampedScenarios) {
+        const res = await scenario.idx.search('boost', { mode: 'substring', diagnostics: true, limit: 5 });
+        assert.strictEqual(res.hasOverflow, true, `${scenario.name}: 9000 matches must overflow capacity 8192`);
+        assert.strictEqual(res.candidateCount, 8192, `${scenario.name}: effective capacity must clamp to 8192`);
+        assert(
+          res.diagnostics?.warnings?.some((w) => w.includes('candidate pool capacity 8192')),
+          `${scenario.name}: warning must report the clamped 8192 capacity`
+        );
+      }
+    } finally {
+      nanCapIndex.destroy();
+      minCapIndex.destroy();
+    }
 
     // WebGPUEngine ensureCandidateCapacity verification
     const gpuEngine = new WebGPUEngine();
@@ -616,15 +663,18 @@ async function runM2Tests() {
   // =========================================================================
   console.log('11. Testing multi-agent review hardening and validation guards...');
   {
-    // 11a. candidateCapacity NaN / negative handling
+    // 11a. candidateCapacity NaN handling
     const docs = [{ id: '1', title: 'Test Document', body: 'Content' }];
     const nanCapIndex = await DocumentIndex.create(docs, {
       fields: ['title', 'body'],
       preferGpu: false,
       candidateCapacity: NaN
     });
-    // Internal candidate capacity safely clamped to default 8192
-    assert.strictEqual((nanCapIndex as any).candidateCapacity, 8192);
+    // A leaked NaN capacity would surface as candidateCount = min(matches, NaN) = NaN;
+    // a clamped NaN resets to the 8192 floor, so this 1-match search reports candidateCount 1.
+    const nanRes = await nanCapIndex.search('Test');
+    assert.strictEqual(nanRes.candidateCount, 1, 'NaN candidateCapacity must not leak into candidateCount');
+    assert.strictEqual(nanRes.hasOverflow, false, 'A single match must not overflow the clamped capacity');
     nanCapIndex.destroy();
 
     // 11b. WebGPUEngine ensureCandidateCapacity NaN handling
