@@ -1,96 +1,120 @@
-# Browser-Native Fuzzy Search with WebGPU & CPU
+# webgpu-search
 
 [![Live Demo](https://img.shields.io/badge/demo-online-brightgreen.svg)](https://webgpu-search.vercel.app)
 [![npm version](https://img.shields.io/npm/v/webgpu-search.svg)](https://www.npmjs.com/package/webgpu-search)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-An ultra-fast fuzzy and substring search engine powered by parallel **WebGPU compute shaders (WGSL)** on retained VRAM, backed by a bit-exact **CPU exact scorer** and opt-in **uFuzzy**, with Web Worker offloading that keeps search work completely off the main thread.
+Fuzzy and substring search for the browser, powered by WebGPU compute shaders with a bit-exact CPU fallback and first-class Web Worker support.
 
-> ℹ️ **Text pipeline:** every string is normalized through a spec-compliant, code-point-safe Unicode pipeline (`u32` scalar packing, `CaseFolding-16.0.0`, dataset container). See [`docs/text-normalization.md`](./docs/text-normalization.md) and [`docs/snapshot-format.md`](./docs/snapshot-format.md).
+Datasets are Unicode-normalized once and packed into `u32` token streams loaded into **retained VRAM**, so each keystroke uploads a 32-byte uniform header instead of the corpus. WGSL compute shaders score up to 8,192 candidates per query into a single compact readback buffer. Below the crossover threshold (default 30,000 records), or wherever WebGPU isn't available, a **CPU exact scorer** runs the same deterministic ranking — results are identical to GPU output by `(score DESC, index ASC)`.
 
-👉 **[Product site](https://webgpu-search.vercel.app)** · [Try the homepage benchmark](https://webgpu-search.vercel.app/#benchmark) — WebGPU and exact CPU vs uFuzzy and Fuse.js, measured live in your browser.
+**[Live demo](https://webgpu-search.vercel.app)** — includes a benchmark comparing WebGPU, exact CPU, uFuzzy, and Fuse.js, measured live in your browser.
 
----
+## Features
 
-## ⚡ Monorepo Structure
+- **WebGPU compute search** — retained buffer scanning in WGSL; a 32-byte uniform upload per query, not a dataset re-upload.
+- **Deterministic CPU/GPU parity** — a bit-exact CPU scorer with strict tie-breaking, so results are byte-identical between engines.
+- **Automatic routing** — configurable crossover threshold (`threshold`, default 30,000 records); CPU-only fallback for `token`/`prefix` modes, typo tolerance, and devices without WebGPU.
+- **Typed documents** — `DocumentIndex` for multi-field, weighted search with columnar filters, facet aggregation, autocomplete/did-you-mean, Unicode-safe highlighting, live mutations, and CRC32-checked snapshot persistence.
+- **Off the main thread** — `webgpu-search/worker` entry and `SearchWorkerClient` run the whole index in a worker, returning compact `{ index, score }` hits enriched on the main thread; stale in-flight queries abort on rapid typing.
+- **Portable** — ESM + CJS, SSR/Node/Worker-safe (no unguarded DOM globals); one runtime dependency (`@leeoniya/ufuzzy`, the opt-in CPU fuzzy backend).
 
-- **[`packages/webgpu-search`](./packages/webgpu-search)**: Zero-dependency core library published to npm. Provides high-level `SearchIndex` with dynamic crossover routing, low-level `WebGPUEngine` and `CPUEngine`, dataset binary serialization, and SSR/Worker-safe memory primitives.
-- **[`apps/site`](./apps/site)**: Product homepage with an embedded live WebGPU-vs-CPU-vs-uFuzzy-vs-Fuse.js comparison (`#benchmark`). Published output is `apps/site/dist` (see `vercel.json`; `/benchmark/` and `/compare/` redirect to `/#benchmark`).
-- **[`apps/benchmark`](./apps/benchmark)**: Full local benchmark harness across 10,000 to 2,000,000 records and ASCII, CJK, and emoji/mixed-script corpora (dev server on `:5173`; used by `bun run test:browser` / `bun run test:benchmark`).
-- **[`examples/`](./examples)**: Framework integration recipes (`react`, `vue`, `svelte`, `vanilla`) — not deployed routes.
-- **[`scripts/bench-data/`](./scripts/bench-data)**: Deterministic benchmark fixture generators (moved out of the removed `apps/*` proof apps).
-
----
-
-## 🚀 Quick Start
+## Installation
 
 ```bash
-# Clone and install dependencies
-git clone https://github.com/codewarnab/webgpu-search.git
-cd webgpu-search
-bun install
-
-# Run the site and workspace dev servers
-bun run dev
+npm install webgpu-search
 ```
 
-Open the homepage at **`http://localhost:5178`**. Run `bun run build` to produce the complete static site at `apps/site/dist`.
+Runs anywhere JavaScript does; the GPU path needs a WebGPU-capable browser. See the [support matrix](./docs/support-matrix.md) for tested browsers and the CPU-only baseline.
 
----
-
-## 💻 Library Usage
+## Quick start
 
 ```ts
-import {
-  SearchIndex,
-  QueryTooLongError,
-  IncompatibleIndexError,
-  ProfileMismatchError,
-  IncompatibleOptionError
-} from 'webgpu-search';
+import { SearchIndex } from 'webgpu-search';
 
-// 1. Create index from an array of strings
+// 1. Create an index from an array of strings
 const index = await SearchIndex.create([
   'packages/core/src/AuthController.ts',
   'src/views/ユーザー設定/Profile.vue',
   'docs/api/Straße_v2.md',
   'assets/icons/🧑‍💻_developer.png'
 ], {
-  threshold: 30_000,           // WebGPU vs CPU crossover threshold
-  caseSensitive: false,        // Fixed at construction: NFC + C+F fold
-  textProfile: 'unicode-default'
+  threshold: 30_000,      // records below this route to the CPU scorer
+  caseSensitive: false    // fixed at construction: NFC + CaseFolding 16.0.0
 });
 
-// 2. Query with search mode and limit
+// 2. Query
 const response = await index.search('ユーザー', {
-  mode: 'fuzzy',               // 'fuzzy' or 'substring'
-  limit: 25,                   // Clamped to 1..8192
-  onQueryTooLong: 'throw'      // 'throw' (QueryTooLongError) or 'cpu-fallback'
+  mode: 'fuzzy',                // 'fuzzy' | 'substring' | 'token' | 'prefix'
+  limit: 25,                    // clamped to 1..8192
+  onQueryTooLong: 'throw'       // 'throw' (QueryTooLongError) or 'cpu-fallback'
 });
 
-console.log(`Matched ${response.totalMatches} records in ${response.timings.totalMs.toFixed(2)}ms via ${response.engine}`);
+console.log(`${response.totalMatches} matches in ${response.timings.totalMs.toFixed(2)}ms via ${response.engine}`);
 for (const hit of response.results) {
   console.log(`[Score: ${hit.score}] #${hit.index}: ${hit.text}`);
 }
 
-// 3. Inspect telemetry and VRAM footprint
+// 3. Inspect memory footprint and free VRAM when done
 const stats = index.getStats();
-console.log(`Allocated VRAM: ${(stats.vramAllocatedBytes / 1024).toFixed(1)} KB for ${stats.tokenCount} tokens`);
-
-// 4. Free GPU memory when finished
+console.log(`VRAM: ${(stats.vramAllocatedBytes / 1024).toFixed(1)} KB for ${stats.tokenCount} tokens`);
 index.destroy();
 ```
 
-### Low-Level Pipeline & Binary Serialization
+## Documents, filters, facets, autocomplete
+
+For anything beyond a flat string list, use `DocumentIndex`: weighted multi-field search over typed records, structured filters and facets, autocomplete suggestions, highlighting, incremental mutations, and versioned snapshots.
 
 ```ts
-import {
-  WebGPUEngine,
-  CPUEngine,
-  packDataset,
-  serializeDataset,
-  deserializeDataset
-} from 'webgpu-search';
+import { DocumentIndex } from 'webgpu-search';
+
+const index = await DocumentIndex.create(records, {
+  fields: [
+    'title',                          // weight 1 by default
+    { name: 'summary', weight: 0.5 }
+  ],
+  filterFields: [
+    { name: 'category', type: 'string' }
+  ]
+});
+
+const response = await index.search('gpu shader', {
+  limit: 10,
+  filter: { category: 'GPU' },
+  facets: { category: { type: 'terms', field: 'category' } },
+  autocomplete: true                  // prefix + did-you-mean suggestions
+});
+
+for (const hit of response.results) {
+  console.log(hit.id, hit.score, hit.matchedField); // hit.doc is the original record
+}
+
+const suggestions = await index.autocomplete('gpu');
+```
+
+See [`docs/public-api.md`](./docs/public-api.md) for the frozen 1.x contract (field schemas, filter expression syntax, error types, versioning policy).
+
+## Worker offloading
+
+`SearchWorkerClient` mirrors `DocumentIndex` over `postMessage`:
+
+```ts
+import { SearchWorkerClient } from 'webgpu-search';
+
+const client = new SearchWorkerClient();
+await client.init(records, { fields: ['title', 'summary'] });
+const response = await client.search('gpu', { limit: 10, signal: abortController.signal });
+await client.destroy(); // terminates the owned worker
+```
+
+The worker returns compact `{ index, score }` hit arrays; only matched documents are cloned back, so multi-million-record corpora never stall the UI thread. For custom worker bundling, use the dedicated `webgpu-search/worker` entry (`startSearchWorker`, `isDedicatedWorker`); it only calls `postMessage` inside a dedicated worker scope.
+
+## Low-level pipeline
+
+`SearchIndex` composes public primitives that you can drive directly — packing, binary serialization, and the engines:
+
+```ts
+import { WebGPUEngine, CPUEngine, packDataset, serializeDataset, deserializeDataset } from 'webgpu-search';
 
 // 1. Pack strings into normalized u32 Unicode scalar tokens
 const packed = packDataset(rawStrings, { normalized: true });
@@ -98,131 +122,73 @@ const packed = packDataset(rawStrings, { normalized: true });
 // 2. Serialize into the dataset binary container (magic 0x55324632 + CRC32 checksum)
 const buffer: ArrayBuffer = serializeDataset(packed);
 
-// 3. Restore and validate with fail-closed integrity checks
+// 3. Restore with fail-closed integrity checks
 const restored = deserializeDataset(buffer);
 
-// 4. Load directly into WebGPU compute engine
+// 4. Load into the WebGPU compute engine
 const gpu = new WebGPUEngine();
 await gpu.init();
 await gpu.loadDataset(restored);
-
 const result = await gpu.search('test', { mode: 'substring', limit: 50 });
-console.log(`GPU execution: ${result.timings.gpuExecutionMs}ms, Readback: ${result.timings.readbackMs}ms`);
+
+console.log(`GPU: ${result.timings.gpuExecutionMs}ms, readback: ${result.timings.readbackMs}ms`);
 gpu.destroy();
 ```
 
----
+`CPUEngine` (`searchWithUFuzzy` / `searchNaiveScan`) implements the same contract without a GPU.
 
-## 📊 Reproducible Multi-Corpus Benchmark Results
+## How it works
 
-Below are benchmark results generated via the automated browser benchmark runner (`bun run test:benchmark`).
+**Retained VRAM vs cold upload.** Transferring ~64 MB of packed `u32` tokens over the PCIe bus costs ~8–20 ms; re-uploading on every keystroke would make CPU search always win. Retained datasets change the per-query cost to a 32-byte uniform header plus a 512-byte query buffer (up to 128 `u32` code points).
 
-> **⚠️ Hardware Qualification Notice**:
-> The automated suite runs in headless Chromium using software Vulkan (`Google SwiftShader / LLVMpipe`) in containerized environments. Cells below are explicitly qualified as **`pending-hardware`** per [`docs/text-normalization.md`](./docs/text-normalization.md) §5. On physical dedicated GPUs (NVIDIA RTX, Apple Silicon Metal, Intel Iris Xe), GPU compute times are dramatically faster due to hardware memory bandwidth and parallel execution units.
+**Candidate compaction & deterministic sorting.** WGSL shaders write up to 8,192 scored candidates (`{ index: u32, score: i32 }`) into a compact 65,544-byte output buffer via atomic counter. Both engines sort by `(score DESC, index ASC)` in signed 32-bit integer arithmetic — outside buffer overflow, rankings are bit-identical between WebGPU and CPU.
 
-### 1. Exact Substring Benchmark Matrix
+**Device safety.** Device acquisition routes through `WebGPUContextManager` / `GpuDevicePool`; device loss triggers automatic re-acquisition via `rebuildGpu()`, never a plain `navigator.gpu.requestDevice()` per query.
 
-| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Exact (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
-|---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **10,000** | ASCII | 1.71 MB | 8.50 / 10.18 ms | 1.50 / 1.60 ms | 1.70 ms | 1.10 ms | pending-hardware |
-| **100,000** | ASCII | 16.88 MB | 32.60 / 36.70 ms | 15.00 / 16.18 ms | 15.80 ms | 11.40 ms | pending-hardware |
-| **10,000** | CJK Hanzi/Kana | 1.46 MB | 7.40 / 8.88 ms | 1.70 / 2.18 ms | N/A* | 2.90 ms | pending-hardware |
-| **100,000** | CJK Hanzi/Kana | 14.41 MB | 32.30 / 37.44 ms | 16.50 / 18.74 ms | N/A* | 25.50 ms | pending-hardware |
-| **10,000** | Emoji Astral | 2.03 MB | 7.50 / 10.16 ms | 2.40 / 4.22 ms | N/A* | 4.00 ms | pending-hardware |
-| **100,000** | Emoji Astral | 20.08 MB | 45.00 / 75.82 ms | 21.20 / 30.50 ms | N/A* | 36.90 ms | pending-hardware |
+## Benchmarks
 
-*\*Note: uFuzzy is designed primarily for Latin/ASCII tokenized text; non-Latin/Emoji scripts yield 0 hits without custom tokenizers.*
+Skip hand-gathered numbers — run the comparison in your own browser: the [live demo](https://webgpu-search.vercel.app/#benchmark) measures WebGPU vs exact CPU vs uFuzzy vs Fuse.js against your real GPU and reports per-engine timings.
 
-### 2. Fuzzy Subsequence Benchmark Matrix
-
-| Dataset Size | Corpus | Packed VRAM | GPU Retained (med / p95) | CPU Exact (med / p95) | uFuzzy (med) | JS Native (med) | Qualification |
-|---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **10,000** | ASCII | 1.71 MB | 9.00 / 9.40 ms | 1.60 / 3.38 ms | 1.60 ms | 1.10 ms | pending-hardware |
-| **100,000** | ASCII | 16.88 MB | 58.00 / 63.46 ms | 16.10 / 34.22 ms | 15.40 ms | 10.70 ms | pending-hardware |
-| **10,000** | CJK Hanzi/Kana | 1.46 MB | 8.90 / 11.82 ms | 2.10 / 2.20 ms | N/A* | 2.90 ms | pending-hardware |
-| **100,000** | CJK Hanzi/Kana | 14.41 MB | 48.70 / 84.86 ms | 14.10 / 14.88 ms | N/A* | 23.70 ms | pending-hardware |
-| **10,000** | Emoji Astral | 2.03 MB | 8.00 / 14.94 ms | 2.10 / 3.90 ms | N/A* | 3.70 ms | pending-hardware |
-| **100,000** | Emoji Astral | 20.08 MB | 68.80 / 76.48 ms | 17.80 / 18.10 ms | N/A* | 37.40 ms | pending-hardware |
-
----
-
-## 🔬 Architectural Deep-Dive
-
-### 1. The Retained VRAM vs Cold Upload Reality
-- **Cold Upload**: Transferring 1,000,000 records (~64 MB packed `u32` tokens) over the PCIe bus via `queue.writeBuffer` takes **~8–20 ms**. If an application re-uploads data on every keystroke, CPU search will always win.
-- **Retained VRAM**: When dataset storage buffers are pre-loaded once into GPU VRAM, subsequent keystrokes only upload a **32-byte uniform header** and a **512-byte persistent storage query buffer** (up to 128 `u32` code points).
-
-### 2. Candidate Compaction & Deterministic Sorting
-- WebGPU buffer readbacks have an inherent synchronization floor (~1ms to 3ms). Below 30,000 records, the CPU exact scorer completes in <2ms, making CPU faster at small scales.
-- **Candidate Pool Compaction**: The WGSL compute shaders write up to **8,192 scored candidate matches** (`{ index: u32, score: i32 }`) into a compact 65,544-byte output buffer using atomic counters (`atomicAdd(&out.count, 1u)`).
-- **Strict Deterministic Tie-Breaking**: Both WebGPU readback and CPU exact fallback sort matches by `(score DESC, index ASC)` using signed 32-bit integer arithmetic. When `hasOverflow === false`, result rankings and scores are bit-exact identical between WebGPU and CPU.
-
-### 3. Web Worker Offloading and String-Isolated Enrichment
-Searching millions of records directly on the browser main thread can cause frame drops and UI freezes.
-- **String-Isolated Enrichment**: The worker executes compute pipelines and returns compact `{ index, score }[]` hit arrays (~8 bytes per match), while the main thread resolves the display strings (`text`) locally. This eliminates massive structured-clone serialization stalls between worker and UI thread.
-- **Cancellation & Freshness**: Monotonic query IDs (`latestQueryId`) and `AbortController` signals drop stale in-flight passes during rapid user typing.
-
----
-
-## 🛠️ Verification & Quality Assurance Gates
-
-All verification commands are executable via Bun or npm:
+Reproducible multi-corpus runs (10k–2M records; ASCII, CJK, emoji) come from the automated headless runner:
 
 ```bash
-# 1. Validate offline WGSL compute shader syntax and uniform alignment
-bun run check:shaders
-
-# 2. Run TypeScript typechecks across all monorepo workspaces
-bun run typecheck
-
-# 3. Execute in-memory headless unit tests (25/25 suites via vgpu/mock)
-bun run test:headless
-
-# 4. Execute differential parity suite (117 assertions comparing CPU and GPU contracts)
-bun run test:parity
-
-# 5. Run headless browser regression tests in Chrome
-bun run test:browser
-
-# 6. Execute full multi-corpus benchmark suite in headless Chrome
 bun run test:benchmark -- --fast
+```
 
-# 7. Verify bundle size budget
+Headless CI uses software Vulkan (SwiftShader), so its GPU columns are qualified `pending-hardware`; on real hardware (NVIDIA, Apple Silicon, Intel) GPU times drop dramatically. Frozen fixtures and methodology: [`docs/benchmarks.md`](./docs/benchmarks.md).
+
+## Repository layout
+
+- [`packages/webgpu-search`](./packages/webgpu-search) — the core library published to npm.
+- [`apps/site`](./apps/site) — product homepage with the embedded live benchmark (`/#benchmark`; built to `apps/site/dist`, dev server on `:5178`).
+- [`apps/benchmark`](./apps/benchmark) — full local benchmark harness (dev server on `:5173`; used by `test:browser` / `test:benchmark`).
+- [`examples/`](./examples) — integration recipes for React, Vue, Svelte, and vanilla.
+- [`scripts/bench-data/`](./scripts/bench-data) — deterministic benchmark fixture generators.
+
+## Verification
+
+```bash
+bun install
+
+bun run check:shaders    # validate offline WGSL syntax + uniform alignment
+bun run typecheck        # TypeScript across all workspaces
+bun run test:headless    # in-memory unit suites (vgpu/mock)
+bun run test:parity      # differential CPU/GPU parity harness
+bun run test:browser     # headless browser regression tests
+bun run test:benchmark   # full multi-corpus benchmark suite
 bun run check:bundle-size
 ```
 
----
+## Documentation
 
-## ⚠️ Breaking Changes (next major)
+- [Snapshot format](./docs/snapshot-format.md) — versioned binary persistence, compatibility, IndexedDB notes.
+- [Public API freeze](./docs/public-api.md) — frozen 1.x contract and deprecation policy.
+- [Support matrix + CPU baseline](./docs/support-matrix.md) — browsers, OS, runtimes, `ufuzzy` opt-in rules.
+- [Text normalization](./docs/text-normalization.md) — normative preprocessing spec, version caps, scoring formulas.
+- [Naming conventions](./docs/naming-conventions.md) — domain-first naming rules enforced by `lint:naming`.
+- [Benchmarks](./docs/benchmarks.md) — frozen fixtures, headless CPU baseline, hardware qualification rules.
+- [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md) · [Code of Conduct](./CODE_OF_CONDUCT.md)
 
-The deprecated aliases were removed. Update call sites before upgrading:
+## License
 
-- `cpuAlgorithm` / `'parity'` → `cpuScorer: 'exact' | 'ufuzzy'` (default `'exact'`). Unknown scorers throw `IncompatibleOptionError` fail-closed.
-- `extensions` / `SearchExtensionHooks` / `normalizeSearchExtensionHooks` → `hooks` / `SearchHooks` / `normalizeSearchHooks`.
-- `suggest` option / `SuggestOptions` / `SUGGEST_*` / `normalizeSuggestOptions` → `autocomplete` / `AutocompleteOptions` / `AUTOCOMPLETE_*` / `normalizeAutocompleteOptions` (`SuggestionItem` / `SuggestResponse` / `autocomplete()` stay canonical).
-- `folded` public fields → `normalized` (e.g. `packDataset(..., { normalized: true })`, `getStats().normalized`).
-- `FORMAT_VERSION*` / `U2D4_*` / `SERIALIZED_*` → `DATASET_*` / `SNAPSHOT_*` / `LEGACY_SNAPSHOT_*` (wire magic bytes unchanged).
-- `countUnicodeCodePoints`, `isAsciiTokens` / `isPrintableAsciiTokens`, `CPUEngine.searchUFuzzy` / `searchNative` removed (low-level CPU entry points are `searchWithUFuzzy` / `searchNaiveScan`).
-- `powerPreference` is now forwarded to `GpuDevicePool.acquireDevice` (`navigator.gpu.requestAdapter({ powerPreference })`); unknown values throw `IncompatibleOptionError` fail-closed, even on CPU-only paths.
-
-`SCORING_VERSION = 'parity-v1'` keeps its value; differential "parity harness" prose is unchanged.
-
----
-
-## 📄 Documentation
-
-- [**Snapshot format (`docs/snapshot-format.md`)**](./docs/snapshot-format.md): Versioned binary persistence, compatibility, and IndexedDB notes.
-- [**Public API freeze (`docs/public-api.md`)**](./docs/public-api.md): Frozen 1.x contract — entry points, class contracts, result ordering, response echoes, errors, versioning, and deprecation policy.
-- [**Support matrix + CPU baseline (`docs/support-matrix.md`)**](./docs/support-matrix.md): Browser/OS/runtime support, tested CPU-only baseline, `ufuzzy` opt-in rules, and the named compatibility suite.
-- [**Text normalization (`docs/text-normalization.md`)**](./docs/text-normalization.md): Normative specification for preprocessing pipeline, version caps, delimiter sets, and scoring formulas.
-- [**Naming conventions (`docs/naming-conventions.md`)**](./docs/naming-conventions.md): Domain-first naming rules enforced by `lint:naming`.
-- [**Benchmarks (`docs/benchmarks.md`)**](./docs/benchmarks.md): Frozen fixtures, headless CPU baseline, and browser/WebGPU separation.
-- [**Contributing (`CONTRIBUTING.md`)**](./CONTRIBUTING.md): Setup, commands, PR process, and release workflow.
-- [**Security (`SECURITY.md`)**](./SECURITY.md): Supported versions and vulnerability reporting.
-- [**Code of Conduct (`CODE_OF_CONDUCT.md`)**](./CODE_OF_CONDUCT.md): Community standards.
-
----
-
-## 📄 License
-
-MIT — see [LICENSE](./LICENSE). © [codewarnab](https://github.com/codewarnab) and webgpu-search contributors.
+[MIT](./LICENSE) — © [codewarnab](https://github.com/codewarnab) and webgpu-search contributors.
