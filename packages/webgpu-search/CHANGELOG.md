@@ -1,5 +1,12 @@
 # webgpu-search
 
+## 1.0.2
+
+### Patch Changes
+
+- d005cf6: Preserve whole emoji ZWJ sequences and regional-indicator flag pairs in highlight ranges when Intl.Segmenter is unavailable.
+- 55d27be: Add a frozen snapshot from the published 1.0.1 package to verify backward-compatible restoration, document contents, and ordered search scores in CI.
+
 ## 1.0.1
 
 ### Patch Changes
